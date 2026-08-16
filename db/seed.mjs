@@ -1,15 +1,42 @@
 #!/usr/bin/env node
 /**
- * Llena ime_mantenimiento con los datos de prueba (mismo seed que App.jsx).
+ * Llena la base con datos de prueba.
  *
- * Uso:
+ * Supabase (lee app/.env):
  *   node db/seed.mjs
  *
- * Variables opcionales:
- *   PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres PGDATABASE=ime_mantenimiento
+ * Postgres local:
+ *   node db/seed.mjs --local
  */
 
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  for (const line of fs.readFileSync(filePath, "utf8").split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const i = t.indexOf("=");
+    if (i < 0) continue;
+    const k = t.slice(0, i).trim();
+    let v = t.slice(i + 1).trim();
+    if (
+      (v.startsWith('"') && v.endsWith('"')) ||
+      (v.startsWith("'") && v.endsWith("'"))
+    ) {
+      v = v.slice(1, -1);
+    }
+    if (!(k in process.env)) process.env[k] = v;
+  }
+}
+
+loadEnvFile(path.join(__dirname, "../app/.env"));
+loadEnvFile(path.join(__dirname, "../.env"));
 
 const PRESUPUESTO_MENSUAL_SEDE = 100;
 const FEE_SERVICIO_SEDE = 450;
@@ -476,34 +503,83 @@ function seedData() {
   };
 }
 
-const host = process.env.PGHOST || "127.0.0.1";
-const port = process.env.PGPORT || "5432";
-const user = process.env.PGUSER || "postgres";
-const password = process.env.PGPASSWORD || "postgres";
-const database = process.env.PGDATABASE || "ime_mantenimiento";
-
 const payload = seedData();
-const json = JSON.stringify(payload);
-const sql = `SELECT api.put_app_state($seed$${json}$seed$::jsonb) IS NOT NULL AS ok;\n`;
+const forceLocal = process.argv.includes("--local");
+const restUrl = (process.env.VITE_POSTGREST_URL || "").replace(/\/$/, "");
+const anonKey = process.env.VITE_SUPABASE_ANON_KEY || "";
+const useSupabase =
+  !forceLocal &&
+  restUrl &&
+  !restUrl.startsWith("/rest") &&
+  anonKey;
 
-const result = spawnSync(
-  "psql",
-  ["-h", host, "-p", port, "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-c", sql],
-  {
-    env: { ...process.env, PGPASSWORD: password },
-    encoding: "utf8",
-  },
-);
-
-if (result.status !== 0) {
-  console.error(result.stderr || result.stdout || "Error al ejecutar psql");
-  console.error("\nAsegúrate de haber corrido antes: psql ... -f db/init.sql");
-  process.exit(result.status || 1);
+function printUsers() {
+  console.log("\nDatos de prueba cargados.");
+  console.log("Usuarios:");
+  for (const u of payload.usuarios) {
+    console.log(`  - ${u.nombre} (${u.rol}): ${u.clave}`);
+  }
 }
 
-console.log(result.stdout.trim());
-console.log("\nDatos de prueba cargados.");
-console.log("Usuarios:");
-for (const u of payload.usuarios) {
-  console.log(`  - ${u.nombre} (${u.rol}): ${u.clave}`);
+if (useSupabase) {
+  const res = await fetch(`${restUrl}/rpc/put_app_state`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      apikey: anonKey,
+      Authorization: `Bearer ${anonKey}`,
+    },
+    body: JSON.stringify({ payload }),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    console.error(`Supabase put_app_state: ${res.status}`);
+    console.error(text);
+    console.error(
+      "\n¿Ejecutaste el SQL en Supabase y expusiste el schema api?",
+    );
+    process.exit(1);
+  }
+  console.log("OK → Supabase", restUrl);
+  printUsers();
+} else {
+  const host = process.env.PGHOST || "127.0.0.1";
+  const port = process.env.PGPORT || "5432";
+  const user = process.env.PGUSER || "postgres";
+  const password = process.env.PGPASSWORD || "postgres";
+  const database = process.env.PGDATABASE || "ime_mantenimiento";
+  const json = JSON.stringify(payload);
+  const sql = `SELECT api.put_app_state($seed$${json}$seed$::jsonb) IS NOT NULL AS ok;\n`;
+
+  const result = spawnSync(
+    "psql",
+    [
+      "-h",
+      host,
+      "-p",
+      port,
+      "-U",
+      user,
+      "-d",
+      database,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      sql,
+    ],
+    {
+      env: { ...process.env, PGPASSWORD: password },
+      encoding: "utf8",
+    },
+  );
+
+  if (result.status !== 0) {
+    console.error(result.stderr || result.stdout || "Error al ejecutar psql");
+    console.error("\nPara Supabase configura app/.env y vuelve a correr sin --local.");
+    process.exit(result.status || 1);
+  }
+
+  console.log(result.stdout.trim());
+  printUsers();
 }

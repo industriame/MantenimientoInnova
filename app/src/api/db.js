@@ -1,18 +1,32 @@
 /**
- * Cliente PostgREST para el estado de la app.
- * Usa RPC atómicos: get_app_state / put_app_state / has_app_data
- * (las tablas viven en el schema `data`; ver db/init.sql)
+ * Cliente PostgREST / Supabase para el estado de la app.
+ * RPCs: has_app_data, get_app_state, put_app_state (schema api)
+ *
+ * Local:  VITE_POSTGREST_URL=/rest  (proxy Vite → PostgREST :3000)
+ * Supabase:
+ *   VITE_POSTGREST_URL=https://TU_REF.supabase.co/rest/v1
+ *   VITE_SUPABASE_ANON_KEY=eyJ...
  */
 
 const BASE = (import.meta.env.VITE_POSTGREST_URL || "/rest").replace(/\/$/, "");
+const ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
+
+function headers() {
+  const h = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  if (ANON_KEY) {
+    h.apikey = ANON_KEY;
+    h.Authorization = `Bearer ${ANON_KEY}`;
+  }
+  return h;
+}
 
 async function rpc(name, body) {
   const res = await fetch(`${BASE}/rpc/${name}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
+    headers: headers(),
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) {
