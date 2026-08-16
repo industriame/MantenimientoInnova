@@ -1,0 +1,16 @@
+# PostgREST frente a Postgres (contenedor ime-postgres en el host :5432)
+# Uso: docker compose -f db/docker-compose.postgrest.yml up -d
+
+services:
+  postgrest:
+    image: postgrest/postgrest:v12.2.3
+    container_name: ime-postgrest
+    ports:
+      - "3000:3000"
+    environment:
+      PGRST_DB_URI: postgres://authenticator:postgres@host.docker.internal:5432/ime_mantenimiento
+      PGRST_DB_SCHEMAS: api
+      PGRST_DB_ANON_ROLE: anon
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

@@ -1396,6 +1396,7 @@ function useSystemData() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [ultimaSync, setUltimaSync] = useState(null);
+  const [syncError, setSyncError] = useState(null);
 
   const snapshotRef = useRef(null); // JSON que este cliente considera vigente
   const escribiendoRef = useRef(false); // evita que el polling pise una escritura
@@ -1418,8 +1419,12 @@ function useSystemData() {
           setData(saved);
         }
         setUltimaSync(new Date());
+        setSyncError(null);
       } catch (e) {
         console.error("No se pudo cargar desde PostgREST", e);
+        setSyncError(
+          "Sin conexión a PostgREST (puerto 3000). Los cambios no se guardarán en la base.",
+        );
         const seed = normalizeData(seedData());
         snapshotRef.current = JSON.stringify(seed);
         setData(seed);
@@ -1442,6 +1447,7 @@ function useSystemData() {
           setData(remote);
         }
         setUltimaSync(new Date());
+        setSyncError(null);
       } catch (_) {
         /* sin conexión: se reintenta al siguiente ciclo */
       }
@@ -1460,14 +1466,20 @@ function useSystemData() {
       snapshotRef.current = JSON.stringify(saved);
       setData(saved);
       setUltimaSync(new Date());
+      setSyncError(null);
+      return true;
     } catch (e) {
       console.error("No se pudo guardar en PostgREST", e);
+      setSyncError(
+        "No se pudo guardar en la base. Arranca PostgREST en el puerto 3000.",
+      );
+      return false;
     } finally {
       escribiendoRef.current = false;
     }
   }, []);
 
-  return { data, persist, loading, ultimaSync };
+  return { data, persist, loading, ultimaSync, syncError };
 }
 
 // Acciones de dominio agrupadas: un solo lugar donde se muta el estado
@@ -7093,11 +7105,18 @@ function FormServicio({ data, initial, onSave, onClose }) {
   const [presupuesto, setPresupuesto] = useState(initial?.presupuesto ?? "");
   const [fecha, setFecha] = useState(initial?.fecha || fmtDate(new Date()));
   const [estado, setEstado] = useState(initial?.estado || "programada");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   const sede = data.sedes.find((s) => s.id === sedeId);
-  const fase = sede?.fases.find((f) => f.id === faseId);
-  const valido =
-    sedeId && faseId && activoId && trabajo.trim() && Number(presupuesto) > 0;
+  const fase = sede?.fases?.find((f) => f.id === faseId);
+  const faltantes = [];
+  if (!sedeId) faltantes.push("sede");
+  if (!faseId) faltantes.push("fase");
+  if (!activoId) faltantes.push("activo");
+  if (!trabajo.trim()) faltantes.push("trabajo");
+  if (!(Number(presupuesto) > 0)) faltantes.push("presupuesto > 0");
+  const valido = faltantes.length === 0;
 
   return (
     <div className="space-y-3">
@@ -7217,27 +7236,56 @@ function FormServicio({ data, initial, onSave, onClose }) {
         </select>
       </Field>
 
+      {!valido && (
+        <p className="text-[11px]" style={{ color: COLORS.rojo }}>
+          Completa: {faltantes.join(", ")}.
+        </p>
+      )}
+      {saveError && (
+        <p className="text-[11px]" style={{ color: COLORS.rojo }}>
+          {saveError}
+        </p>
+      )}
       <button
-        disabled={!valido}
-        onClick={() => {
-          onSave({
-            id: initial?.id,
-            sedeId,
-            faseId,
-            activoId,
-            trabajo: trabajo.trim(),
-            proveedor: proveedor.trim(),
-            presupuesto: Number(presupuesto) || 0,
-            fecha,
-            estado,
-            observaciones: initial?.observaciones || "",
-          });
-          onClose();
+        type="button"
+        disabled={!valido || saving}
+        onClick={async () => {
+          setSaving(true);
+          setSaveError("");
+          try {
+            const ok = await onSave({
+              id: initial?.id,
+              sedeId,
+              faseId,
+              activoId,
+              trabajo: trabajo.trim(),
+              proveedor: proveedor.trim(),
+              presupuesto: Number(presupuesto) || 0,
+              fecha,
+              estado,
+              observaciones: initial?.observaciones || "",
+            });
+            if (ok === false) {
+              setSaveError(
+                "No se pudo guardar en la base. Verifica que PostgREST esté en el puerto 3000.",
+              );
+              return;
+            }
+            onClose();
+          } catch (e) {
+            setSaveError(e?.message || "Error al guardar.");
+          } finally {
+            setSaving(false);
+          }
         }}
         className="w-full py-2.5 rounded-md font-semibold text-sm text-white disabled:opacity-40"
         style={{ background: COLORS.orange }}
       >
-        {initial ? "Guardar cambios" : "Crear servicio"}
+        {saving
+          ? "Guardando…"
+          : initial
+            ? "Guardar cambios"
+            : "Crear servicio"}
       </button>
     </div>
   );
@@ -7254,27 +7302,26 @@ function AdminServicios({ data, persist }) {
 
   const guardar = (srv) => {
     if (srv.id) {
-      persist({
+      return persist({
         ...data,
         servicios: data.servicios.map((x) =>
           x.id === srv.id ? { ...x, ...srv } : x,
         ),
       });
-    } else {
-      const n = data.srvCounter || 1;
-      persist({
-        ...data,
-        servicios: [
-          ...(data.servicios || []),
-          {
-            ...srv,
-            id: uid("srv"),
-            codigo: `SRV-${String(n).padStart(4, "0")}`,
-          },
-        ],
-        srvCounter: n + 1,
-      });
     }
+    const n = data.srvCounter || 1;
+    return persist({
+      ...data,
+      servicios: [
+        ...(data.servicios || []),
+        {
+          ...srv,
+          id: uid("srv"),
+          codigo: `SRV-${String(n).padStart(4, "0")}`,
+        },
+      ],
+      srvCounter: n + 1,
+    });
   };
 
   return (
@@ -10168,7 +10215,7 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
    ========================================================================= */
 
 export default function App() {
-  const { data, persist, loading, ultimaSync } = useSystemData();
+  const { data, persist, loading, ultimaSync, syncError } = useSystemData();
   const [user, setUser] = useState(null);
 
   const vista = () => {
@@ -10219,6 +10266,14 @@ export default function App() {
   return (
     <div className="min-h-screen" style={{ background: COLORS.paper }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;500;600;700&display=swap'); * { font-family: 'Inter', sans-serif; -webkit-tap-highlight-color: transparent; }`}</style>
+      {syncError && (
+        <div
+          className="px-4 py-2 text-xs font-medium text-center"
+          style={{ background: "#FDE8E4", color: COLORS.rojo }}
+        >
+          {syncError}
+        </div>
+      )}
       {loading || !data ? (
         <div
           className="flex items-center justify-center h-screen text-sm"
