@@ -379,6 +379,17 @@ BEGIN
 END;
 $$;
 
+
+CREATE OR REPLACE FUNCTION data.json_num(v text, fallback numeric DEFAULT 0)
+RETURNS numeric LANGUAGE sql IMMUTABLE AS $$
+  SELECT COALESCE(NULLIF(btrim(v), '')::numeric, fallback);
+$$;
+
+CREATE OR REPLACE FUNCTION data.json_int(v text, fallback integer DEFAULT 0)
+RETURNS integer LANGUAGE sql IMMUTABLE AS $$
+  SELECT COALESCE(NULLIF(btrim(v), '')::integer, fallback);
+$$;
+
 -- -----------------------------------------------------------------------------
 -- put_app_state(payload): reemplazo atómico desde el documento de la app
 -- -----------------------------------------------------------------------------
@@ -434,9 +445,9 @@ BEGIN
     ) VALUES (
       s->>'id',
       COALESCE(s->>'nombre', ''),
-      COALESCE((s->>'estudiantes')::integer, 0),
-      COALESCE((s->>'presupuestoPreventivo')::numeric, 100),
-      COALESCE((s->>'feeServicio')::numeric, 0),
+      data.json_int(s->>'estudiantes', 0),
+      data.json_num(s->>'presupuestoPreventivo', 100),
+      data.json_num(s->>'feeServicio', 0),
       COALESCE(s->>'constructor', '')
     );
 
@@ -481,7 +492,7 @@ BEGIN
       COALESCE(p->>'procedimiento', ''),
       COALESCE(p->>'categoria', ''),
       COALESCE(p->>'frecuencia', ''),
-      COALESCE((p->>'duracionValor')::numeric, 0),
+      data.json_num(p->>'duracionValor', 0),
       COALESCE(p->>'duracionUnidad', 'minutos')
     );
 
@@ -515,7 +526,7 @@ BEGIN
       COALESCE(o->>'procedimiento', ''),
       COALESCE(o->>'categoria', ''),
       COALESCE(o->>'frecuencia', ''),
-      COALESCE((o->>'duracionValor')::numeric, 0),
+      data.json_num(o->>'duracionValor', 0),
       COALESCE(o->>'duracionUnidad', 'minutos'),
       o->>'sedeId',
       o->>'faseId',
@@ -562,7 +573,7 @@ BEGIN
       COALESCE(sol->>'resolucion', ''),
       COALESCE(sol->'materiales', '[]'::jsonb),
       COALESCE(sol->>'materialesEstado', ''),
-      COALESCE((sol->>'calificacion')::numeric, 0),
+      data.json_num(sol->>'calificacion', 0),
       COALESCE(sol->>'comentarioCalif', ''),
       COALESCE(sol->'consumos', '[]'::jsonb)
     );
@@ -582,7 +593,7 @@ BEGIN
       sv->>'activoId',
       COALESCE(sv->>'trabajo', ''),
       COALESCE(sv->>'proveedor', ''),
-      COALESCE((sv->>'presupuesto')::numeric, 0),
+      data.json_num(sv->>'presupuesto', 0),
       COALESCE(sv->>'fecha', ''),
       COALESCE(sv->>'estado', 'programada'),
       COALESCE(sv->>'observaciones', '')
@@ -599,9 +610,9 @@ BEGIN
       COALESCE(st->>'sedeId', ''),
       COALESCE(st->>'nombre', ''),
       COALESCE(st->>'unidad', 'u'),
-      COALESCE((st->>'cantidad')::numeric, 0),
-      COALESCE((st->>'costoUnitario')::numeric, 0),
-      COALESCE((st->>'minimo')::numeric, 0)
+      data.json_num(st->>'cantidad', 0),
+      data.json_num(st->>'costoUnitario', 0),
+      data.json_num(st->>'minimo', 0)
     );
   END LOOP;
 
@@ -619,9 +630,9 @@ BEGIN
   INSERT INTO data.app_meta (id, ot_counter, sol_counter, srv_counter)
   VALUES (
     1,
-    COALESCE((payload->>'otCounter')::integer, 1),
-    COALESCE((payload->>'solCounter')::integer, 1),
-    COALESCE((payload->>'srvCounter')::integer, 1)
+    data.json_int(payload->>'otCounter', 1),
+    data.json_int(payload->>'solCounter', 1),
+    data.json_int(payload->>'srvCounter', 1)
   )
   ON CONFLICT (id) DO UPDATE SET
     ot_counter = EXCLUDED.ot_counter,

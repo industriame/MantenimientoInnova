@@ -1398,73 +1398,39 @@ function useSystemData() {
   const [ultimaSync, setUltimaSync] = useState(null);
   const [syncError, setSyncError] = useState(null);
 
+  const dataRef = useRef(null);
   const snapshotRef = useRef(null); // JSON que este cliente considera vigente
   const escribiendoRef = useRef(false); // evita que el polling pise una escritura
+  const flushTimerRef = useRef(null);
+  const flushWaitersRef = useRef([]);
+  const writeChainRef = useRef(Promise.resolve());
 
-  // Carga inicial desde tablas (RPC get_app_state / put_app_state)
-  useEffect(() => {
-    (async () => {
-      try {
-        const populated = await hasAppData();
-        if (populated) {
-          const remote = normalizeData(await loadAppState());
-          const json = JSON.stringify(remote);
-          snapshotRef.current = json;
-          setData(remote);
-        } else {
-          const seed = normalizeData(seedData());
-          const saved = normalizeData(await saveAppState(seed));
-          const json = JSON.stringify(saved);
-          snapshotRef.current = json;
-          setData(saved);
-        }
-        setUltimaSync(new Date());
-        setSyncError(null);
-      } catch (e) {
-        console.error("No se pudo cargar desde PostgREST", e);
-        setSyncError(
-          "Sin conexión a PostgREST (puerto 3000). Los cambios no se guardarán en la base.",
-        );
-        const seed = normalizeData(seedData());
-        snapshotRef.current = JSON.stringify(seed);
-        setData(seed);
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
-
-  // Relectura periódica: trae cambios de otros usuarios
-  useEffect(() => {
-    const id = setInterval(async () => {
-      if (escribiendoRef.current || document.hidden) return;
-      try {
-        const remote = normalizeData(await loadAppState());
-        if (isEmptyState(remote)) return;
-        const json = JSON.stringify(remote);
-        if (json !== snapshotRef.current) {
-          snapshotRef.current = json;
-          setData(remote);
-        }
-        setUltimaSync(new Date());
-        setSyncError(null);
-      } catch (_) {
-        /* sin conexión: se reintenta al siguiente ciclo */
-      }
-    }, SYNC_MS);
-    return () => clearInterval(id);
-  }, []);
-
-  const persist = useCallback(async (next) => {
+  const applyLocal = (next) => {
     const normalized = normalizeData(next);
-    const json = JSON.stringify(normalized);
-    escribiendoRef.current = true;
-    snapshotRef.current = json;
+    dataRef.current = normalized;
+    snapshotRef.current = JSON.stringify(normalized);
     setData(normalized);
+    return normalized;
+  };
+
+  const flushToDb = useCallback(async () => {
+    const toSave = dataRef.current;
+    if (!toSave) return false;
+    escribiendoRef.current = true;
     try {
-      const saved = normalizeData(await saveAppState(normalized));
-      snapshotRef.current = JSON.stringify(saved);
-      setData(saved);
+      const saved = normalizeData(await saveAppState(toSave));
+      // Si hubo más edits durante el POST, no pisar el estado local más nuevo
+      if (snapshotRef.current === JSON.stringify(toSave)) {
+        dataRef.current = saved;
+        snapshotRef.current = JSON.stringify(saved);
+        setData(saved);
+      } else {
+        // Reenviar el estado más reciente
+        const again = normalizeData(await saveAppState(dataRef.current));
+        dataRef.current = again;
+        snapshotRef.current = JSON.stringify(again);
+        setData(again);
+      }
       setUltimaSync(new Date());
       setSyncError(null);
       return true;
@@ -1479,6 +1445,83 @@ function useSystemData() {
     }
   }, []);
 
+  // Carga inicial desde tablas (RPC get_app_state / put_app_state)
+  useEffect(() => {
+    (async () => {
+      try {
+        const populated = await hasAppData();
+        if (populated) {
+          applyLocal(await loadAppState());
+        } else {
+          applyLocal(await saveAppState(normalizeData(seedData())));
+        }
+        setUltimaSync(new Date());
+        setSyncError(null);
+      } catch (e) {
+        console.error("No se pudo cargar desde PostgREST", e);
+        setSyncError(
+          "Sin conexión a PostgREST (puerto 3000). Los cambios no se guardarán en la base.",
+        );
+        applyLocal(seedData());
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  // Relectura periódica: trae cambios de otros usuarios
+  useEffect(() => {
+    const id = setInterval(async () => {
+      if (escribiendoRef.current || document.hidden) return;
+      if (flushWaitersRef.current.length) return;
+      try {
+        const remote = normalizeData(await loadAppState());
+        if (isEmptyState(remote)) return;
+        const json = JSON.stringify(remote);
+        if (json !== snapshotRef.current) {
+          dataRef.current = remote;
+          snapshotRef.current = json;
+          setData(remote);
+        }
+        setUltimaSync(new Date());
+        setSyncError(null);
+      } catch (_) {
+        /* sin conexión: se reintenta al siguiente ciclo */
+      }
+    }, SYNC_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  // updater: objeto completo O función (prev) => next  — preferir función
+  const persist = useCallback(
+    (nextOrFn) => {
+      const prev = dataRef.current;
+      if (!prev) return Promise.resolve(false);
+      const draft =
+        typeof nextOrFn === "function" ? nextOrFn(prev) : nextOrFn;
+      applyLocal(draft);
+      escribiendoRef.current = true;
+
+      return new Promise((resolve) => {
+        flushWaitersRef.current.push(resolve);
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = setTimeout(() => {
+          const waiters = flushWaitersRef.current;
+          flushWaitersRef.current = [];
+          writeChainRef.current = writeChainRef.current
+            .then(async () => {
+              const ok = await flushToDb();
+              waiters.forEach((w) => w(ok));
+            })
+            .catch(() => {
+              waiters.forEach((w) => w(false));
+            });
+        }, 350);
+      });
+    },
+    [flushToDb],
+  );
+
   return { data, persist, loading, ultimaSync, syncError };
 }
 
@@ -1487,19 +1530,19 @@ function useAcciones(data, persist) {
   return useMemo(
     () => ({
       updateOrden: (id, patch) =>
-        persist({
-          ...data,
-          ordenes: data.ordenes.map((o) =>
+        persist((d) => ({
+          ...d,
+          ordenes: d.ordenes.map((o) =>
             o.id === id ? { ...o, ...patch } : o,
           ),
-        }),
+        })),
       updateSolicitud: (id, patch) =>
-        persist({
-          ...data,
-          solicitudes: data.solicitudes.map((s) =>
+        persist((d) => ({
+          ...d,
+          solicitudes: d.solicitudes.map((s) =>
             s.id === id ? { ...s, ...patch } : s,
           ),
-        }),
+        })),
       // Consumir stock: descuenta bodega y registra el consumo en la actividad
       consumirStock: (item, art, cantidad) => {
         const consumo = {
@@ -1511,78 +1554,78 @@ function useAcciones(data, persist) {
           costoUnitario: art.costoUnitario,
           fecha: fmtDate(new Date()),
         };
-        const stock = data.stock.map((x) =>
-          x.id === art.id
-            ? { ...x, cantidad: Math.max(0, x.cantidad - cantidad) }
-            : x,
-        );
         const conConsumo = (a) => ({
           ...a,
           consumos: [...(a.consumos || []), consumo],
         });
-        persist(
-          item.tipo === "preventivo"
+        return persist((d) => {
+          const stock = d.stock.map((x) =>
+            x.id === art.id
+              ? { ...x, cantidad: Math.max(0, x.cantidad - cantidad) }
+              : x,
+          );
+          return item.tipo === "preventivo"
             ? {
-                ...data,
+                ...d,
                 stock,
-                ordenes: data.ordenes.map((o) =>
+                ordenes: d.ordenes.map((o) =>
                   o.id === item.id ? conConsumo(o) : o,
                 ),
               }
             : {
-                ...data,
+                ...d,
                 stock,
-                solicitudes: data.solicitudes.map((x) =>
+                solicitudes: d.solicitudes.map((x) =>
                   x.id === item.id ? conConsumo(x) : x,
                 ),
-              },
-        );
+              };
+        });
       },
       // Devolver a bodega lo cargado por error
       devolverStock: (item, consumo) => {
-        const stock = data.stock.map((x) =>
-          x.id === consumo.stockId
-            ? { ...x, cantidad: x.cantidad + consumo.cantidad }
-            : x,
-        );
         const sinConsumo = (a) => ({
           ...a,
           consumos: (a.consumos || []).filter((c) => c.id !== consumo.id),
         });
-        persist(
-          item.tipo === "preventivo"
+        return persist((d) => {
+          const stock = d.stock.map((x) =>
+            x.id === consumo.stockId
+              ? { ...x, cantidad: x.cantidad + consumo.cantidad }
+              : x,
+          );
+          return item.tipo === "preventivo"
             ? {
-                ...data,
+                ...d,
                 stock,
-                ordenes: data.ordenes.map((o) =>
+                ordenes: d.ordenes.map((o) =>
                   o.id === item.id ? sinConsumo(o) : o,
                 ),
               }
             : {
-                ...data,
+                ...d,
                 stock,
-                solicitudes: data.solicitudes.map((x) =>
+                solicitudes: d.solicitudes.map((x) =>
                   x.id === item.id ? sinConsumo(x) : x,
                 ),
-              },
-        );
+              };
+        });
       },
       updateActividad: (item, patch) =>
         item.tipo === "preventivo"
-          ? persist({
-              ...data,
-              ordenes: data.ordenes.map((o) =>
+          ? persist((d) => ({
+              ...d,
+              ordenes: d.ordenes.map((o) =>
                 o.id === item.id ? { ...o, ...patch } : o,
               ),
-            })
-          : persist({
-              ...data,
-              solicitudes: data.solicitudes.map((s) =>
+            }))
+          : persist((d) => ({
+              ...d,
+              solicitudes: d.solicitudes.map((s) =>
                 s.id === item.id ? { ...s, ...patch } : s,
               ),
-            }),
+            })),
     }),
-    [data, persist],
+    [persist],
   );
 }
 
@@ -3040,13 +3083,13 @@ function TarjetaResumenMes({ data, persist, sedes, mes }) {
     setGenerando(true);
     const r = generarResumenUnificado(data, sedes, mes);
     const ahora = new Date();
-    persist({
+    persist((data) => ({
       ...data,
       resumenesMes: {
         ...data.resumenesMes,
         [mes]: { ...r, generadoEn: `${fmtDate(ahora)} · ${fmtHora(ahora)}` },
       },
-    });
+    }));
     setGenerando(false);
   };
 
@@ -3877,46 +3920,48 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
     .sort((a, b) => (a.fecha + a.hora < b.fecha + b.hora ? 1 : -1));
 
   const calificar = (id, patch) =>
-    persist({
+    persist((data) => ({
       ...data,
       solicitudes: data.solicitudes.map((x) =>
         x.id === id ? { ...x, ...patch } : x,
       ),
-    });
+    }));
 
   const crearSolicitud = (ubic, form) => {
     const now = new Date();
-    const n = data.solCounter || 1;
-    const nueva = {
-      id: uid("sol"),
-      codigo: `SOL-${String(n).padStart(4, "0")}`,
-      sedeId: sede.id,
-      faseId: ubic.faseId,
-      activoId: ubic.activoId,
-      descripcion: form.descripcion,
-      criticidad: form.criticidad || "",
-      solicitanteId: user.id,
-      fecha: fmtDate(now),
-      hora: fmtHora(now),
-      estado: "pendiente",
-      tecnicoId: "",
-      fechaProgramada: "",
-      fechaCompletada: "",
-      observaciones: "",
-      foto: "",
-      resolucion: "",
-      materiales: [],
-      materialesEstado: "",
-      calificacion: 0,
-      comentarioCalif: "",
-    };
-    persist({
-      ...data,
-      solicitudes: [nueva, ...data.solicitudes],
-      solCounter: n + 1,
+    persist((d) => {
+      const n = d.solCounter || 1;
+      const nueva = {
+        id: uid("sol"),
+        codigo: `SOL-${String(n).padStart(4, "0")}`,
+        sedeId: sede.id,
+        faseId: ubic.faseId,
+        activoId: ubic.activoId,
+        descripcion: form.descripcion,
+        criticidad: form.criticidad || "",
+        solicitanteId: user.id,
+        fecha: fmtDate(now),
+        hora: fmtHora(now),
+        estado: "pendiente",
+        tecnicoId: "",
+        fechaProgramada: "",
+        fechaCompletada: "",
+        observaciones: "",
+        foto: "",
+        resolucion: "",
+        materiales: [],
+        materialesEstado: "",
+        calificacion: 0,
+        comentarioCalif: "",
+      };
+      setMsg(`Solicitud ${nueva.codigo} enviada.`);
+      setTimeout(() => setMsg(""), 4000);
+      return {
+        ...d,
+        solicitudes: [nueva, ...d.solicitudes],
+        solCounter: n + 1,
+      };
     });
-    setMsg(`Solicitud ${nueva.codigo} enviada.`);
-    setTimeout(() => setMsg(""), 4000);
   };
 
   const tabs = [
@@ -4806,20 +4851,21 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
   // El técnico adelanta una actividad pendiente y queda asignada a él
   const activarActividad = (item, tecnicoId, fecha) => {
     if (item.tipo === "correctivo") {
-      persist({
+      persist((data) => ({
         ...data,
         solicitudes: data.solicitudes.map((x) =>
           x.id === item.solicitudId
             ? { ...x, tecnicoId, fechaProgramada: fecha, estado: "programada" }
             : x,
         ),
-      });
+      }));
     } else {
-      const n = data.otCounter || 1;
-      persist({
-        ...data,
+      persist((d) => {
+        const n = d.otCounter || 1;
+        return {
+        ...d,
         ordenes: [
-          ...data.ordenes,
+          ...d.ordenes,
           {
             id: uid("ot"),
             codigo: `OT-${String(n).padStart(4, "0")}`,
@@ -4846,6 +4892,7 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
           },
         ],
         otCounter: n + 1,
+        };
       });
     }
     setMsg("Actividad activada y asignada a ti. Ya aparece en el calendario.");
@@ -4854,39 +4901,41 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
 
   const crearHallazgo = (form) => {
     const now = new Date();
-    const n = data.solCounter || 1;
-    const nueva = {
-      id: uid("sol"),
-      codigo: `SOL-${String(n).padStart(4, "0")}`,
-      sedeId: form.sedeId,
-      faseId: form.faseId,
-      activoId: form.activoId,
-      descripcion: form.descripcion,
-      criticidad: form.criticidad || "",
-      solicitanteId: user.id,
-      fecha: fmtDate(now),
-      hora: fmtHora(now),
-      estado: "pendiente",
-      tecnicoId: "",
-      fechaProgramada: "",
-      fechaCompletada: "",
-      observaciones: "",
-      foto: "",
-      resolucion: "",
-      materiales: [],
-      materialesEstado: "",
-      calificacion: 0,
-      comentarioCalif: "",
-    };
-    persist({
-      ...data,
-      solicitudes: [nueva, ...data.solicitudes],
-      solCounter: n + 1,
+    persist((d) => {
+      const n = d.solCounter || 1;
+      const nueva = {
+        id: uid("sol"),
+        codigo: `SOL-${String(n).padStart(4, "0")}`,
+        sedeId: form.sedeId,
+        faseId: form.faseId,
+        activoId: form.activoId,
+        descripcion: form.descripcion,
+        criticidad: form.criticidad || "",
+        solicitanteId: user.id,
+        fecha: fmtDate(now),
+        hora: fmtHora(now),
+        estado: "pendiente",
+        tecnicoId: "",
+        fechaProgramada: "",
+        fechaCompletada: "",
+        observaciones: "",
+        foto: "",
+        resolucion: "",
+        materiales: [],
+        materialesEstado: "",
+        calificacion: 0,
+        comentarioCalif: "",
+      };
+      setMsg(
+        `Hallazgo ${nueva.codigo} registrado. Queda pendiente de programación.`,
+      );
+      setTimeout(() => setMsg(""), 4000);
+      return {
+        ...d,
+        solicitudes: [nueva, ...d.solicitudes],
+        solCounter: n + 1,
+      };
     });
-    setMsg(
-      `Hallazgo ${nueva.codigo} registrado. Queda pendiente de programación.`,
-    );
-    setTimeout(() => setMsg(""), 4000);
   };
 
   return (
@@ -5284,7 +5333,7 @@ function AdminSedes({ data, persist }) {
   const [fichaSede, setFichaSede] = useState(null);
   const toggle = (id) => setAbiertas((p) => ({ ...p, [id]: !p[id] }));
 
-  const setSedes = (sedes) => persist({ ...data, sedes });
+  const setSedes = (sedes) => persist((data) => ({ ...data, sedes }));
   const mapSede = (sedeId, fn) =>
     setSedes(data.sedes.map((s) => (s.id === sedeId ? fn(s) : s)));
   const mapFase = (sedeId, faseId, fn) =>
@@ -6636,41 +6685,47 @@ function AdminProgramacion({ data, persist }) {
   const confirmar = ({ tecnicoId, fecha }) => {
     const item = activar;
     if (item.tipo === "correctivo") {
-      persist({
+      persist((data) => ({
         ...data,
         solicitudes: data.solicitudes.map((s) =>
           s.id === item.solicitudId
             ? { ...s, tecnicoId, fechaProgramada: fecha, estado: "programada" }
             : s,
         ),
-      });
+      }));
     } else {
-      const n = data.otCounter || 1;
-      const orden = {
-        id: uid("ot"),
-        codigo: `OT-${String(n).padStart(4, "0")}`,
-        planId: item.planId,
-        tarea: item.tarea,
-        procedimiento: item.procedimiento,
-        categoria: item.categoria,
-        frecuencia: item.frecuencia,
-        duracionValor: item.duracionValor,
-        duracionUnidad: item.duracionUnidad,
-        sedeId: item.sedeId,
-        faseId: item.faseId,
-        activoId: item.activoId,
-        tecnicoId,
-        fechaProgramada: fecha,
-        fechaCompletada: "",
-        estado: "programada",
-        observaciones: "",
-        foto: "",
-        materiales: [],
-        materialesEstado: "",
-        consumos: [],
-        createdAt: fmtDate(new Date()),
-      };
-      persist({ ...data, ordenes: [...data.ordenes, orden], otCounter: n + 1 });
+      persist((d) => {
+        const n = d.otCounter || 1;
+        const orden = {
+          id: uid("ot"),
+          codigo: `OT-${String(n).padStart(4, "0")}`,
+          planId: item.planId,
+          tarea: item.tarea,
+          procedimiento: item.procedimiento,
+          categoria: item.categoria,
+          frecuencia: item.frecuencia,
+          duracionValor: item.duracionValor,
+          duracionUnidad: item.duracionUnidad,
+          sedeId: item.sedeId,
+          faseId: item.faseId,
+          activoId: item.activoId,
+          tecnicoId,
+          fechaProgramada: fecha,
+          fechaCompletada: "",
+          estado: "programada",
+          observaciones: "",
+          foto: "",
+          materiales: [],
+          materialesEstado: "",
+          consumos: [],
+          createdAt: fmtDate(new Date()),
+        };
+        return {
+          ...d,
+          ordenes: [...d.ordenes, orden],
+          otCounter: n + 1,
+        };
+      });
     }
     setActivar(null);
   };
@@ -7302,25 +7357,27 @@ function AdminServicios({ data, persist }) {
 
   const guardar = (srv) => {
     if (srv.id) {
-      return persist({
+      return persist((data) => ({
         ...data,
         servicios: data.servicios.map((x) =>
           x.id === srv.id ? { ...x, ...srv } : x,
         ),
-      });
+      }));
     }
-    const n = data.srvCounter || 1;
-    return persist({
-      ...data,
-      servicios: [
-        ...(data.servicios || []),
-        {
-          ...srv,
-          id: uid("srv"),
-          codigo: `SRV-${String(n).padStart(4, "0")}`,
-        },
-      ],
-      srvCounter: n + 1,
+    return persist((d) => {
+      const n = d.srvCounter || 1;
+      return {
+        ...d,
+        servicios: [
+          ...(d.servicios || []),
+          {
+            ...srv,
+            id: uid("srv"),
+            codigo: `SRV-${String(n).padStart(4, "0")}`,
+          },
+        ],
+        srvCounter: n + 1,
+      };
     });
   };
 
@@ -7406,12 +7463,12 @@ function AdminServicios({ data, persist }) {
                   </button>
                   <DeleteBtn
                     onConfirm={() =>
-                      persist({
+                      persist((data) => ({
                         ...data,
                         servicios: data.servicios.filter(
                           (x) => x.id !== srv.id,
                         ),
-                      })
+                      }))
                     }
                   />
                 </div>
@@ -7514,10 +7571,10 @@ function AdminConfiguracion({ data, persist, setPlanModal }) {
                 sedes={data.sedes}
                 onEdit={() => setPlanModal({ plan: p })}
                 onDelete={() =>
-                  persist({
+                  persist((data) => ({
                     ...data,
                     planes: data.planes.filter((x) => x.id !== p.id),
-                  })
+                  }))
                 }
               />
             ))}
@@ -7556,10 +7613,10 @@ function VistaBodega({ data, persist, sedes, editable }) {
   const agotados = items.filter((x) => x.cantidad <= 0);
 
   const setItem = (id, patch) =>
-    persist({
+    persist((data) => ({
       ...data,
       stock: data.stock.map((x) => (x.id === id ? { ...x, ...patch } : x)),
-    });
+    }));
 
   const th =
     "text-left text-[10px] font-semibold uppercase tracking-wide px-2.5 py-2 whitespace-nowrap";
@@ -7797,10 +7854,10 @@ function VistaBodega({ data, persist, sedes, editable }) {
                     <td className={td}>
                       <DeleteBtn
                         onConfirm={() =>
-                          persist({
+                          persist((data) => ({
                             ...data,
                             stock: data.stock.filter((y) => y.id !== x.id),
-                          })
+                          }))
                         }
                       />
                     </td>
@@ -7897,7 +7954,7 @@ function VistaBodega({ data, persist, sedes, editable }) {
             <button
               disabled={!nuevo.nombre.trim()}
               onClick={() => {
-                persist({
+                persist((data) => ({
                   ...data,
                   stock: [
                     ...(data.stock || []),
@@ -7908,7 +7965,7 @@ function VistaBodega({ data, persist, sedes, editable }) {
                       nombre: nuevo.nombre.trim(),
                     },
                   ],
-                });
+                }));
                 setNuevo(null);
               }}
               className="w-full py-2.5 rounded-md font-semibold text-sm text-white disabled:opacity-40"
@@ -9841,12 +9898,12 @@ function AdminUsuarios({ data, persist }) {
 
   const guardar = (u) => {
     const existe = data.usuarios.some((x) => x.id === u.id);
-    persist({
+    persist((data) => ({
       ...data,
       usuarios: existe
         ? data.usuarios.map((x) => (x.id === u.id ? u : x))
         : [...data.usuarios, u],
-    });
+    }));
   };
 
   return (
@@ -9877,10 +9934,10 @@ function AdminUsuarios({ data, persist }) {
                   data={data}
                   onEdit={() => setModal({ user: u })}
                   onDelete={() =>
-                    persist({
+                    persist((data) => ({
                       ...data,
                       usuarios: data.usuarios.filter((x) => x.id !== u.id),
-                    })
+                    }))
                   }
                 />
               ))}
@@ -10056,19 +10113,19 @@ function VistaAdmin({ data, persist, user, onLogout, ultimaSync }) {
               data={data}
               initial={planModal.plan}
               onAddCategoria={(c) =>
-                persist({
+                persist((data) => ({
                   ...data,
                   categorias: [...(data.categorias || CATEGORIAS_BASE), c],
-                })
+                }))
               }
               onSave={(plan) => {
                 const existe = data.planes.some((p) => p.id === plan.id);
-                persist({
+                persist((data) => ({
                   ...data,
                   planes: existe
                     ? data.planes.map((p) => (p.id === plan.id ? plan : p))
                     : [...data.planes, plan],
-                });
+                }));
               }}
               onClose={() => setPlanModal(null)}
             />
