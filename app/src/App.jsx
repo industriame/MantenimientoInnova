@@ -58,12 +58,12 @@ import {
   Cell,
   Legend,
 } from "recharts";
+import { hasAppData, loadAppState, saveAppState } from "./api/db.js";
 
 /* ============================================================================
    1. CONFIGURACIÓN Y CONSTANTES
    ========================================================================= */
 
-const STORAGE_KEY = "ime-mantenimiento-v4";
 const PRESUPUESTO_MENSUAL_SEDE = 100; // USD/mes por sede — solo materiales
 const FEE_SERVICIO_SEDE = 450; // USD/mes — nuestro honorario por sede
 // Escala de los medidores (días). MTBF: más alto es mejor. MTTR: más bajo es mejor.
@@ -1294,12 +1294,19 @@ function itemsConMateriales(data, estadosFiltro) {
 }
 
 /* ============================================================================
-   5. PERSISTENCIA
+   5. PERSISTENCIA  (PostgREST → tablas en schema data vía RPC)
    ========================================================================= */
 
 /* Registro único compartido: todos leen/escriben la misma base y se relee
    cada SYNC_MS para propagar cambios. Último en escribir gana. */
 const SYNC_MS = 4000;
+
+function isEmptyState(raw) {
+  if (!raw || typeof raw !== "object") return true;
+  const sedes = raw.sedes;
+  const usuarios = raw.usuarios;
+  return !(Array.isArray(sedes) && sedes.length) && !(Array.isArray(usuarios) && usuarios.length);
+}
 
 /* Repara datos guardados por versiones anteriores para que la app nunca
    arranque con un esquema incompleto (roles viejos, colecciones faltantes). */
@@ -1393,29 +1400,29 @@ function useSystemData() {
   const snapshotRef = useRef(null); // JSON que este cliente considera vigente
   const escribiendoRef = useRef(false); // evita que el polling pise una escritura
 
-  // Carga inicial
+  // Carga inicial desde tablas (RPC get_app_state / put_app_state)
   useEffect(() => {
     (async () => {
       try {
-        const res = await window.storage.get(STORAGE_KEY, true);
-        if (res?.value) {
-          snapshotRef.current = res.value;
-          setData(normalizeData(JSON.parse(res.value)));
-        } else {
-          const seed = seedData();
-          const json = JSON.stringify(seed);
+        const populated = await hasAppData();
+        if (populated) {
+          const remote = normalizeData(await loadAppState());
+          const json = JSON.stringify(remote);
           snapshotRef.current = json;
-          setData(seed);
-          await window.storage.set(STORAGE_KEY, json, true);
+          setData(remote);
+        } else {
+          const seed = normalizeData(seedData());
+          const saved = normalizeData(await saveAppState(seed));
+          const json = JSON.stringify(saved);
+          snapshotRef.current = json;
+          setData(saved);
         }
         setUltimaSync(new Date());
       } catch (e) {
-        const seed = seedData();
+        console.error("No se pudo cargar desde PostgREST", e);
+        const seed = normalizeData(seedData());
         snapshotRef.current = JSON.stringify(seed);
         setData(seed);
-        try {
-          await window.storage.set(STORAGE_KEY, snapshotRef.current, true);
-        } catch (_) {}
       } finally {
         setLoading(false);
       }
@@ -1427,10 +1434,12 @@ function useSystemData() {
     const id = setInterval(async () => {
       if (escribiendoRef.current || document.hidden) return;
       try {
-        const res = await window.storage.get(STORAGE_KEY, true);
-        if (res?.value && res.value !== snapshotRef.current) {
-          snapshotRef.current = res.value;
-          setData(normalizeData(JSON.parse(res.value)));
+        const remote = normalizeData(await loadAppState());
+        if (isEmptyState(remote)) return;
+        const json = JSON.stringify(remote);
+        if (json !== snapshotRef.current) {
+          snapshotRef.current = json;
+          setData(remote);
         }
         setUltimaSync(new Date());
       } catch (_) {
@@ -1441,15 +1450,18 @@ function useSystemData() {
   }, []);
 
   const persist = useCallback(async (next) => {
-    const json = JSON.stringify(next);
+    const normalized = normalizeData(next);
+    const json = JSON.stringify(normalized);
     escribiendoRef.current = true;
     snapshotRef.current = json;
-    setData(next);
+    setData(normalized);
     try {
-      await window.storage.set(STORAGE_KEY, json, true);
+      const saved = normalizeData(await saveAppState(normalized));
+      snapshotRef.current = JSON.stringify(saved);
+      setData(saved);
       setUltimaSync(new Date());
     } catch (e) {
-      console.error("No se pudo guardar", e);
+      console.error("No se pudo guardar en PostgREST", e);
     } finally {
       escribiendoRef.current = false;
     }

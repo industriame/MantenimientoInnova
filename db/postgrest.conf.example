@@ -1,0 +1,8 @@
+# Ejemplo PostgREST — copiar a /etc/postgrest.conf o ./postgrest.conf
+db-uri = "postgres://authenticator:CAMBIAR_PASSWORD@127.0.0.1:5432/ime_mantenimiento"
+db-schemas = "api"
+db-anon-role = "anon"
+db-pool = 10
+server-host = "127.0.0.1"
+server-port = 3000
+# open-api-server-proxy-uri = "http://127.0.0.1:3000"
