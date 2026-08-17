@@ -2515,7 +2515,7 @@ function Login({ usuarios, onLogin }) {
           <Wrench size={26} color={COLORS.orange} />
         </div>
         <h1 className="mt-3 font-bold text-xl" style={{ color: COLORS.charcoal, fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.02em" }}>
-          SISTEMA DE MANTENIMIENTO
+          Mantenimiento Facilidades - Innova Schools EC
         </h1>
         <p className="text-xs mt-1" style={cSlate}>IndustriaMe · Gestión de instalaciones</p>
       </div>
