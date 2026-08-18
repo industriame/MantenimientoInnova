@@ -3054,19 +3054,59 @@ function TarjetaSolicitudMia({ s, data, onCalificar }) {
   );
 }
 
-function FormSolicitud({ ubicacion, user, sedes, onSubmit, onClose }) {
+/* ============================================================================
+   REPORTAR NOVEDAD  ·  formulario único
+   ----------------------------------------------------------------------------
+   Los tres roles reportan contra la misma colección de solicitudes, así que
+   usan el mismo formulario y guardan exactamente los mismos campos. Lo único
+   que cambia es cómo se elige la ubicación y quién queda como reportante:
+
+     · Solicitante  → ubicación fija (llega del árbol o del QR), reporta a su nombre
+     · Técnico      → elige sede, fase y activo; reporta a su nombre
+     · Supervisor   → elige ubicación y además a quién se le atribuye
+
+   Antes eran dos componentes distintos y el del técnico no permitía adjuntar
+   foto, que es justo lo más útil de un hallazgo en campo.
+========================================================================== */
+function FormReportarNovedad({
+  user, sedes, usuarios, onSubmit, onClose,
+  ubicacion,            // si viene, la ubicación es fija y no se puede cambiar
+  elegirSolicitante,    // solo el supervisor atribuye el reporte a otra persona
+}) {
+  const fija = !!ubicacion;
+  const [sedeId, setSedeId] = useState(ubicacion?.sedeId || sedes[0]?.id || "");
+  const [faseId, setFaseId] = useState(ubicacion?.faseId || "");
+  const [activoId, setActivoId] = useState(ubicacion?.activoId || "");
   const [descripcion, setDescripcion] = useState("");
   const [criticidad, setCriticidad] = useState("");
   const [foto, setFoto] = useState("");
+  const [solicitanteId, setSolicitanteId] = useState(user.id);
+
+  const sede = sedes.find((s) => s.id === sedeId);
+  const fase = sede?.fases.find((f) => f.id === faseId);
   const ahora = new Date();
+  const valido = sedeId && faseId && activoId && descripcion.trim() && solicitanteId;
+
+  // Quién pudo haber detectado la novedad en esa sede
+  const posiblesSolicitantes = elegirSolicitante
+    ? (usuarios || []).filter((u) =>
+        u.id === user.id ||
+        ((u.rol === "solicitante" || u.rol === "tecnico") && (u.sedeIds || []).includes(sedeId)))
+    : [];
+
+  // Si al cambiar de sede el reportante elegido ya no aplica, vuelve a quien registra
+  useEffect(() => {
+    if (!elegirSolicitante) return;
+    if (!posiblesSolicitantes.some((u) => u.id === solicitanteId)) setSolicitanteId(user.id);
+  }, [sedeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="space-y-4">
-      <ReadOnly>{ubicacionTexto(sedes, ubicacion)}</ReadOnly>
+      {fija && <ReadOnly>{ubicacionTexto(sedes, ubicacion)}</ReadOnly>}
 
       <div className="grid grid-cols-2 gap-2 text-xs">
         <div>
-          <p className="font-semibold" style={cSlate}>Solicitante</p>
+          <p className="font-semibold" style={cSlate}>{elegirSolicitante ? "Registra" : "Reporta"}</p>
           <p style={cChar}>{user.nombre}</p>
         </div>
         <div>
@@ -3074,6 +3114,48 @@ function FormSolicitud({ ubicacion, user, sedes, onSubmit, onClose }) {
           <p style={cChar}>{fmtDate(ahora)} · {fmtHora(ahora)}</p>
         </div>
       </div>
+
+      {!fija && (
+        <>
+          <Field label="Sede">
+            <select value={sedeId} onChange={(e) => { setSedeId(e.target.value); setFaseId(""); setActivoId(""); }}
+              className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
+              {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+            </select>
+          </Field>
+
+          {elegirSolicitante && (
+            <Field label="Reportado por" hint="Quién detectó la novedad. Queda como solicitante de la orden.">
+              <select value={solicitanteId} onChange={(e) => setSolicitanteId(e.target.value)}
+                className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
+                {posiblesSolicitantes.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.nombre}{u.id === user.id ? " (yo)" : ` · ${ROLES[u.rol]?.label || u.rol}`}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+
+          <Field label="Fase">
+            <select value={faseId} onChange={(e) => { setFaseId(e.target.value); setActivoId(""); }}
+              className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
+              <option value="">Selecciona una fase</option>
+              {(sede?.fases || []).map((f) => <option key={f.id} value={f.id}>{f.nombre}</option>)}
+            </select>
+          </Field>
+
+          {faseId && (
+            <Field label="Activo">
+              <select value={activoId} onChange={(e) => setActivoId(e.target.value)}
+                className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
+                <option value="">Selecciona un activo</option>
+                {(fase?.activos || []).map((a) => <option key={a.id} value={a.id}>{a.nombre}</option>)}
+              </select>
+            </Field>
+          )}
+        </>
+      )}
 
       <Field label="Detalle de la novedad">
         <textarea value={descripcion} onChange={(e) => setDescripcion(e.target.value)} rows={3}
@@ -3098,22 +3180,16 @@ function FormSolicitud({ ubicacion, user, sedes, onSubmit, onClose }) {
 
       <FotoUploader foto={foto} onChange={setFoto} label="Foto de la novedad (opcional)" />
 
-      <button disabled={!descripcion.trim()} onClick={() => { onSubmit({ descripcion, criticidad, foto }); onClose(); }}
+      <button disabled={!valido}
+        onClick={() => { onSubmit({ sedeId, faseId, activoId, descripcion, criticidad, foto, solicitanteId }); onClose(); }}
         className="w-full py-2.5 rounded-md font-semibold text-sm text-white flex items-center justify-center gap-2 disabled:opacity-40"
         style={{ background: COLORS.orange }}>
-        <Send size={14} /> Enviar solicitud
+        <Send size={14} /> Reportar novedad
       </button>
     </div>
   );
 }
 
-/* Escáner de QR con la cámara del dispositivo.
-
-   Lee el código con jsQR, que decodifica por software sobre los fotogramas
-   del video. Se eligió sobre la API nativa BarcodeDetector porque esa no
-   existe en Safari ni en iPhone, y los solicitantes usan ambos sistemas.
-   La entrada manual queda como respaldo cuando la cámara no está disponible,
-   el permiso se niega o el código está dañado. */
 function BuscadorQR({ sede, onFound }) {
   const videoRef = useRef(null);
   const lienzoRef = useRef(null);
@@ -3356,7 +3432,7 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
       codigo: `SOL-${String(n).padStart(4, "0")}`,
       sedeId: sede.id, faseId: ubic.faseId, activoId: ubic.activoId,
       descripcion: form.descripcion, criticidad: form.criticidad || "",
-      solicitanteId: user.id, fecha: fmtDate(now), hora: fmtHora(now),
+      solicitanteId: form.solicitanteId || user.id, fecha: fmtDate(now), hora: fmtHora(now),
       estado: "pendiente",
       tecnicoId: "", fechaProgramada: "", fechaCompletada: "",
       observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
@@ -3442,7 +3518,7 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
 
       {target && (
         <Modal title="Reportar novedad" onClose={() => setTarget(null)}>
-          <FormSolicitud ubicacion={target} user={user} sedes={data.sedes}
+          <FormReportarNovedad ubicacion={target} user={user} sedes={data.sedes}
             onSubmit={(form) => crearSolicitud(target, form)} onClose={() => setTarget(null)} />
         </Modal>
       )}
@@ -3871,115 +3947,6 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
 }
 
 /* Hallazgo de inspección: el técnico levanta un correctivo en sus sedes. */
-/* Alta de un correctivo. El técnico lo usa para registrar hallazgos de
-   inspección (reporta a su nombre); el admin lo usa desde Correctivos y puede
-   además atribuir el reporte a quien realmente lo levantó. */
-function FormHallazgoTecnico({ sedes, user, usuarios, onSubmit, onClose, elegirSolicitante, etiquetaTexto }) {
-  const [sedeId, setSedeId] = useState(sedes[0]?.id || "");
-  const [faseId, setFaseId] = useState("");
-  const [activoId, setActivoId] = useState("");
-  const [descripcion, setDescripcion] = useState("");
-  const [criticidad, setCriticidad] = useState("");
-  const [solicitanteId, setSolicitanteId] = useState(user.id);
-
-  const sede = sedes.find((s) => s.id === sedeId);
-  const fase = sede?.fases.find((f) => f.id === faseId);
-  const ahora = new Date();
-  const valido = sedeId && faseId && activoId && descripcion.trim() && solicitanteId;
-
-  // Quién pudo haber reportado: los solicitantes de esa sede, sus técnicos y el propio admin
-  const posiblesSolicitantes = elegirSolicitante
-    ? (usuarios || []).filter((u) =>
-        u.id === user.id ||
-        ((u.rol === "solicitante" || u.rol === "tecnico") && (u.sedeIds || []).includes(sedeId)))
-    : [];
-
-  // Si al cambiar de sede el solicitante elegido ya no aplica, se vuelve al admin
-  useEffect(() => {
-    if (!elegirSolicitante) return;
-    if (!posiblesSolicitantes.some((u) => u.id === solicitanteId)) setSolicitanteId(user.id);
-  }, [sedeId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-2 text-xs">
-        <div>
-          <p className="font-semibold" style={cSlate}>Registra</p>
-          <p style={cChar}>{user.nombre}</p>
-        </div>
-        <div>
-          <p className="font-semibold" style={cSlate}>Fecha y hora</p>
-          <p style={cChar}>{fmtDate(ahora)} · {fmtHora(ahora)}</p>
-        </div>
-      </div>
-
-      <Field label="Sede">
-        <select value={sedeId} onChange={(e) => { setSedeId(e.target.value); setFaseId(""); setActivoId(""); }}
-          className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
-          {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
-        </select>
-      </Field>
-
-      {elegirSolicitante && (
-        <Field label="Reportado por" hint="Quién detectó la novedad. Queda como solicitante de la orden.">
-          <select value={solicitanteId} onChange={(e) => setSolicitanteId(e.target.value)}
-            className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
-            {posiblesSolicitantes.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.nombre}{u.id === user.id ? " (yo)" : ` · ${ROLES[u.rol]?.label || u.rol}`}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
-
-      <Field label="Fase">
-        <select value={faseId} onChange={(e) => { setFaseId(e.target.value); setActivoId(""); }}
-          className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
-          <option value="">Selecciona una fase</option>
-          {(sede?.fases || []).map((f) => <option key={f.id} value={f.id}>{f.nombre}</option>)}
-        </select>
-      </Field>
-
-      {faseId && (
-        <Field label="Activo">
-          <select value={activoId} onChange={(e) => setActivoId(e.target.value)}
-            className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
-            <option value="">Selecciona un activo</option>
-            {(fase?.activos || []).map((a) => <option key={a.id} value={a.id}>{a.nombre}</option>)}
-          </select>
-        </Field>
-      )}
-
-      <Field label={etiquetaTexto || "Hallazgo"}>
-        <textarea value={descripcion} onChange={(e) => setDescripcion(e.target.value)} rows={3}
-          placeholder={elegirSolicitante ? "Describe la falla o novedad reportada..." : "Describe lo encontrado en la inspección..."}
-          className={`${inputCls} resize-none`} style={inputStyle} />
-      </Field>
-
-      <Field label="Criticidad (opcional)">
-        <div className="grid grid-cols-4 gap-1.5">
-          {CRITICIDAD_IDS.map((c) => (
-            <button key={c} onClick={() => setCriticidad(criticidad === c ? "" : c)}
-              className="text-[11px] font-semibold py-2 rounded-md border"
-              style={{
-                borderColor: criticidad === c ? CRITICIDAD[c].color : COLORS.line,
-                background: criticidad === c ? `${CRITICIDAD[c].color}15` : "white",
-                color: criticidad === c ? CRITICIDAD[c].color : COLORS.slate,
-              }}>{CRITICIDAD[c].label}</button>
-          ))}
-        </div>
-      </Field>
-
-      <button disabled={!valido} onClick={() => { onSubmit({ sedeId, faseId, activoId, descripcion, criticidad, solicitanteId }); onClose(); }}
-        className="w-full py-2.5 rounded-md font-semibold text-sm text-white flex items-center justify-center gap-2 disabled:opacity-40"
-        style={{ background: COLORS.orange }}>
-        <Send size={14} /> Registrar hallazgo
-      </button>
-    </div>
-  );
-}
-
 function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
   const acciones = useAcciones(data, persist, user);
   const [tab, setTab] = useState("dashboard");
@@ -4050,13 +4017,14 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
       id: uid("sol"), codigo: `SOL-${String(n).padStart(4, "0")}`,
       sedeId: form.sedeId, faseId: form.faseId, activoId: form.activoId,
       descripcion: form.descripcion, criticidad: form.criticidad || "",
-      solicitanteId: user.id, fecha: fmtDate(now), hora: fmtHora(now),
+      solicitanteId: form.solicitanteId || user.id, fecha: fmtDate(now), hora: fmtHora(now),
       estado: "pendiente", tecnicoId: "", fechaProgramada: "", fechaCompletada: "",
-      observaciones: "", foto: "", resolucion: "", materiales: [], materialesEstado: "",
+      observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
+      materiales: [], materialesEstado: "", consumos: [], reprogramaciones: [],
       calificacion: 0, comentarioCalif: "",
     };
     persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
-    setMsg(`Hallazgo ${nueva.codigo} registrado. Queda pendiente de programación.`);
+    setMsg(`Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`);
     setTimeout(() => setMsg(""), 4000);
   };
 
@@ -4079,7 +4047,7 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
           <button onClick={() => setHallazgo(true)}
             className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2.5 rounded-md border"
             style={{ borderColor: COLORS.orange, color: COLORS.orange, background: "white" }}>
-            <Plus size={14} /> Registrar hallazgo de inspección
+            <Plus size={14} /> Reportar novedad
           </button>
           <SectionTitle count={activas.length}>Por ejecutar</SectionTitle>
           <div className="space-y-2">
@@ -4131,8 +4099,9 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
       )}
 
       {hallazgo && (
-        <Modal title="Registrar hallazgo" onClose={() => setHallazgo(false)}>
-          <FormHallazgoTecnico sedes={misSedes} user={user} onSubmit={crearHallazgo} onClose={() => setHallazgo(false)} />
+        <Modal title="Reportar novedad" onClose={() => setHallazgo(false)} wide>
+          <FormReportarNovedad sedes={misSedes} user={user} usuarios={data.usuarios}
+            onSubmit={crearHallazgo} onClose={() => setHallazgo(false)} />
         </Modal>
       )}
     </div>
@@ -5172,11 +5141,12 @@ function AdminCorrectivos({ data, persist, user }) {
       solicitanteId: form.solicitanteId || user.id,
       fecha: fmtDate(now), hora: fmtHora(now),
       estado: "pendiente", tecnicoId: "", fechaProgramada: "", fechaCompletada: "",
-      observaciones: "", foto: "", resolucion: "", materiales: [], materialesEstado: "",
+      observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
+      materiales: [], materialesEstado: "",
       consumos: [], reprogramaciones: [], calificacion: 0, comentarioCalif: "",
     };
     persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
-    setMsg(`${nueva.codigo} creado. Queda pendiente de programación.`);
+    setMsg(`Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`);
     setTimeout(() => setMsg(""), 4000);
   };
 
@@ -5203,7 +5173,7 @@ function AdminCorrectivos({ data, persist, user }) {
       <button onClick={() => setNuevo(true)}
         className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2.5 rounded-md border"
         style={{ borderColor: COLORS.orange, color: COLORS.orange, background: "white" }}>
-        <Plus size={14} /> Registrar correctivo
+        <Plus size={14} /> Reportar novedad
       </button>
 
       {msg && (
@@ -5221,10 +5191,9 @@ function AdminCorrectivos({ data, persist, user }) {
       )}
 
       {nuevo && (
-        <Modal title="Registrar correctivo" onClose={() => setNuevo(false)} wide>
-          <FormHallazgoTecnico
-            sedes={data.sedes} user={user} usuarios={data.usuarios}
-            elegirSolicitante etiquetaTexto="Falla reportada"
+        <Modal title="Reportar novedad" onClose={() => setNuevo(false)} wide>
+          <FormReportarNovedad
+            sedes={data.sedes} user={user} usuarios={data.usuarios} elegirSolicitante
             onSubmit={crearCorrectivo} onClose={() => setNuevo(false)} />
         </Modal>
       )}
