@@ -6,6 +6,7 @@ import React, {
   useRef,
 } from "react";
 import jsQR from "jsqr";
+import logoInnova from "./assets/Logo_ISE.png";
 import { hasAppData, loadAppState, saveAppState } from "./api/db.js";
 import {
   QrCode, Wrench, ClipboardList, BarChart3, Plus, X, ChevronRight, ChevronDown,
@@ -2581,10 +2582,9 @@ function Login({ usuarios, onLogin }) {
   return (
     <div className="max-w-sm mx-auto px-4 pt-12 pb-10">
       <div className="text-center mb-8">
-        <div className="w-14 h-14 rounded-xl mx-auto flex items-center justify-center" style={{ background: COLORS.charcoal }}>
-          <Wrench size={26} color={COLORS.orange} />
-        </div>
-        <h1 className="mt-3 font-bold text-xl" style={{ color: COLORS.charcoal, fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.02em" }}>
+        <img src={logoInnova} alt="Innova Schools"
+          className="mx-auto w-auto object-contain" style={{ maxHeight: 92 }} />
+        <h1 className="mt-4 font-bold text-xl" style={{ color: COLORS.charcoal, fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.02em" }}>
           Mantenimiento Facilidades - Innova Schools EC
         </h1>
         <p className="text-xs mt-1" style={cSlate}>IndustriaMe · Gestión de instalaciones</p>
