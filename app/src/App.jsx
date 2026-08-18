@@ -2550,15 +2550,6 @@ function Login({ usuarios, onLogin }) {
           Ingresar
         </button>
       </div>
-
-      <div className="mt-8 rounded-md p-3" style={{ background: COLORS.cream }}>
-        <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={cSlate}>Claves de prueba</p>
-        {usuarios.map((u) => (
-          <p key={u.id} className="text-[10px]" style={cSlate}>
-            {u.nombre}: <span className="font-mono">{u.clave}</span>
-          </p>
-        ))}
-      </div>
     </div>
   );
 }
