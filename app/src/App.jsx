@@ -2566,18 +2566,54 @@ function PresupuestoBar({ p, compact }) {
    ========================================================================= */
 
 function Login({ usuarios, onLogin }) {
-  const [usuarioId, setUsuarioId] = useState(usuarios[0]?.id || "");
+  const [nombre, setNombre] = useState("");
   const [clave, setClave] = useState("");
   const [showClave, setShowClave] = useState(false);
   const [error, setError] = useState("");
+  const [intentos, setIntentos] = useState(0);
+  const [bloqueoHasta, setBloqueoHasta] = useState(0);
+  const [restante, setRestante] = useState(0);
+
+  const bloqueado = restante > 0;
+
+  // Cuenta regresiva mientras dura el bloqueo por intentos fallidos
+  useEffect(() => {
+    if (!bloqueoHasta) return;
+    const id = setInterval(() => {
+      const seg = Math.ceil((bloqueoHasta - Date.now()) / 1000);
+      setRestante(seg > 0 ? seg : 0);
+      if (seg <= 0) { setBloqueoHasta(0); setIntentos(0); }
+    }, 500);
+    return () => clearInterval(id);
+  }, [bloqueoHasta]);
 
   const entrar = () => {
-    const u = usuarios.find((x) => x.id === usuarioId);
-    if (u && u.clave === clave) onLogin(u);
-    else setError("Clave incorrecta.");
-  };
+    if (bloqueado) return;
 
-  const seleccionado = usuarios.find((u) => u.id === usuarioId);
+    // El nombre se compara sin distinguir mayúsculas ni espacios sobrantes,
+    // porque se escribe a mano y nadie debería fallar por eso
+    const buscado = nombre.trim().toLowerCase();
+    const u = usuarios.find((x) => (x.nombre || "").trim().toLowerCase() === buscado);
+
+    if (u && u.clave === clave) {
+      setIntentos(0);
+      onLogin(u);
+      return;
+    }
+
+    /* Mensaje deliberadamente ambiguo: si dijera "ese usuario no existe",
+       cualquiera podría averiguar qué nombres son válidos probando. */
+    const n = intentos + 1;
+    setIntentos(n);
+    setClave("");
+    if (n >= 5) {
+      setBloqueoHasta(Date.now() + 30000);
+      setRestante(30);
+      setError("Demasiados intentos. Espera medio minuto antes de volver a probar.");
+    } else {
+      setError("Usuario o clave incorrectos.");
+    }
+  };
 
   return (
     <div className="max-w-sm mx-auto px-4 pt-12 pb-10">
@@ -2592,50 +2628,48 @@ function Login({ usuarios, onLogin }) {
 
       <div className="space-y-3">
         <Field label="Usuario">
-          <select value={usuarioId} onChange={(e) => { setUsuarioId(e.target.value); setError(""); }}
-            className="w-full border rounded-md px-3 py-2.5 text-sm font-medium outline-none" style={inputStyle}>
-            {usuarios.map((u) => <option key={u.id} value={u.id}>{u.nombre} — {rolDe(u).label}</option>)}
-          </select>
+          <input value={nombre} autoComplete="username" autoCapitalize="words"
+            onChange={(e) => { setNombre(e.target.value); setError(""); }}
+            onKeyDown={(e) => e.key === "Enter" && entrar()}
+            placeholder="Tu nombre de usuario" disabled={bloqueado}
+            className="w-full border rounded-md px-3 py-2.5 text-sm outline-none disabled:opacity-50"
+            style={inputStyle} />
         </Field>
-
-        {seleccionado && (
-          <p className="text-[11px] px-1" style={cSlate}>{rolDe(seleccionado).desc}</p>
-        )}
 
         <Field label="Clave">
           <div className="relative">
-            <input type={showClave ? "text" : "password"} value={clave}
+            <input type={showClave ? "text" : "password"} value={clave} autoComplete="current-password"
               onChange={(e) => { setClave(e.target.value); setError(""); }}
               onKeyDown={(e) => e.key === "Enter" && entrar()}
-              className="w-full border rounded-md px-3 py-2.5 pr-10 text-sm outline-none" style={inputStyle} />
+              disabled={bloqueado}
+              className="w-full border rounded-md px-3 py-2.5 pr-10 text-sm outline-none disabled:opacity-50"
+              style={inputStyle} />
             <button onClick={() => setShowClave(!showClave)} className="absolute right-3 top-1/2 -translate-y-1/2">
               {showClave ? <EyeOff size={15} color={COLORS.slate} /> : <Eye size={15} color={COLORS.slate} />}
             </button>
           </div>
         </Field>
 
-        {error && <p className="text-xs" style={{ color: COLORS.rojo }}>{error}</p>}
+        {error && (
+          <p className="text-xs" style={{ color: COLORS.rojo }}>
+            {error}{bloqueado ? ` (${restante} s)` : ""}
+          </p>
+        )}
 
-        <button onClick={entrar} className="w-full py-2.5 rounded-md font-semibold text-sm text-white" style={{ background: COLORS.orange }}>
-          Ingresar
+        <button onClick={entrar} disabled={bloqueado || !nombre.trim() || !clave}
+          className="w-full py-2.5 rounded-md font-semibold text-sm text-white disabled:opacity-40"
+          style={{ background: COLORS.orange }}>
+          {bloqueado ? `Espera ${restante} s` : "Ingresar"}
         </button>
+
+        <p className="text-[10px] text-center pt-1" style={cSlate}>
+          ¿No recuerdas tu usuario o clave? Solicítalos al administrador del sistema.
+        </p>
       </div>
     </div>
   );
 }
 
-/* ============================================================================
-   8. DASHBOARD COMPARTIDO  (mismo componente, distinto alcance de sedes)
-   ========================================================================= */
-
-/* Tarjeta del Resumen del Mes: uno general y, si hay varias sedes, uno por
-   cada una (desplegable para no saturar el tablero). Mismo texto que el
-   reporte impreso, generado por generarResumenUnificado. */
-/* Tarjeta del Resumen del mes: se genera solo al presionar el botón (no de
-   forma automática), porque en el mes en curso los datos aún pueden estar
-   incompletos. Una vez generado, se guarda por mes en data.resumenesMes para
-   que quede fijo entre sesiones y todos los que abran el Dashboard vean el
-   mismo texto; "Regenerar" lo vuelve a calcular con los datos más recientes. */
 function TarjetaResumenMes({ data, persist, sedes, mes }) {
   const [generando, setGenerando] = useState(false);
   const guardado = data.resumenesMes?.[mes];
