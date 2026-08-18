@@ -885,6 +885,7 @@ function normalizeData(raw) {
     ...x, materiales: arr(x.materiales), materialesEstado: x.materialesEstado || "",
     calificacion: Number(x.calificacion) || 0,
     horaCompletada: x.horaCompletada || "",
+    fotoSolicitante: x.fotoSolicitante || "",
     consumos: arr(x.consumos),
     reprogramaciones: arr(x.reprogramaciones),
     log: arr(x.log),
@@ -1466,11 +1467,56 @@ function MesSelector({ mes, onChange }) {
   );
 }
 
-function FotoUploader({ foto, onChange, readOnly }) {
+/* Adjuntar foto, con reducción automática antes de guardar.
+
+   Las imágenes viajan dentro del documento JSON en base64, y ese documento se
+   carga y se guarda entero en cada operación. Una foto de celular sin tratar
+   pesa varios megas y volvería lenta toda la aplicación, así que aquí se
+   redimensiona y recomprime antes de almacenarla. */
+const FOTO_LADO_MAX = 1280;   // píxeles del lado más largo
+const FOTO_CALIDAD = 0.72;    // 0 a 1; por encima de 0.8 el peso sube mucho
+
+function comprimirImagen(file) {
+  return new Promise((resolve, reject) => {
+    const lector = new FileReader();
+    lector.onerror = () => reject(new Error("No se pudo leer el archivo"));
+    lector.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("El archivo no es una imagen válida"));
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        if (w > FOTO_LADO_MAX || h > FOTO_LADO_MAX) {
+          const escala = FOTO_LADO_MAX / Math.max(w, h);
+          w = Math.round(w * escala);
+          h = Math.round(h * escala);
+        }
+        const lienzo = document.createElement("canvas");
+        lienzo.width = w;
+        lienzo.height = h;
+        lienzo.getContext("2d").drawImage(img, 0, 0, w, h);
+        try {
+          resolve(lienzo.toDataURL("image/jpeg", FOTO_CALIDAD));
+        } catch (e) {
+          resolve(lector.result);   // si el navegador no puede exportar, se guarda el original
+        }
+      };
+      img.src = lector.result;
+    };
+    lector.readAsDataURL(file);
+  });
+}
+
+function FotoUploader({ foto, onChange, readOnly, label = "Foto" }) {
   const inputRef = useRef(null);
+  const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState("");
+
   if (readOnly && !foto) return null;
+
+  const pesoKB = foto ? Math.round((foto.length * 0.75) / 1024) : 0;
+
   return (
-    <Field label="Foto">
+    <Field label={label}>
       {foto ? (
         <div className="relative inline-block">
           <img src={foto} alt="Evidencia" className="rounded-md max-h-40 border" style={bLine} />
@@ -1479,19 +1525,33 @@ function FotoUploader({ foto, onChange, readOnly }) {
               <X size={11} color={COLORS.rojo} />
             </button>
           )}
+          {pesoKB > 0 && <p className="text-[9px] mt-1" style={cSlate}>{pesoKB} KB</p>}
         </div>
       ) : (
-        <button onClick={() => inputRef.current?.click()} className="text-xs font-semibold px-3 py-2 rounded-md border flex items-center gap-1.5" style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
-          <Camera size={13} /> Adjuntar foto
+        <button onClick={() => inputRef.current?.click()} disabled={cargando}
+          className="text-xs font-semibold px-3 py-2 rounded-md border flex items-center gap-1.5 disabled:opacity-50"
+          style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+          <Camera size={13} /> {cargando ? "Procesando…" : "Adjuntar foto"}
         </button>
       )}
+
+      {error && <p className="text-[10px] mt-1" style={{ color: COLORS.rojo }}>{error}</p>}
+
       <input ref={inputRef} type="file" accept="image/*" className="hidden"
-        onChange={(e) => {
+        onChange={async (e) => {
           const file = e.target.files?.[0];
+          e.target.value = "";                 // permite volver a elegir el mismo archivo
           if (!file) return;
-          const r = new FileReader();
-          r.onload = () => onChange(r.result);
-          r.readAsDataURL(file);
+          setError("");
+          setCargando(true);
+          try {
+            onChange(await comprimirImagen(file));
+          } catch (err) {
+            console.error("[foto]", err);
+            setError("No se pudo procesar la imagen. Intenta con otra.");
+          } finally {
+            setCargando(false);
+          }
         }} />
     </Field>
   );
@@ -1895,9 +1955,15 @@ function DetalleActividad({ item, data, onClose }) {
         </p>
       )}
 
+      {item.fotoSolicitante && (
+        <Field label="Foto del solicitante">
+          <img src={item.fotoSolicitante} alt="Reportado por el solicitante" className="rounded-md max-h-56 border w-full object-contain" style={bLine} />
+        </Field>
+      )}
+
       {item.foto && (
-        <Field label="Evidencia fotográfica">
-          <img src={item.foto} alt="Evidencia" className="rounded-md max-h-56 border w-full object-contain" style={bLine} />
+        <Field label="Evidencia del técnico">
+          <img src={item.foto} alt="Evidencia del técnico" className="rounded-md max-h-56 border w-full object-contain" style={bLine} />
         </Field>
       )}
     </div>
@@ -2882,6 +2948,7 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
 function FormSolicitud({ ubicacion, user, sedes, onSubmit, onClose }) {
   const [descripcion, setDescripcion] = useState("");
   const [criticidad, setCriticidad] = useState("");
+  const [foto, setFoto] = useState("");
   const ahora = new Date();
 
   return (
@@ -2920,7 +2987,9 @@ function FormSolicitud({ ubicacion, user, sedes, onSubmit, onClose }) {
         </div>
       </Field>
 
-      <button disabled={!descripcion.trim()} onClick={() => { onSubmit({ descripcion, criticidad }); onClose(); }}
+      <FotoUploader foto={foto} onChange={setFoto} label="Foto de la novedad (opcional)" />
+
+      <button disabled={!descripcion.trim()} onClick={() => { onSubmit({ descripcion, criticidad, foto }); onClose(); }}
         className="w-full py-2.5 rounded-md font-semibold text-sm text-white flex items-center justify-center gap-2 disabled:opacity-40"
         style={{ background: COLORS.orange }}>
         <Send size={14} /> Enviar solicitud
@@ -3032,7 +3101,7 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
       solicitanteId: user.id, fecha: fmtDate(now), hora: fmtHora(now),
       estado: "pendiente",
       tecnicoId: "", fechaProgramada: "", fechaCompletada: "",
-      observaciones: "", foto: "", resolucion: "",
+      observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
       materiales: [], materialesEstado: "",
       calificacion: 0, comentarioCalif: "",
     };
@@ -3101,6 +3170,10 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
                     Finalizada el {s.fechaCompletada}{s.horaCompletada ? ` · ${s.horaCompletada}` : ""}
                     {` · atendida en ${duracionTexto(horasEntre(s.fecha, s.hora, s.fechaCompletada, s.horaCompletada) / 24)}`}
                   </p>
+                )}
+                {s.fotoSolicitante && (
+                  <img src={s.fotoSolicitante} alt="Foto de la solicitud"
+                    className="rounded-md max-h-40 border mt-2 w-full object-contain" style={bLine} />
                 )}
                 {s.resolucion && (
                   <p className="text-xs mt-2 rounded p-2" style={{ background: COLORS.cream, color: COLORS.charcoal }}>
@@ -3476,7 +3549,13 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             </Field>
           )}
 
-          <FotoUploader foto={item.foto} onChange={(foto) => acciones.updateActividad(item, { foto })} />
+          {item.fotoSolicitante && (
+            <Field label="Foto del solicitante">
+              <img src={item.fotoSolicitante} alt="Reportado por el solicitante" className="rounded-md max-h-40 border" style={bLine} />
+            </Field>
+          )}
+          <FotoUploader foto={item.foto} onChange={(foto) => acciones.updateActividad(item, { foto })}
+            label="Evidencia del técnico" />
           {esPrev && (
             <ConsumoStock item={item} stockSede={stockSede}
               onRegistrar={registrarConsumo} onQuitar={quitarConsumo}
@@ -4803,7 +4882,12 @@ function TarjetaCosto({ item, data, rol, onUpdate, defaultOpen }) {
             {item.fechaProgramada ? ` · ${item.fechaProgramada}` : ""}
           </p>
           {item.observaciones && <Field label="Observaciones del técnico"><ReadOnly>{item.observaciones}</ReadOnly></Field>}
-          <FotoUploader foto={item.foto} onChange={() => {}} readOnly />
+          {item.fotoSolicitante && (
+            <Field label="Foto del solicitante">
+              <img src={item.fotoSolicitante} alt="Reportado por el solicitante" className="rounded-md max-h-40 border" style={bLine} />
+            </Field>
+          )}
+          <FotoUploader foto={item.foto} onChange={() => {}} readOnly label="Evidencia del técnico" />
           <MaterialesPanel item={item} rol={rol} onUpdate={onUpdate} />
           <ContextoPresupuesto item={item} data={data} />
         </div>
