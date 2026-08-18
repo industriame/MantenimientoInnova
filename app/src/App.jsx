@@ -5,6 +5,7 @@ import React, {
   useMemo,
   useRef,
 } from "react";
+import jsQR from "jsqr";
 import { hasAppData, loadAppState, saveAppState } from "./api/db.js";
 import {
   QrCode, Wrench, ClipboardList, BarChart3, Plus, X, ChevronRight, ChevronDown,
@@ -793,6 +794,9 @@ function getPendientes(data) {
       solicitudId: s.id, codigo: s.codigo,
       tarea: s.descripcion, criticidad: s.criticidad,
       solicitanteId: s.solicitanteId, fecha: s.fecha, hora: s.hora,
+      // La foto y el detalle viajan al pendiente: el técnico necesita verlos
+      // antes de activar, para saber qué llevar y cuánto tiempo estimar
+      fotoSolicitante: s.fotoSolicitante || "", descripcion: s.descripcion,
       sedeId: s.sedeId, faseId: s.faseId, activoId: s.activoId,
     });
   });
@@ -2945,6 +2949,111 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
    9. VISTA SOLICITANTE  (una sede: dashboard + solicitudes)
    ========================================================================= */
 
+/* Filtros de "Mis solicitudes". Agrupan estados en las tres etapas que le
+   importan al solicitante: lo que espera, lo que ya está en marcha y lo
+   terminado. Los estados internos del sistema se agrupan aquí. */
+const FILTROS_SOLICITUD = [
+  { id: "todas", label: "Todas", estados: [], color: COLORS.charcoal },
+  { id: "pendiente", label: "Sin atender", estados: ["pendiente"], color: COLORS.slate },
+  { id: "curso", label: "En curso", estados: ["programada", "en_proceso", "espera"], color: COLORS.orange },
+  { id: "completada", label: "Resueltas", estados: ["completada"], color: COLORS.verde },
+  { id: "calificar", label: "Por calificar", estados: ["completada"], color: COLORS.ambar, sinCalificar: true },
+];
+
+/* "Por calificar" comparte estado con "Resueltas", así que necesita su propia
+   condición: cerradas que el solicitante todavía no valoró. */
+function cumpleFiltro(s, f) {
+  if (f.id === "todas") return true;
+  if (!f.estados.includes(s.estado)) return false;
+  if (f.sinCalificar) return !s.calificacion;
+  return true;
+}
+
+/* Tarjeta de una solicitud propia. Se muestra compacta y el botón de
+   información abre la ficha completa, para que la lista se pueda recorrer
+   de un vistazo aunque haya muchas. */
+function TarjetaSolicitudMia({ s, data, onCalificar }) {
+  const [abierta, setAbierta] = useState(false);
+  const porCalificar = s.estado === "completada" && !s.calificacion;
+
+  return (
+    <div className="border rounded-md" style={{ ...cardStyle, borderLeft: `3px solid ${ESTADOS[s.estado]?.color || COLORS.line}` }}>
+      <div className="p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] font-bold" style={cOrange}>{s.codigo}</span>
+              <EstadoChip estado={s.estado} />
+              {s.criticidad && <Chip color={CRITICIDAD[s.criticidad].color}>{CRITICIDAD[s.criticidad].label}</Chip>}
+              {porCalificar && <Chip color={COLORS.ambar}>Por calificar</Chip>}
+              {s.calificacion > 0 && <Estrellas valor={s.calificacion} size={11} readOnly />}
+            </div>
+            <p className="text-sm font-semibold mt-1 truncate" style={cChar}>{s.descripcion}</p>
+            <p className="text-[11px] truncate" style={cSlate}>{ubicacionTexto(data.sedes, s)}</p>
+          </div>
+
+          <div className="flex flex-col items-end gap-1 shrink-0">
+            {s.fotoSolicitante && <Camera size={12} color={COLORS.slate} title="Tiene foto" />}
+            <button onClick={() => setAbierta(!abierta)} title="Ver toda la información"
+              className="opacity-60 hover:opacity-100">
+              <Info size={15} color={COLORS.slate} />
+            </button>
+          </div>
+        </div>
+        <p className="text-[10px] mt-1" style={cSlate}>{s.fecha} · {s.hora}</p>
+      </div>
+
+      {abierta && (
+        <div className="px-3 pb-3 border-t pt-3 space-y-2" style={bLine}>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <p className="font-semibold" style={cSlate}>Atiende</p>
+              <p style={cChar}>{s.tecnicoId ? usuarioNombre(data.usuarios, s.tecnicoId) : "Por asignar"}</p>
+            </div>
+            <div>
+              <p className="font-semibold" style={cSlate}>Programado</p>
+              <p style={cChar}>{s.fechaProgramada || "Sin fecha"}</p>
+            </div>
+          </div>
+
+          {s.fechaCompletada && (
+            <p className="text-[11px] font-semibold" style={{ color: COLORS.verde }}>
+              Finalizada el {s.fechaCompletada}{s.horaCompletada ? ` · ${s.horaCompletada}` : ""}
+              {` · atendida en ${duracionTexto(horasEntre(s.fecha, s.hora, s.fechaCompletada, s.horaCompletada) / 24)}`}
+            </p>
+          )}
+
+          {s.fotoSolicitante && (
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Foto que enviaste</p>
+              <img src={s.fotoSolicitante} alt="Foto de la solicitud"
+                className="rounded-md max-h-48 border w-full object-contain" style={bLine} />
+            </div>
+          )}
+
+          {s.foto && (
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Evidencia del técnico</p>
+              <img src={s.foto} alt="Evidencia del técnico"
+                className="rounded-md max-h-48 border w-full object-contain" style={bLine} />
+            </div>
+          )}
+
+          {s.resolucion && (
+            <p className="text-xs rounded p-2" style={{ background: COLORS.cream, color: COLORS.charcoal }}>
+              <strong>Resuelto:</strong> {s.resolucion}
+            </p>
+          )}
+
+          {s.estado === "completada" && (
+            <BloqueCalificacion solicitud={s} onCalificar={onCalificar} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FormSolicitud({ ubicacion, user, sedes, onSubmit, onClose }) {
   const [descripcion, setDescripcion] = useState("");
   const [criticidad, setCriticidad] = useState("");
@@ -2998,32 +3107,173 @@ function FormSolicitud({ ubicacion, user, sedes, onSubmit, onClose }) {
   );
 }
 
-function BuscadorQR({ sede, onFound }) {
-  const [value, setValue] = useState("");
-  const [error, setError] = useState("");
+/* Escáner de QR con la cámara del dispositivo.
 
-  const buscar = () => {
-    setError("");
+   Lee el código con jsQR, que decodifica por software sobre los fotogramas
+   del video. Se eligió sobre la API nativa BarcodeDetector porque esa no
+   existe en Safari ni en iPhone, y los solicitantes usan ambos sistemas.
+   La entrada manual queda como respaldo cuando la cámara no está disponible,
+   el permiso se niega o el código está dañado. */
+function BuscadorQR({ sede, onFound }) {
+  const videoRef = useRef(null);
+  const lienzoRef = useRef(null);
+  const streamRef = useRef(null);
+  const pararRef = useRef(false);
+
+  const [escaneando, setEscaneando] = useState(false);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const [manual, setManual] = useState(false);
+  const [value, setValue] = useState("");
+
+  const soportaCamara = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+
+  const resolver = (texto) => {
     const activos = flattenActivos([sede]);
-    let id = value.trim();
-    try { id = new URL(value.trim()).searchParams.get("activo") || id; } catch (_) {}
-    const found = activos.find((a) => a.activoId === id) ||
-      activos.find((a) => a.activoNombre.toLowerCase() === value.trim().toLowerCase());
-    if (found) onFound(found);
+    const crudo = (texto || "").trim();
+    let id = crudo;
+    try { id = new URL(crudo).searchParams.get("activo") || crudo; } catch (_) {}
+    return activos.find((a) => a.activoId === id) ||
+      activos.find((a) => a.activoNombre.toLowerCase() === crudo.toLowerCase());
+  };
+
+  const detener = () => {
+    pararRef.current = true;
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setEscaneando(false);
+    setAviso("");
+  };
+
+  // Cerrar la cámara si el componente se desmonta con el escaneo activo
+  useEffect(() => detener, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const abrirCamara = async () => {
+    setError(""); setAviso("");
+    if (!soportaCamara) {
+      setError("Este navegador no permite abrir la cámara. Usa la búsqueda manual.");
+      setManual(true);
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },   // cámara trasera en el celular
+        audio: false,
+      });
+      streamRef.current = stream;
+      pararRef.current = false;
+      setEscaneando(true);
+
+      setTimeout(async () => {
+        const v = videoRef.current;
+        if (!v) return;
+        v.srcObject = stream;
+        v.setAttribute("playsinline", "true");   // iOS exige esto o abre en pantalla completa
+        try { await v.play(); } catch (_) {}
+        leerContinuo();
+      }, 60);
+    } catch (e) {
+      console.error("[qr]", e);
+      setError(
+        e?.name === "NotAllowedError"
+          ? "No diste permiso para usar la cámara. Habilítalo en el navegador o busca el activo por su nombre."
+          : "No se pudo abrir la cámara. Busca el activo por su nombre."
+      );
+      setManual(true);
+    }
+  };
+
+  const leerContinuo = () => {
+    const tick = () => {
+      if (pararRef.current) return;
+      const v = videoRef.current;
+      const lienzo = lienzoRef.current;
+
+      if (v && lienzo && v.readyState === v.HAVE_ENOUGH_DATA) {
+        // Se analiza a ancho reducido: suficiente para el código y mucho más ágil
+        const ancho = 480;
+        const alto = Math.round((v.videoHeight / v.videoWidth) * ancho) || 480;
+        lienzo.width = ancho;
+        lienzo.height = alto;
+        const ctx = lienzo.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(v, 0, 0, ancho, alto);
+        try {
+          const img = ctx.getImageData(0, 0, ancho, alto);
+          const codigo = jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
+          if (codigo?.data) {
+            const encontrado = resolver(codigo.data);
+            if (encontrado) {
+              detener();
+              onFound(encontrado);
+              return;
+            }
+            setAviso("Ese código no corresponde a un activo de esta sede.");
+          }
+        } catch (_) { /* fotograma ilegible: se intenta con el siguiente */ }
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  };
+
+  const buscarManual = () => {
+    setError("");
+    const encontrado = resolver(value);
+    if (encontrado) onFound(encontrado);
     else setError("No se encontró ese activo. Verifica el enlace o el nombre exacto.");
   };
 
   return (
     <div className="space-y-3">
-      <p className="text-xs" style={cSlate}>
-        Al escanear el QR pegado en el activo, la app se abre directamente en su formulario. Si tu cámara no lo abre sola, pega aquí el enlace o escribe el nombre exacto del activo.
-      </p>
-      <input value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && buscar()}
-        placeholder="Enlace del QR o nombre del activo" className={inputCls} style={inputStyle} />
+      {escaneando ? (
+        <>
+          <div className="relative rounded-md overflow-hidden" style={{ background: COLORS.charcoal }}>
+            <video ref={videoRef} playsInline muted autoPlay
+              className="w-full" style={{ maxHeight: 340, objectFit: "cover" }} />
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div style={{ width: 180, height: 180, border: `3px solid ${COLORS.orange}`, borderRadius: 12 }} />
+            </div>
+          </div>
+          <canvas ref={lienzoRef} className="hidden" />
+          <p className="text-xs text-center" style={cSlate}>
+            Apunta al código QR pegado en el activo.
+          </p>
+          {aviso && <p className="text-xs text-center" style={{ color: COLORS.ambar }}>{aviso}</p>}
+          <button onClick={detener} className="w-full py-2 rounded-md text-sm font-semibold border"
+            style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+            Cerrar cámara
+          </button>
+        </>
+      ) : (
+        <button onClick={abrirCamara}
+          className="w-full py-3 rounded-md font-semibold text-sm text-white flex items-center justify-center gap-2"
+          style={{ background: COLORS.orange }}>
+          <Camera size={16} /> Abrir cámara y escanear
+        </button>
+      )}
+
       {error && <p className="text-xs" style={{ color: COLORS.rojo }}>{error}</p>}
-      <button onClick={buscar} className="w-full py-2.5 rounded-md font-semibold text-sm text-white" style={{ background: COLORS.orange }}>
-        Buscar activo
-      </button>
+
+      {!manual && !escaneando && (
+        <button onClick={() => setManual(true)} className="w-full text-xs font-semibold" style={cSlate}>
+          Buscar por nombre o enlace
+        </button>
+      )}
+
+      {manual && (
+        <div className="space-y-2 pt-2 border-t" style={bLine}>
+          <p className="text-[11px]" style={cSlate}>
+            Escribe el nombre exacto del activo o pega el enlace del QR.
+          </p>
+          <input value={value} onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && buscarManual()}
+            placeholder="Enlace del QR o nombre del activo" className={inputCls} style={inputStyle} />
+          <button onClick={buscarManual} className="w-full py-2.5 rounded-md font-semibold text-sm text-white"
+            style={{ background: COLORS.charcoal }}>
+            Buscar activo
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -3087,6 +3337,14 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
     .filter((s) => s.solicitanteId === user.id)
     .sort((a, b) => (a.fecha + a.hora < b.fecha + b.hora ? 1 : -1));
 
+  const [fEstado, setFEstado] = useState("todas");
+  const conteos = FILTROS_SOLICITUD.reduce((acc, f) => {
+    acc[f.id] = misSolicitudes.filter((s) => cumpleFiltro(s, f)).length;
+    return acc;
+  }, {});
+  const filtroActivo = FILTROS_SOLICITUD.find((f) => f.id === fEstado) || FILTROS_SOLICITUD[0];
+  const visibles = misSolicitudes.filter((s) => cumpleFiltro(s, filtroActivo));
+
   const calificar = (id, patch) =>
     persist((data) => ({ ...data, solicitudes: data.solicitudes.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
 
@@ -3147,43 +3405,35 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
             {sede.fases.length === 0 && <Empty>Esta sede aún no tiene fases configuradas.</Empty>}
           </div>
 
-          <SectionTitle count={misSolicitudes.length}>Mis solicitudes</SectionTitle>
+          <SectionTitle count={visibles.length}>Mis solicitudes</SectionTitle>
+
+          {/* Filtros por estado: cada botón muestra cuántas hay, para no
+              hacer clic en uno vacío. Los que no tienen ninguna se ocultan. */}
+          <div className="flex gap-1.5 mb-3 flex-wrap">
+            {FILTROS_SOLICITUD.filter((f) => f.id === "todas" || conteos[f.id] > 0).map((f) => {
+              const activo = fEstado === f.id;
+              const color = f.color || COLORS.charcoal;
+              return (
+                <button key={f.id} onClick={() => setFEstado(f.id)}
+                  className="flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-md border"
+                  style={{
+                    background: activo ? `${color}15` : "white",
+                    borderColor: activo ? color : COLORS.line,
+                    color: activo ? color : COLORS.slate,
+                  }}>
+                  {f.label}
+                  <span className="text-[10px] font-bold px-1 rounded"
+                    style={{ background: activo ? color : COLORS.line, color: activo ? "white" : COLORS.slate }}>
+                    {conteos[f.id]}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
           <div className="space-y-2">
-            {misSolicitudes.map((s) => (
-              <div key={s.id} className="border rounded-md p-3" style={cardStyle}>
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[10px] font-bold" style={cOrange}>{s.codigo}</span>
-                    {s.criticidad && <Chip color={CRITICIDAD[s.criticidad].color}>{CRITICIDAD[s.criticidad].label}</Chip>}
-                  </div>
-                  <EstadoChip estado={s.estado} />
-                </div>
-                <p className="text-sm font-semibold mt-1" style={cChar}>{ubicacionTexto(data.sedes, s)}</p>
-                <p className="text-sm mt-0.5" style={cSlate}>{s.descripcion}</p>
-                <p className="text-[11px] mt-1" style={cSlate}>
-                  {s.fecha} · {s.hora}
-                  {s.tecnicoId ? ` · Atiende: ${usuarioNombre(data.usuarios, s.tecnicoId)}` : ""}
-                  {s.fechaProgramada ? ` · Programado: ${s.fechaProgramada}` : ""}
-                </p>
-                {s.fechaCompletada && (
-                  <p className="text-[11px] mt-0.5 font-semibold" style={{ color: COLORS.verde }}>
-                    Finalizada el {s.fechaCompletada}{s.horaCompletada ? ` · ${s.horaCompletada}` : ""}
-                    {` · atendida en ${duracionTexto(horasEntre(s.fecha, s.hora, s.fechaCompletada, s.horaCompletada) / 24)}`}
-                  </p>
-                )}
-                {s.fotoSolicitante && (
-                  <img src={s.fotoSolicitante} alt="Foto de la solicitud"
-                    className="rounded-md max-h-40 border mt-2 w-full object-contain" style={bLine} />
-                )}
-                {s.resolucion && (
-                  <p className="text-xs mt-2 rounded p-2" style={{ background: COLORS.cream, color: COLORS.charcoal }}>
-                    <strong>Resuelto:</strong> {s.resolucion}
-                  </p>
-                )}
-                {s.estado === "completada" && (
-                  <BloqueCalificacion solicitud={s} onCalificar={(patch) => calificar(s.id, patch)} />
-                )}
-              </div>
+            {visibles.map((s) => (
+              <TarjetaSolicitudMia key={s.id} s={s} data={data} onCalificar={(patch) => calificar(s.id, patch)} />
             ))}
             {misSolicitudes.length === 0 && <Empty>Aún no has enviado solicitudes.</Empty>}
           </div>
@@ -4410,6 +4660,13 @@ function FormActivar({ item, data, onConfirm, onClose, soloTecnico }) {
         )}
       </div>
 
+      {item.fotoSolicitante && (
+        <Field label="Foto del solicitante">
+          <img src={item.fotoSolicitante} alt="Reportado por el solicitante"
+            className="rounded-md max-h-48 border w-full object-contain" style={bLine} />
+        </Field>
+      )}
+
       {soloTecnico ? (
         <div className="text-xs rounded-md p-2.5" style={{ background: COLORS.cream, color: COLORS.slate }}>
           Quedará asignada a <span className="font-semibold" style={cChar}>{soloTecnico.nombre}</span>.
@@ -4443,7 +4700,7 @@ function FormActivar({ item, data, onConfirm, onClose, soloTecnico }) {
         onClick={() => { onConfirm({ tecnicoId, fecha, duracionValor: Number(durValor) || 0, duracionUnidad: durUnidad }); onClose(); }}
         className="w-full py-2.5 rounded-md font-semibold text-sm text-white disabled:opacity-40"
         style={{ background: esPrev ? COLORS.orange : COLORS.charcoal }}>
-        {soloTecnico ? "Adelantar y asignarme" : esPrev ? "Crear orden de trabajo" : "Programar atención"}
+        {soloTecnico ? "Programar" : esPrev ? "Crear orden de trabajo" : "Programar atención"}
       </button>
     </div>
   );
