@@ -3190,7 +3190,7 @@ function FormReportarNovedad({
   );
 }
 
-function BuscadorQR({ sede, onFound }) {
+function BuscadorQR({ sedes, onFound }) {
   const videoRef = useRef(null);
   const lienzoRef = useRef(null);
   const streamRef = useRef(null);
@@ -3205,7 +3205,7 @@ function BuscadorQR({ sede, onFound }) {
   const soportaCamara = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
 
   const resolver = (texto) => {
-    const activos = flattenActivos([sede]);
+    const activos = flattenActivos(sedes);
     const crudo = (texto || "").trim();
     let id = crudo;
     try { id = new URL(crudo).searchParams.get("activo") || crudo; } catch (_) {}
@@ -3283,7 +3283,7 @@ function BuscadorQR({ sede, onFound }) {
               onFound(encontrado);
               return;
             }
-            setAviso("Ese código no corresponde a un activo de esta sede.");
+            setAviso("Ese código no corresponde a ningún activo de tus sedes.");
           }
         } catch (_) { /* fotograma ilegible: se intenta con el siguiente */ }
       }
@@ -3354,30 +3354,78 @@ function BuscadorQR({ sede, onFound }) {
   );
 }
 
-function FaseActivos({ fase, onReportar }) {
-  const [open, setOpen] = useState(false);
+/* ============================================================================
+   MODAL DE REPORTE  ·  un solo flujo para los tres roles
+   ----------------------------------------------------------------------------
+   Al reportar una novedad, primero se decide cómo se identifica el activo:
+   escaneando su QR o eligiéndolo de las listas. Después, el formulario es el
+   mismo en ambos casos. Esto reemplaza el recorrido por fases y activos que
+   antes tenía el solicitante, que obligaba a navegar el árbol completo para
+   llegar a un botón de reporte.
+========================================================================== */
+function ModalReportarNovedad({ data, sedes, user, elegirSolicitante, onSubmit, onClose }) {
+  const [paso, setPaso] = useState("inicio");   // inicio · qr · manual
+  const [ubicacion, setUbicacion] = useState(null);
+
+  const titulo = paso === "qr" ? "Escanear código QR" : "Reportar novedad";
+
   return (
-    <div className="border rounded-md overflow-hidden" style={cardStyle}>
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2.5 p-3" style={{ background: open ? COLORS.cream : "white" }}>
-        {open ? <ChevronDown size={15} color={COLORS.charcoal} /> : <ChevronRight size={15} color={COLORS.charcoal} />}
-        <Layers size={14} color={COLORS.orange} />
-        <span className="text-sm font-semibold flex-1 text-left" style={cChar}>{fase.nombre}</span>
-        <span className="text-[10px]" style={cSlate}>{fase.activos.length} activos</span>
-      </button>
-      {open && (
-        <div className="p-2.5 space-y-2" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-          {fase.activos.map((a) => (
-            <div key={a.id} className="flex items-center justify-between gap-2 border rounded-md p-2.5" style={bLine}>
-              <p className="text-xs font-semibold truncate" style={cChar}>{a.nombre}</p>
-              <button onClick={() => onReportar(fase, a)} className="text-[11px] font-semibold px-2.5 py-1.5 rounded shrink-0" style={{ background: COLORS.orange, color: "white" }}>
-                Reportar
-              </button>
-            </div>
-          ))}
-          {fase.activos.length === 0 && <Empty>Sin activos en esta fase.</Empty>}
+    <Modal title={titulo} onClose={onClose} wide>
+      {paso === "inicio" && (
+        <div className="space-y-3">
+          <p className="text-xs" style={cSlate}>
+            ¿Cómo quieres identificar el activo con la novedad?
+          </p>
+
+          <button onClick={() => setPaso("qr")}
+            className="w-full flex items-center gap-3 p-3 rounded-md border text-left"
+            style={{ borderColor: COLORS.orange, background: `${COLORS.orange}0D` }}>
+            <QrCode size={22} color={COLORS.orange} className="shrink-0" />
+            <span>
+              <span className="text-sm font-semibold block" style={cChar}>Escanear QR</span>
+              <span className="text-[11px]" style={cSlate}>
+                Apunta la cámara al código pegado en el equipo. Es lo más rápido si estás frente a él.
+              </span>
+            </span>
+          </button>
+
+          <button onClick={() => setPaso("manual")}
+            className="w-full flex items-center gap-3 p-3 rounded-md border text-left"
+            style={{ borderColor: COLORS.line, background: "white" }}>
+            <Layers size={22} color={COLORS.charcoal} className="shrink-0" />
+            <span>
+              <span className="text-sm font-semibold block" style={cChar}>Elegir de la lista</span>
+              <span className="text-[11px]" style={cSlate}>
+                Selecciona sede, fase y activo. Útil si el código está dañado o reportas a distancia.
+              </span>
+            </span>
+          </button>
         </div>
       )}
-    </div>
+
+      {paso === "qr" && (
+        <div className="space-y-3">
+          <BuscadorQR sedes={sedes} onFound={(a) => { setUbicacion(a); setPaso("form"); }} />
+          <button onClick={() => setPaso("inicio")} className="w-full text-xs font-semibold" style={cSlate}>
+            ← Volver
+          </button>
+        </div>
+      )}
+
+      {paso === "manual" && (
+        <FormReportarNovedad
+          user={user} sedes={sedes} usuarios={data.usuarios}
+          elegirSolicitante={elegirSolicitante}
+          onSubmit={onSubmit} onClose={onClose} />
+      )}
+
+      {paso === "form" && ubicacion && (
+        <FormReportarNovedad
+          ubicacion={ubicacion} user={user} sedes={data.sedes} usuarios={data.usuarios}
+          elegirSolicitante={elegirSolicitante}
+          onSubmit={onSubmit} onClose={onClose} />
+      )}
+    </Modal>
   );
 }
 
@@ -3385,8 +3433,8 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
   const sede = data.sedes.find((s) => s.id === user.sedeIds[0]);
   const [tab, setTab] = useState("dashboard");
   const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
-  const [target, setTarget] = useState(null);
-  const [qrOpen, setQrOpen] = useState(false);
+  const [reportar, setReportar] = useState(false);
+  const [ubicDirecta, setUbicDirecta] = useState(null);   // llega por el QR escaneado fuera de la app
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
@@ -3395,7 +3443,7 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
       const p = new URLSearchParams(window.location.search).get("activo");
       if (p) {
         const f = flattenActivos([sede]).find((a) => a.activoId === p);
-        if (f) setTarget(f);
+        if (f) setUbicDirecta(f);   // el QR del activo abre su formulario de una vez
       }
     } catch (_) {}
   }, [sede?.id]);
@@ -3461,10 +3509,10 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
 
       {tab === "solicitudes" && (
         <div className="mt-4">
-          <button onClick={() => setQrOpen(true)}
-            className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2.5 rounded-md border"
-            style={{ borderColor: COLORS.line, color: COLORS.charcoal, background: "white" }}>
-            <QrCode size={14} /> Escanear QR de un activo
+          <button onClick={() => setReportar(true)}
+            className="w-full flex items-center justify-center gap-2 text-sm font-semibold py-3 rounded-md text-white"
+            style={{ background: COLORS.orange }}>
+            <Plus size={16} /> Reportar novedad
           </button>
 
           {msg && (
@@ -3472,14 +3520,6 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
               <CheckCircle2 size={16} /> {msg}
             </div>
           )}
-
-          <SectionTitle>Fases y activos</SectionTitle>
-          <div className="space-y-2">
-            {sede.fases.map((f) => (
-              <FaseActivos key={f.id} fase={f} onReportar={(fase, act) => setTarget({ sedeId: sede.id, faseId: fase.id, activoId: act.id })} />
-            ))}
-            {sede.fases.length === 0 && <Empty>Esta sede aún no tiene fases configuradas.</Empty>}
-          </div>
 
           <SectionTitle count={visibles.length}>Mis solicitudes</SectionTitle>
 
@@ -3516,16 +3556,18 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
         </div>
       )}
 
-      {target && (
-        <Modal title="Reportar novedad" onClose={() => setTarget(null)}>
-          <FormReportarNovedad ubicacion={target} user={user} sedes={data.sedes}
-            onSubmit={(form) => crearSolicitud(target, form)} onClose={() => setTarget(null)} />
+      {ubicDirecta && (
+        <Modal title="Reportar novedad" onClose={() => setUbicDirecta(null)} wide>
+          <FormReportarNovedad ubicacion={ubicDirecta} user={user} sedes={data.sedes}
+            onSubmit={(form) => crearSolicitud(ubicDirecta, form)} onClose={() => setUbicDirecta(null)} />
         </Modal>
       )}
-      {qrOpen && (
-        <Modal title="Escanear QR" onClose={() => setQrOpen(false)}>
-          <BuscadorQR sede={sede} onFound={(a) => { setTarget(a); setQrOpen(false); }} />
-        </Modal>
+
+      {reportar && (
+        <ModalReportarNovedad
+          data={data} sedes={[sede]} user={user}
+          onSubmit={(form) => crearSolicitud({ sedeId: form.sedeId, faseId: form.faseId, activoId: form.activoId }, form)}
+          onClose={() => setReportar(false)} />
       )}
     </div>
    </ProveedorDetalle>
@@ -4099,10 +4141,8 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
       )}
 
       {hallazgo && (
-        <Modal title="Reportar novedad" onClose={() => setHallazgo(false)} wide>
-          <FormReportarNovedad sedes={misSedes} user={user} usuarios={data.usuarios}
-            onSubmit={crearHallazgo} onClose={() => setHallazgo(false)} />
-        </Modal>
+        <ModalReportarNovedad data={data} sedes={misSedes} user={user}
+          onSubmit={crearHallazgo} onClose={() => setHallazgo(false)} />
       )}
     </div>
    </ProveedorDetalle>
@@ -5191,11 +5231,8 @@ function AdminCorrectivos({ data, persist, user }) {
       )}
 
       {nuevo && (
-        <Modal title="Reportar novedad" onClose={() => setNuevo(false)} wide>
-          <FormReportarNovedad
-            sedes={data.sedes} user={user} usuarios={data.usuarios} elegirSolicitante
-            onSubmit={crearCorrectivo} onClose={() => setNuevo(false)} />
-        </Modal>
+        <ModalReportarNovedad data={data} sedes={data.sedes} user={user} elegirSolicitante
+          onSubmit={crearCorrectivo} onClose={() => setNuevo(false)} />
       )}
 
       <SeccionPlegable titulo="Por activar" count={porActivar.length} color={COLORS.slate}
