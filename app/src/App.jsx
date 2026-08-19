@@ -7,6 +7,9 @@ import React, {
 } from "react";
 import jsQR from "jsqr";
 import logoInnova from "./assets/Logo_ISE.png";
+import logoReporte from "./assets/innova.png";
+import { jsPDF } from "jspdf";
+import html2canvas from "html2canvas";
 import { hasAppData, loadAppState, saveAppState } from "./api/db.js";
 import {
   QrCode, Wrench, ClipboardList, BarChart3, Plus, X, ChevronRight, ChevronDown,
@@ -1573,7 +1576,11 @@ function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, catalogo = [
   const materiales = item.materiales || [];
   const estado = item.materialesEstado || "";
   const puedeListar = (rol === "tecnico" || rol === "admin") && (estado === "" || estado === "borrador");
-  const puedeCostear = rol === "admin" && estado === "pendiente_costeo";
+  /* El admin costea mientras el cliente no haya decidido. Antes solo podía
+     hacerlo en "pendiente_costeo", así que un precio mal digitado quedaba
+     congelado en cuanto se enviaba a aprobación y no había forma de corregirlo. */
+  const puedeCostear = rol === "admin" && (estado === "pendiente_costeo" || estado === "pendiente_aprobacion" || estado === "en_espera");
+  const yaEnviado = rol === "admin" && (estado === "pendiente_aprobacion" || estado === "en_espera");
   const puedeAprobar = (rol === "cliente" || rol === "admin") && (estado === "pendiente_aprobacion" || estado === "en_espera");
   const total = costoEstimado(item);
   const info = MAT_ESTADO[estado];
@@ -1721,10 +1728,33 @@ function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, catalogo = [
         </div>
       )}
 
-      {puedeCostear && (
+      {puedeCostear && !yaEnviado && (
         <button onClick={() => onUpdate({ materialesEstado: "pendiente_aprobacion" })}
           className="w-full mt-2 text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.orange }}>
           Enviar a aprobación del cliente
+        </button>
+      )}
+
+      {yaEnviado && (
+        <div className="mt-2 rounded-md p-2.5" style={{ background: `${COLORS.ambar}12` }}>
+          <p className="text-[11px]" style={cChar}>
+            Ya está con el cliente. Puedes corregir cantidades y precios aquí mismo;
+            el cambio se refleja de inmediato en lo que él ve.
+          </p>
+          <button onClick={() => onUpdate({ materialesEstado: "pendiente_costeo" })}
+            className="w-full mt-2 text-xs font-semibold py-2 rounded-md border"
+            style={{ borderColor: COLORS.ambar, color: COLORS.ambar, background: "white" }}>
+            Retirar de aprobación y volver a presupuesto
+          </button>
+        </div>
+      )}
+
+      {rol === "admin" && (estado === "aprobado" || estado === "rechazado") && (
+        <button onClick={() => onUpdate({ materialesEstado: "pendiente_costeo" })}
+          className="w-full mt-2 text-[11px] font-semibold py-2 rounded-md border"
+          style={{ borderColor: COLORS.line, color: COLORS.slate, background: "white" }}
+          title="Reabre el costeo si hay que corregir un valor ya decidido">
+          Reabrir para corregir
         </button>
       )}
 
@@ -2739,6 +2769,36 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
   const sedeIds = sedes.map((s) => s.id);
   const [sedeFiltro, setSedeFiltro] = useState(null);
   const [avisoReporte, setAvisoReporte] = useState("");
+  const [genPDF, setGenPDF] = useState(false);
+  const [progMes, setProgMes] = useState("");
+
+  /* El PDF del mes puede tardar unos segundos, así que el avance se muestra
+     en el botón en lugar de dejar la pantalla sin respuesta. */
+  const pdfMensual = async (accion) => {
+    setGenPDF(true); setAvisoReporte(""); setProgMes("Preparando…");
+    try {
+      const blob = await generarPDF(construirReporteMensualHTML(data, mes), { onProgreso: setProgMes });
+      const nombre = `reporte-gestion-${mes}.pdf`;
+      if (accion === "compartir") {
+        const via = await compartirPDF(blob, nombre);
+        setAvisoReporte(via === "compartido" ? "Reporte compartido."
+          : via === "cancelado" ? "" : "Tu dispositivo no permite compartir archivos, así que se descargó el PDF.");
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = nombre;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setAvisoReporte(`Descargado ${nombre}`);
+      }
+    } catch (e) {
+      console.error("[pdf]", e);
+      setAvisoReporte("No se pudo generar el PDF del mes.");
+    } finally {
+      setGenPDF(false); setProgMes("");
+      setTimeout(() => setAvisoReporte(""), 6000);
+    }
+  };
 
   const solicitudes = data.solicitudes.filter((s) => sedeIds.includes(s.sedeId) && (!sedeFiltro || s.sedeId === sedeFiltro));
   const ordenes = data.ordenes.filter((o) => sedeIds.includes(o.sedeId) && (!sedeFiltro || o.sedeId === sedeFiltro));
@@ -2786,29 +2846,15 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
         </div>
         {mostrarCosto && (
           <div className="flex items-center gap-1.5 flex-wrap">
-            <button
-              onClick={() => {
-                const via = imprimirHTML(construirReporteMensualHTML(data, mes), `reporte-gestion-${mes}.html`);
-                if (via !== "ventana") {
-                  const msgs = {
-                    iframe: "El navegador bloqueó la pestaña de impresión; se abrió de otra forma. Si no ves el diálogo de imprimir, usa \"Descargar\".",
-                    descarga: "No se pudo abrir la impresión automática; se descargó el archivo para que lo abras e imprimas.",
-                    fallo: "No se pudo generar el reporte automáticamente. Usa el botón \"Descargar\" para intentarlo de nuevo.",
-                  };
-                  setAvisoReporte(msgs[via] || "");
-                  setTimeout(() => setAvisoReporte(""), 7000);
-                }
-              }}
-              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white"
+            <button onClick={() => pdfMensual("compartir")} disabled={genPDF}
+              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white disabled:opacity-40"
               style={{ background: COLORS.orange }}>
-              <Download size={13} /> Reporte de gestión mensual
+              <Send size={13} /> {genPDF ? (progMes || "Generando…") : "Compartir reporte mensual"}
             </button>
-            <button
-              onClick={() => descargarHTML(construirReporteMensualHTML(data, mes), `reporte-gestion-${mes}.html`)}
-              title="Descarga el reporte como archivo HTML; ábrelo en el navegador y usa Imprimir → Guardar como PDF"
-              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md border"
+            <button onClick={() => pdfMensual("descargar")} disabled={genPDF}
+              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md border disabled:opacity-40"
               style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
-              Descargar
+              <Download size={13} /> Descargar PDF
             </button>
           </div>
         )}
@@ -6951,6 +6997,7 @@ body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:9pt;l
 .hdr .sub{font-size:9pt;color:#787D85;margin-top:2px}
 .marca{text-align:right;font-size:8pt;color:#787D85}
 .marca b{display:block;font-size:12pt;color:#ED5B23;letter-spacing:.06em}
+.marca img{max-height:34px;margin-bottom:3px}
 h2{font-size:12pt;text-transform:uppercase;letter-spacing:.03em}
 h3{font-size:10pt;text-transform:uppercase;letter-spacing:.05em;margin:16px 0 7px;padding-bottom:3px;border-bottom:1px solid #D8D4CB}
 h4{font-size:8pt;text-transform:uppercase;letter-spacing:.05em;color:#787D85;margin-bottom:5px}
@@ -6997,7 +7044,7 @@ table{width:100%;border-collapse:collapse;font-size:8pt}
 <div class="hdr">
   <div><h1>Reporte de gestión mensual</h1>
     <p class="sub">${_esc(mesLabel(mes))} · ${sedes.length} sede(s) · ${kpi.estudiantes} estudiantes</p></div>
-  <div class="marca"><b>IndustriaMe</b>Gestión de mantenimiento<br>${_esc(fmtDate(new Date()))}</div>
+  <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${_esc(fmtDate(new Date()))}</div>
 </div>
 
 ${bloqueResumenUnificado(data, sedes, mes)}
@@ -7123,6 +7170,101 @@ function checklistHTML(items) {
 }
 
 /* Documento HTML autónomo en A4 listo para imprimir o guardar como PDF. */
+/* El logo se referencia por su URL final, la que Vite genera al compilar.
+   Dentro de las plantillas HTML no se puede usar el import directamente. */
+const LOGO_REPORTE = logoReporte;
+
+/* ============================================================================
+   GENERACIÓN DE PDF
+   ----------------------------------------------------------------------------
+   El documento HTML se renderiza fuera de pantalla, se convierte a imagen y se
+   reparte en páginas A4. Es la vía que permite entregar un archivo PDF real,
+   en lugar de depender del diálogo de impresión del navegador.
+========================================================================== */
+async function generarPDF(html, { onProgreso } = {}) {
+  const contenedor = document.createElement("div");
+  // Fuera de la vista pero con ancho real de A4, para que el diseño no se deforme
+  contenedor.style.cssText =
+    "position:fixed;left:-10000px;top:0;width:794px;background:#fff;z-index:-1;";
+  contenedor.innerHTML = html.replace(/<!DOCTYPE[\s\S]*?<body>/i, "").replace(/<\/body>[\s\S]*$/i, "");
+
+  // Los estilos del documento se copian aparte
+  const estilos = (html.match(/<style>([\s\S]*?)<\/style>/i) || [])[1] || "";
+  const tag = document.createElement("style");
+  tag.textContent = estilos;
+  contenedor.prepend(tag);
+  document.body.appendChild(contenedor);
+
+  try {
+    onProgreso?.("Preparando el documento…");
+    // Esperar a que las fotos terminen de cargar antes de capturar
+    const imgs = [...contenedor.querySelectorAll("img")];
+    await Promise.all(imgs.map((img) => (img.complete ? null : new Promise((r) => {
+      img.onload = r; img.onerror = r;
+    }))));
+    await new Promise((r) => setTimeout(r, 120));
+
+    onProgreso?.("Dibujando las páginas…");
+    const lienzo = await html2canvas(contenedor, {
+      scale: 2, useCORS: true, backgroundColor: "#ffffff", logging: false,
+    });
+
+    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    const anchoPag = pdf.internal.pageSize.getWidth();
+    const altoPag = pdf.internal.pageSize.getHeight();
+    const margen = 8;
+    const anchoUtil = anchoPag - margen * 2;
+    const altoTotal = (lienzo.height * anchoUtil) / lienzo.width;
+
+    // Se recorta el lienzo en trozos del alto de una página
+    const altoTrozoPx = Math.floor((altoPag - margen * 2) * (lienzo.width / anchoUtil));
+    let y = 0, pagina = 0;
+
+    while (y < lienzo.height) {
+      const alto = Math.min(altoTrozoPx, lienzo.height - y);
+      const trozo = document.createElement("canvas");
+      trozo.width = lienzo.width;
+      trozo.height = alto;
+      trozo.getContext("2d").drawImage(lienzo, 0, y, lienzo.width, alto, 0, 0, lienzo.width, alto);
+
+      if (pagina > 0) pdf.addPage();
+      pdf.addImage(trozo.toDataURL("image/jpeg", 0.88), "JPEG",
+        margen, margen, anchoUtil, (alto * anchoUtil) / lienzo.width);
+
+      y += alto;
+      pagina++;
+      onProgreso?.(`Página ${pagina}…`);
+    }
+
+    return pdf.output("blob");
+  } finally {
+    document.body.removeChild(contenedor);
+  }
+}
+
+/* Compartir el PDF por WhatsApp, correo o lo que ofrezca el dispositivo.
+   En móvil usa el menú nativo; en escritorio, donde no existe, lo descarga. */
+async function compartirPDF(blob, nombre) {
+  const archivo = new File([blob], nombre, { type: "application/pdf" });
+
+  if (navigator.canShare?.({ files: [archivo] })) {
+    try {
+      await navigator.share({ files: [archivo], title: nombre });
+      return "compartido";
+    } catch (e) {
+      if (e?.name === "AbortError") return "cancelado";   // el usuario cerró el menú
+      console.error("[compartir]", e);
+    }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = nombre;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  return "descargado";
+}
+
 function construirReporteHTML(items, data, meta) {
   const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   const nom = (id) => esc(usuarioNombre(data.usuarios, id));
@@ -7172,6 +7314,10 @@ function construirReporteHTML(items, data, meta) {
       </div>
 
       ${checklistHTML(a.checklist)}
+      ${(a.fotoSolicitante || a.foto) ? `<div class="blk"><h4>Registro fotográfico</h4><div class="fotos">
+        ${a.fotoSolicitante ? `<figure><img src="${a.fotoSolicitante}"><figcaption>Reportado por el solicitante</figcaption></figure>` : ""}
+        ${a.foto ? `<figure><img src="${a.foto}"><figcaption>Evidencia del técnico</figcaption></figure>` : ""}
+      </div></div>` : ""}
       ${(a.reprogramaciones || []).length ? `<div class="blk"><h4>Reprogramaciones (${a.reprogramaciones.length})</h4>${
         a.reprogramaciones.map((r) => `<div class="rep">
           <b>${esc(r.fechaAnterior || "sin fecha")} → ${esc(r.fechaNueva)}</b> · ${esc(r.motivo)}
@@ -7234,6 +7380,11 @@ tbody tr:nth-child(even){background:#F7F6F3}
 .chk .p-val{width:30%;text-align:right;white-space:nowrap}
 .rep{border-left:2px solid #D9A441;padding:2px 0 2px 7px;margin-bottom:4px;font-size:8pt}
 .rep .mut{color:#8D939B;font-size:7.5pt}
+.fotos{display:flex;gap:10px;flex-wrap:wrap}
+.fotos figure{margin:0;max-width:48%}
+.fotos img{width:100%;border:1px solid #D8D4CB;border-radius:2px;max-height:200px;object-fit:contain}
+.fotos figcaption{font-size:7pt;color:#8D939B;margin-top:2px;text-align:center}
+.marca img{max-height:34px;margin-bottom:3px}
 .firma{display:flex;gap:30px;margin-top:14px;padding-top:6px}
 .firma div{flex:1;text-align:center}
 .firma span{display:block;border-bottom:1px solid #8D939B;height:22px}
@@ -7243,7 +7394,7 @@ tbody tr:nth-child(even){background:#F7F6F3}
 </style></head><body>
 <div class="hdr">
   <div><h1>${esc(meta.titulo)}</h1><p class="sub">${esc(meta.subtitulo)}</p></div>
-  <div class="marca"><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(meta.emitido)}</div>
+  <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(meta.emitido)}</div>
 </div>
 
 <div class="resumen">
@@ -7380,6 +7531,44 @@ function VistaReportes({ data, sedes, user }) {
   };
 
   const generar = () => construirReporteHTML(marcadas, data, meta);
+
+  const [generando, setGenerando] = useState(false);
+  const [progreso, setProgreso] = useState("");
+  const [avisoPDF, setAvisoPDF] = useState("");
+
+  /* El PDF puede tardar unos segundos si hay muchas fotos, así que se avisa
+     del avance en el propio botón en vez de dejar la pantalla congelada. */
+  const hacerPDF = async (accion) => {
+    setGenerando(true);
+    setAvisoPDF("");
+    setProgreso("Preparando…");
+    try {
+      const blob = await generarPDF(generar(), { onProgreso: setProgreso });
+      const nombre = `parte-trabajo-${hoy}.pdf`;
+      if (accion === "compartir") {
+        const via = await compartirPDF(blob, nombre);
+        setAvisoPDF(
+          via === "compartido" ? "Reporte compartido."
+          : via === "cancelado" ? ""
+          : "Tu dispositivo no permite compartir archivos, así que se descargó el PDF."
+        );
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = nombre;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setAvisoPDF(`Descargado ${nombre}`);
+      }
+    } catch (e) {
+      console.error("[pdf]", e);
+      setAvisoPDF("No se pudo generar el PDF. Intenta con menos órdenes seleccionadas.");
+    } finally {
+      setGenerando(false);
+      setProgreso("");
+      setTimeout(() => setAvisoPDF(""), 6000);
+    }
+  };
   const tecnicos = data.usuarios.filter((u) => u.rol === "tecnico");
 
   return (
@@ -7437,20 +7626,27 @@ function VistaReportes({ data, sedes, user }) {
 
       {/* Acciones */}
       <div className="flex items-center gap-2 mb-3 flex-wrap">
-        <button onClick={() => imprimirHTML(generar())} disabled={marcadas.length === 0}
+        <button onClick={() => hacerPDF("compartir")} disabled={marcadas.length === 0 || generando}
           className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white disabled:opacity-40"
           style={{ background: COLORS.orange }}>
-          <Download size={13} /> Imprimir / Guardar PDF
+          <Send size={13} /> {generando ? (progreso || "Generando…") : "Compartir PDF"}
         </button>
-        <button onClick={() => descargarHTML(generar(), `orden-trabajo-${hoy}.html`)} disabled={marcadas.length === 0}
+        <button onClick={() => hacerPDF("descargar")} disabled={marcadas.length === 0 || generando}
           className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md border disabled:opacity-40"
           style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
-          Descargar archivo
+          <Download size={13} /> Descargar PDF
         </button>
         <span className="text-[11px]" style={cSlate}>
           {marcadas.length} de {filtradas.length} orden(es) en el reporte
         </span>
       </div>
+
+      {avisoPDF && (
+        <p className="text-[11px] rounded-md px-3 py-2 mb-3"
+          style={{ background: `${COLORS.verde}15`, color: COLORS.charcoal }}>
+          {avisoPDF}
+        </p>
+      )}
 
       {/* Selección */}
       <div className="border rounded-md overflow-x-auto" style={cardStyle}>
