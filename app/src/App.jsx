@@ -1116,11 +1116,13 @@ function useAcciones(data, persist, usuario) {
         ? { ...data, stock, ordenes: data.ordenes.map((o) => (o.id === item.id ? sinConsumo(o) : o)) }
         : { ...data, stock, solicitudes: data.solicitudes.map((x) => (x.id === item.id ? sinConsumo(x) : x)) });
     },
-    updateActividad: (item, patch) => {
+    updateActividad: (item, patch, opciones = {}) => {
       /* Cada guardado deja rastro: se comparan los campos seguidos y se anexan
          al log de la actividad. Queda oculto en la tarjeta y se consulta desde
          el historial, para no ensuciar la vista de trabajo. */
-      const movimientos = diffCambios(item, patch, data.usuarios);
+      // Los ajustes administrativos de fecha no se registran: son correcciones
+      // de captura, no movimientos reales de la orden
+      const movimientos = opciones.sinRegistro ? [] : diffCambios(item, patch, data.usuarios);
       const sello = `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
       const nuevoLog = movimientos.length
         ? [...(item.log || []), ...movimientos.map((m) => ({
@@ -2651,9 +2653,9 @@ function Login({ usuarios, onLogin }) {
         <img src={logoInnova} alt="Innova Schools"
           className="mx-auto w-auto object-contain" style={{ maxHeight: 92 }} />
         <h1 className="mt-4 font-bold text-xl" style={{ color: COLORS.charcoal, fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.02em" }}>
-          Mantenimiento - InnovaSchools EC
+          Mantenimiento Facilidades - Innova Schools EC
         </h1>
-        <p className="text-xs mt-1" style={cSlate}>IndustriaMe · Gestión de Activos</p>
+        <p className="text-xs mt-1" style={cSlate}>IndustriaMe · Gestión de instalaciones</p>
       </div>
 
       <div className="space-y-3">
@@ -3789,6 +3791,116 @@ function ArbolPendientes({ sedes, todosLosSedes, usuarios, pendientes, onActivar
   );
 }
 
+/* Ajuste administrativo de fechas.
+
+   Cuando el trabajo se hizo pero no se registró en el momento —sin señal en
+   sitio, la app no estaba abierta, se cargó al día siguiente— las fechas del
+   sistema no reflejan lo que pasó. Este panel permite corregirlas.
+
+   A diferencia del resto de cambios, estos NO quedan en el historial: son
+   correcciones de captura, no movimientos de la orden. Por eso está reservado
+   al supervisor y va plegado, para que no se use por descuido. */
+function AjusteFechas({ item, data, acciones }) {
+  const [abierto, setAbierto] = useState(false);
+  const esServ = item.tipo === "servicio";
+  const esPrev = item.tipo === "preventivo";
+
+  const [fecha, setFecha] = useState(item.fecha || "");
+  const [hora, setHora] = useState(item.hora || "");
+  const [prog, setProg] = useState(item.fechaProgramada || "");
+  const [compl, setCompl] = useState(item.fechaCompletada || "");
+  const [horaCompl, setHoraCompl] = useState(item.horaCompletada || "");
+  const [guardado, setGuardado] = useState(false);
+
+  useEffect(() => {
+    setFecha(item.fecha || ""); setHora(item.hora || "");
+    setProg(item.fechaProgramada || ""); setCompl(item.fechaCompletada || "");
+    setHoraCompl(item.horaCompletada || "");
+  }, [item.fecha, item.hora, item.fechaProgramada, item.fechaCompletada, item.horaCompletada]);
+
+  const cambio =
+    fecha !== (item.fecha || "") || hora !== (item.hora || "") ||
+    prog !== (item.fechaProgramada || "") || compl !== (item.fechaCompletada || "") ||
+    horaCompl !== (item.horaCompletada || "");
+
+  // Coherencia mínima: no se puede cerrar antes de reportar
+  const incoherente = fecha && compl && compl < fecha;
+
+  const guardar = () => {
+    const patch = { fechaProgramada: prog, fechaCompletada: compl, horaCompletada: horaCompl };
+    if (!esPrev) { patch.fecha = fecha; patch.hora = hora; }
+    acciones.updateActividad(item, patch, { sinRegistro: true });
+    setGuardado(true);
+    setTimeout(() => setGuardado(false), 2500);
+  };
+
+  return (
+    <div className="border rounded-md" style={{ borderColor: COLORS.line }}>
+      <button onClick={() => setAbierto(!abierto)} className="w-full flex items-center gap-2 px-2.5 py-2">
+        {abierto ? <ChevronDown size={13} color={COLORS.slate} /> : <ChevronRight size={13} color={COLORS.slate} />}
+        <CalendarDays size={12} color={COLORS.slate} />
+        <span className="text-[11px] font-semibold flex-1 text-left" style={cSlate}>Ajustar fechas</span>
+      </button>
+
+      {abierto && (
+        <div className="px-2.5 pb-2.5 space-y-2.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+          <p className="text-[10px] pt-2" style={cSlate}>
+            Corrige las fechas cuando el registro se hizo después del trabajo real.
+            Estos ajustes no aparecen en el historial.
+          </p>
+
+          {!esPrev && (
+            <div className="grid grid-cols-2 gap-2">
+              <Field label={esServ ? "Fecha de solicitud" : "Fecha de reporte"}>
+                <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)}
+                  className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
+              </Field>
+              <Field label="Hora">
+                <input type="time" value={hora} onChange={(e) => setHora(e.target.value)}
+                  className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
+              </Field>
+            </div>
+          )}
+
+          <Field label="Fecha programada">
+            <input type="date" value={prog} onChange={(e) => setProg(e.target.value)}
+              className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
+          </Field>
+
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Fecha de ejecución">
+              <input type="date" value={compl} onChange={(e) => setCompl(e.target.value)}
+                className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
+            </Field>
+            <Field label="Hora de cierre">
+              <input type="time" value={horaCompl} onChange={(e) => setHoraCompl(e.target.value)}
+                className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
+            </Field>
+          </div>
+
+          {incoherente && (
+            <p className="text-[10px]" style={{ color: COLORS.rojo }}>
+              La fecha de ejecución es anterior a la de reporte. Revísala: el tiempo de respuesta saldría negativo.
+            </p>
+          )}
+
+          {compl && item.estado !== "completada" && (
+            <p className="text-[10px]" style={{ color: COLORS.ambar }}>
+              Pusiste fecha de ejecución pero la orden no está completada. Cámbiale el estado arriba para que cuente como cerrada.
+            </p>
+          )}
+
+          <button onClick={guardar} disabled={!cambio || incoherente}
+            className="w-full py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40"
+            style={{ background: guardado ? COLORS.verde : COLORS.charcoal }}>
+            {guardado ? "Fechas ajustadas" : "Guardar ajuste"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicial, permitirReasignar }) {
   const [open, setOpen] = useState(!!abiertoInicial);
   const [estado, setEstado] = useState(item.estado);
@@ -4023,6 +4135,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               puedeEnviar={ESTADOS_ABIERTOS.includes(estado)}
               catalogo={stockSede} onAltaArticulo={(nombre, unidad) => acciones.altaArticulo(item.sedeId, nombre, unidad)} />
           )}
+
+          {rol === "admin" && <AjusteFechas item={item} data={data} acciones={acciones} />}
 
           <div className="flex items-center justify-between gap-2">
             <BotonHistorial item={item} data={data} />
