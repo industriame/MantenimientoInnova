@@ -1116,12 +1116,19 @@ function useAcciones(data, persist, usuario) {
         ? { ...data, stock, ordenes: data.ordenes.map((o) => (o.id === item.id ? sinConsumo(o) : o)) }
         : { ...data, stock, solicitudes: data.solicitudes.map((x) => (x.id === item.id ? sinConsumo(x) : x)) });
     },
+    /* Eliminar una actividad por completo. Pensado para depurar durante las
+       pruebas: en operación normal las órdenes se cierran, no se borran. */
+    eliminarActividad: (item) => {
+      if (item.tipo === "preventivo") return persist((d) => ({ ...d, ordenes: d.ordenes.filter((o) => o.id !== item.id) }));
+      if (item.tipo === "servicio") return persist((d) => ({ ...d, servicios: d.servicios.filter((x) => x.id !== item.id) }));
+      return persist((d) => ({ ...d, solicitudes: d.solicitudes.filter((x) => x.id !== item.id) }));
+    },
     updateActividad: (item, patch, opciones = {}) => {
       /* Cada guardado deja rastro: se comparan los campos seguidos y se anexan
          al log de la actividad. Queda oculto en la tarjeta y se consulta desde
          el historial, para no ensuciar la vista de trabajo. */
-      // Los ajustes administrativos de fecha no se registran: son correcciones
-      // de captura, no movimientos reales de la orden
+      // Las correcciones administrativas no se registran: son ajustes de
+      // captura durante las pruebas, no movimientos reales de la orden
       const movimientos = opciones.sinRegistro ? [] : diffCambios(item, patch, data.usuarios);
       const sello = `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
       const nuevoLog = movimientos.length
@@ -3791,116 +3798,6 @@ function ArbolPendientes({ sedes, todosLosSedes, usuarios, pendientes, onActivar
   );
 }
 
-/* Ajuste administrativo de fechas.
-
-   Cuando el trabajo se hizo pero no se registró en el momento —sin señal en
-   sitio, la app no estaba abierta, se cargó al día siguiente— las fechas del
-   sistema no reflejan lo que pasó. Este panel permite corregirlas.
-
-   A diferencia del resto de cambios, estos NO quedan en el historial: son
-   correcciones de captura, no movimientos de la orden. Por eso está reservado
-   al supervisor y va plegado, para que no se use por descuido. */
-function AjusteFechas({ item, data, acciones }) {
-  const [abierto, setAbierto] = useState(false);
-  const esServ = item.tipo === "servicio";
-  const esPrev = item.tipo === "preventivo";
-
-  const [fecha, setFecha] = useState(item.fecha || "");
-  const [hora, setHora] = useState(item.hora || "");
-  const [prog, setProg] = useState(item.fechaProgramada || "");
-  const [compl, setCompl] = useState(item.fechaCompletada || "");
-  const [horaCompl, setHoraCompl] = useState(item.horaCompletada || "");
-  const [guardado, setGuardado] = useState(false);
-
-  useEffect(() => {
-    setFecha(item.fecha || ""); setHora(item.hora || "");
-    setProg(item.fechaProgramada || ""); setCompl(item.fechaCompletada || "");
-    setHoraCompl(item.horaCompletada || "");
-  }, [item.fecha, item.hora, item.fechaProgramada, item.fechaCompletada, item.horaCompletada]);
-
-  const cambio =
-    fecha !== (item.fecha || "") || hora !== (item.hora || "") ||
-    prog !== (item.fechaProgramada || "") || compl !== (item.fechaCompletada || "") ||
-    horaCompl !== (item.horaCompletada || "");
-
-  // Coherencia mínima: no se puede cerrar antes de reportar
-  const incoherente = fecha && compl && compl < fecha;
-
-  const guardar = () => {
-    const patch = { fechaProgramada: prog, fechaCompletada: compl, horaCompletada: horaCompl };
-    if (!esPrev) { patch.fecha = fecha; patch.hora = hora; }
-    acciones.updateActividad(item, patch, { sinRegistro: true });
-    setGuardado(true);
-    setTimeout(() => setGuardado(false), 2500);
-  };
-
-  return (
-    <div className="border rounded-md" style={{ borderColor: COLORS.line }}>
-      <button onClick={() => setAbierto(!abierto)} className="w-full flex items-center gap-2 px-2.5 py-2">
-        {abierto ? <ChevronDown size={13} color={COLORS.slate} /> : <ChevronRight size={13} color={COLORS.slate} />}
-        <CalendarDays size={12} color={COLORS.slate} />
-        <span className="text-[11px] font-semibold flex-1 text-left" style={cSlate}>Ajustar fechas</span>
-      </button>
-
-      {abierto && (
-        <div className="px-2.5 pb-2.5 space-y-2.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-          <p className="text-[10px] pt-2" style={cSlate}>
-            Corrige las fechas cuando el registro se hizo después del trabajo real.
-            Estos ajustes no aparecen en el historial.
-          </p>
-
-          {!esPrev && (
-            <div className="grid grid-cols-2 gap-2">
-              <Field label={esServ ? "Fecha de solicitud" : "Fecha de reporte"}>
-                <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)}
-                  className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
-              </Field>
-              <Field label="Hora">
-                <input type="time" value={hora} onChange={(e) => setHora(e.target.value)}
-                  className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
-              </Field>
-            </div>
-          )}
-
-          <Field label="Fecha programada">
-            <input type="date" value={prog} onChange={(e) => setProg(e.target.value)}
-              className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
-          </Field>
-
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="Fecha de ejecución">
-              <input type="date" value={compl} onChange={(e) => setCompl(e.target.value)}
-                className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
-            </Field>
-            <Field label="Hora de cierre">
-              <input type="time" value={horaCompl} onChange={(e) => setHoraCompl(e.target.value)}
-                className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
-            </Field>
-          </div>
-
-          {incoherente && (
-            <p className="text-[10px]" style={{ color: COLORS.rojo }}>
-              La fecha de ejecución es anterior a la de reporte. Revísala: el tiempo de respuesta saldría negativo.
-            </p>
-          )}
-
-          {compl && item.estado !== "completada" && (
-            <p className="text-[10px]" style={{ color: COLORS.ambar }}>
-              Pusiste fecha de ejecución pero la orden no está completada. Cámbiale el estado arriba para que cuente como cerrada.
-            </p>
-          )}
-
-          <button onClick={guardar} disabled={!cambio || incoherente}
-            className="w-full py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40"
-            style={{ background: guardado ? COLORS.verde : COLORS.charcoal }}>
-            {guardado ? "Fechas ajustadas" : "Guardar ajuste"}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicial, permitirReasignar }) {
   const [open, setOpen] = useState(!!abiertoInicial);
   const [estado, setEstado] = useState(item.estado);
@@ -3911,8 +3808,31 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   const [durUnidad, setDurUnidad] = useState(item.duracionUnidad || "minutos");
   const [guardado, setGuardado] = useState(null);
   const [reprogramar, setReprogramar] = useState(false);
+  const [confirmarBorrado, setConfirmarBorrado] = useState(false);
   const esPrev = item.tipo === "preventivo";
   const esServ = item.tipo === "servicio";
+  const esCorr = item.tipo === "correctivo";
+
+  /* El supervisor puede corregir cualquier dato directamente sobre la tarjeta.
+     Es lo que permite arreglar registros capturados a destiempo —sin señal en
+     sitio, cargados al día siguiente— sin salir de la orden. */
+  const corrige = rol === "admin";
+  const [txt, setTxt] = useState(esServ ? item.trabajo || "" : esPrev ? item.tarea || "" : item.descripcion || "");
+  const [detalle, setDetalle] = useState(item.detalle || "");
+  const [criticidad, setCriticidad] = useState(item.criticidad || "");
+  const [solicitanteId, setSolicitanteId] = useState(item.solicitanteId || "");
+  const [sedeId, setSedeId] = useState(item.sedeId || "");
+  const [faseId, setFaseId] = useState(item.faseId || "");
+  const [activoId, setActivoId] = useState(item.activoId || "");
+  const [fecha, setFecha] = useState(item.fecha || "");
+  const [hora, setHora] = useState(item.hora || "");
+  const [fProg, setFProg] = useState((esServ ? item.fecha : item.fechaProgramada) || "");
+  const [fCompl, setFCompl] = useState(item.fechaCompletada || "");
+  const [hCompl, setHCompl] = useState(item.horaCompletada || "");
+  const [proveedor, setProveedor] = useState(item.proveedor || "");
+  const [presu, setPresu] = useState(item.presupuesto ?? "");
+  const [presuAp, setPresuAp] = useState(item.presupuestoAprobado ?? "");
+  const [calif, setCalif] = useState(item.calificacion || 0);
   // El admin ajusta el tiempo estimado desde cualquier vista, no solo al activar
   const puedeEditarTiempo = rol === "admin" && !esServ;
   // Reprogramar está disponible mientras la actividad siga abierta
@@ -3929,7 +3849,17 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
     setTecnicoId(item.tecnicoId || "");
     setDurValor(item.duracionValor ?? "");
     setDurUnidad(item.duracionUnidad || "minutos");
-  }, [item.estado, item.observaciones, item.resolucion, item.tecnicoId, item.duracionValor, item.duracionUnidad, open]);
+    setTxt(esServ ? item.trabajo || "" : esPrev ? item.tarea || "" : item.descripcion || "");
+    setDetalle(item.detalle || "");
+    setCriticidad(item.criticidad || "");
+    setSolicitanteId(item.solicitanteId || "");
+    setSedeId(item.sedeId || ""); setFaseId(item.faseId || ""); setActivoId(item.activoId || "");
+    setFecha(item.fecha || ""); setHora(item.hora || "");
+    setFProg((esServ ? item.fecha : item.fechaProgramada) || "");
+    setFCompl(item.fechaCompletada || ""); setHCompl(item.horaCompletada || "");
+    setProveedor(item.proveedor || ""); setPresu(item.presupuesto ?? "");
+    setPresuAp(item.presupuestoAprobado ?? ""); setCalif(item.calificacion || 0);
+  }, [item, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const guardar = () => {
     setGuardado("guardando");
@@ -3940,12 +3870,34 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
       patch.duracionValor = Number(durValor) || 0;
       patch.duracionUnidad = durUnidad;
     }
+
+    // Correcciones del supervisor sobre los datos de la orden
+    if (corrige) {
+      patch.sedeId = sedeId; patch.faseId = faseId; patch.activoId = activoId;
+      if (esServ) {
+        patch.trabajo = txt; patch.detalle = detalle; patch.proveedor = proveedor;
+        patch.presupuesto = Number(presu) || 0;
+        patch.presupuestoAprobado = presuAp === "" ? null : Number(presuAp);
+        patch.fecha = fProg;
+      } else if (esPrev) {
+        patch.tarea = txt;
+        patch.fechaProgramada = fProg;
+      } else {
+        patch.descripcion = txt; patch.criticidad = criticidad;
+        patch.solicitanteId = solicitanteId; patch.calificacion = Number(calif) || 0;
+        patch.fecha = fecha; patch.hora = hora;
+        patch.fechaProgramada = fProg;
+      }
+      patch.fechaCompletada = fCompl;
+      patch.horaCompletada = hCompl;
+    }
     /* Sello de cierre. Al completar se graban fecha y hora automáticamente y
        la actividad se reubica en el calendario al día en que realmente se
        hizo, para que la carga del día programado deje de contarla. El salto
        queda registrado en la bitácora, así no se pierde la fecha original. */
     if (estado === "completada") {
-      if (!item.fechaCompletada) {
+      // Si el supervisor escribió la fecha de cierre, esa manda sobre el sello automático
+      if (!item.fechaCompletada && !patch.fechaCompletada) {
         const ahora = new Date();
         const hoyStr = fmtDate(ahora);
         patch.fechaCompletada = hoyStr;
@@ -3972,7 +3924,9 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
       patch.fechaCompletada = "";
       patch.horaCompletada = "";
     }
-    acciones.updateActividad(item, patch);
+    /* El supervisor corrige registros de captura, así que sus cambios de datos
+       no se anotan en el historial. Los movimientos del técnico sí. */
+    acciones.updateActividad(item, patch, { sinRegistro: corrige });
     setGuardado("ok");
     setTimeout(() => setGuardado(null), 2500);
   };
@@ -4016,12 +3970,77 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
 
       {open && (
         <div className="px-3 pb-3 space-y-3 border-t pt-3" style={bLine}>
-          <p className="text-xs" style={cSlate}>
-            Programada: {item.fechaProgramada || "—"}
-            {!puedeEditarTiempo && Number(item.duracionValor) > 0
-              ? ` · Tiempo estimado: ${cargaTexto(minutosDe(item))}` : ""}
-            {!esPrev && item.solicitanteId ? ` · Solicitó: ${usuarioNombre(data.usuarios, item.solicitanteId)}` : ""}
-          </p>
+          {!corrige ? (
+            <p className="text-xs" style={cSlate}>
+              Programada: {item.fechaProgramada || "—"}
+              {Number(item.duracionValor) > 0 ? ` · Tiempo estimado: ${cargaTexto(minutosDe(item))}` : ""}
+              {!esPrev && item.solicitanteId ? ` · Solicitó: ${usuarioNombre(data.usuarios, item.solicitanteId)}` : ""}
+            </p>
+          ) : (
+            <>
+              <Field label="Ubicación" hint="Muévela si se reportó en el lugar equivocado.">
+                <div className="space-y-1.5">
+                  <select value={sedeId} onChange={(e) => { setSedeId(e.target.value); setFaseId(""); setActivoId(""); }}
+                    className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle}>
+                    {data.sedes.map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                  </select>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <select value={faseId} onChange={(e) => { setFaseId(e.target.value); setActivoId(""); }}
+                      className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle}>
+                      <option value="">Fase…</option>
+                      {(data.sedes.find((x) => x.id === sedeId)?.fases || []).map((x) => (
+                        <option key={x.id} value={x.id}>{x.nombre}</option>
+                      ))}
+                    </select>
+                    <select value={activoId} onChange={(e) => setActivoId(e.target.value)}
+                      className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle}>
+                      <option value="">Activo…</option>
+                      {(data.sedes.find((x) => x.id === sedeId)?.fases.find((x) => x.id === faseId)?.activos || []).map((x) => (
+                        <option key={x.id} value={x.id}>{x.nombre}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </Field>
+
+              <div className="grid grid-cols-2 gap-2">
+                {!esPrev && (
+                  <Field label={esServ ? "Fecha de solicitud" : "Fecha de reporte"}>
+                    <div className="flex gap-1.5">
+                      <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)}
+                        className="flex-1 min-w-0 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
+                      <input type="time" value={hora} onChange={(e) => setHora(e.target.value)}
+                        className="w-20 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
+                    </div>
+                  </Field>
+                )}
+                <Field label="Fecha programada">
+                  <input type="date" value={fProg} onChange={(e) => setFProg(e.target.value)}
+                    className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
+                </Field>
+              </div>
+
+              <Field label="Fecha y hora de ejecución" hint="Corrígela si el trabajo se hizo antes de registrarlo.">
+                <div className="flex gap-1.5">
+                  <input type="date" value={fCompl} onChange={(e) => setFCompl(e.target.value)}
+                    className="flex-1 min-w-0 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
+                  <input type="time" value={hCompl} onChange={(e) => setHCompl(e.target.value)}
+                    className="w-20 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
+                </div>
+              </Field>
+
+              {fecha && fCompl && fCompl < fecha && (
+                <p className="text-[10px]" style={{ color: COLORS.rojo }}>
+                  La ejecución es anterior al reporte: el tiempo de respuesta saldría negativo.
+                </p>
+              )}
+              {fCompl && estado !== "completada" && (
+                <p className="text-[10px]" style={{ color: COLORS.ambar }}>
+                  Hay fecha de ejecución pero el estado no es Completada.
+                </p>
+              )}
+            </>
+          )}
 
           {/* El responsable solo se cambia desde aquí (Programación, rol admin) */}
           {permitirReasignar && !esServ && (
@@ -4071,9 +4090,69 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             </div>
           )}
 
-          {!esPrev && <Field label="Descripción de la solicitud"><ReadOnly>{item.descripcion}</ReadOnly></Field>}
+          {corrige ? (
+            <>
+              <Field label={esServ ? "Trabajo a realizar" : esPrev ? "Tarea" : "Descripción de la solicitud"}>
+                {esPrev || esServ ? (
+                  <input value={txt} onChange={(e) => setTxt(e.target.value)} className={inputCls} style={inputStyle} />
+                ) : (
+                  <textarea value={txt} onChange={(e) => setTxt(e.target.value)} rows={2}
+                    className={`${inputCls} resize-none`} style={inputStyle} />
+                )}
+              </Field>
 
-          {!esPrev && item.calificacion > 0 && (
+              {esServ && (
+                <>
+                  <Field label="Detalle del trabajo">
+                    <textarea value={detalle} onChange={(e) => setDetalle(e.target.value)} rows={3}
+                      className={`${inputCls} resize-none`} style={inputStyle} />
+                  </Field>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field label="Proveedor">
+                      <input value={proveedor} onChange={(e) => setProveedor(e.target.value)} className={inputCls} style={inputStyle} />
+                    </Field>
+                    <Field label="Valor aprobado">
+                      <input type="number" min="0" step="0.01" value={presuAp}
+                        onChange={(e) => setPresuAp(e.target.value)} placeholder="sin aprobar"
+                        className={inputCls} style={inputStyle} />
+                    </Field>
+                  </div>
+                </>
+              )}
+
+              {esCorr && (
+                <div className="grid grid-cols-2 gap-2">
+                  <Field label="Criticidad">
+                    <select value={criticidad} onChange={(e) => setCriticidad(e.target.value)} className={inputCls} style={inputStyle}>
+                      <option value="">Sin definir</option>
+                      {CRITICIDAD_IDS.map((c) => <option key={c} value={c}>{CRITICIDAD[c].label}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="Reportado por">
+                    <select value={solicitanteId} onChange={(e) => setSolicitanteId(e.target.value)} className={inputCls} style={inputStyle}>
+                      <option value="">Sin definir</option>
+                      {data.usuarios.map((u) => <option key={u.id} value={u.id}>{u.nombre}</option>)}
+                    </select>
+                  </Field>
+                </div>
+              )}
+            </>
+          ) : (
+            !esPrev && <Field label="Descripción de la solicitud"><ReadOnly>{item.descripcion}</ReadOnly></Field>
+          )}
+
+          {corrige && esCorr && (
+            <Field label="Calificación del solicitante">
+              <div className="flex items-center gap-2">
+                <Estrellas valor={Number(calif) || 0} onChange={setCalif} size={16} />
+                {Number(calif) > 0 && (
+                  <button onClick={() => setCalif(0)} className="text-[10px] font-semibold" style={cSlate}>quitar</button>
+                )}
+              </div>
+            </Field>
+          )}
+
+          {!corrige && !esPrev && item.calificacion > 0 && (
             <div className="rounded-md p-2.5" style={{ background: `${COLORS.ambar}12` }}>
               <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Calificación del solicitante</p>
               <div className="flex items-center gap-2 flex-wrap">
@@ -4136,11 +4215,35 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               catalogo={stockSede} onAltaArticulo={(nombre, unidad) => acciones.altaArticulo(item.sedeId, nombre, unidad)} />
           )}
 
-          {rol === "admin" && <AjusteFechas item={item} data={data} acciones={acciones} />}
-
           <div className="flex items-center justify-between gap-2">
             <BotonHistorial item={item} data={data} />
+            {corrige && !confirmarBorrado && (
+              <button onClick={() => setConfirmarBorrado(true)}
+                className="text-[10px] font-semibold" style={{ color: COLORS.rojo }}>
+                Eliminar actividad
+              </button>
+            )}
           </div>
+
+          {corrige && confirmarBorrado && (
+            <div className="rounded-md p-2.5" style={{ background: `${COLORS.rojo}0D` }}>
+              <p className="text-[10px] text-center mb-1.5" style={{ color: COLORS.rojo }}>
+                Se borra por completo y no se puede deshacer.
+              </p>
+              <div className="flex gap-1.5">
+                <button onClick={() => setConfirmarBorrado(false)}
+                  className="flex-1 py-1.5 rounded-md text-[11px] font-semibold border"
+                  style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+                  Cancelar
+                </button>
+                <button onClick={() => acciones.eliminarActividad(item)}
+                  className="flex-1 py-1.5 rounded-md text-[11px] font-semibold text-white"
+                  style={{ background: COLORS.rojo }}>
+                  Sí, eliminar
+                </button>
+              </div>
+            </div>
+          )}
 
           {puedeReprogramar && (
             <button onClick={() => setReprogramar(true)}
