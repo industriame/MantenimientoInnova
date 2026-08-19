@@ -2651,9 +2651,9 @@ function Login({ usuarios, onLogin }) {
         <img src={logoInnova} alt="Innova Schools"
           className="mx-auto w-auto object-contain" style={{ maxHeight: 92 }} />
         <h1 className="mt-4 font-bold text-xl" style={{ color: COLORS.charcoal, fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.02em" }}>
-          Mantenimiento Facilidades - Innova Schools EC
+          Mantenimiento - InnovaSchools EC
         </h1>
-        <p className="text-xs mt-1" style={cSlate}>IndustriaMe · Gestión de instalaciones</p>
+        <p className="text-xs mt-1" style={cSlate}>IndustriaMe · Gestión de Activos</p>
       </div>
 
       <div className="space-y-3">
