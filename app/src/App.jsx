@@ -1375,7 +1375,7 @@ function GaugeDonut({ valor, max, color, titulo, unidad = "d", detalle, invertid
           </PieChart>
         </ResponsiveContainer>
         <div className="absolute inset-x-0 flex flex-col items-center" style={{ bottom: 4 }}>
-          <span className="text-2xl font-bold leading-none" style={{ color: hayDato ? color : COLORS.slate, fontFamily: "'Barlow Condensed', sans-serif" }}>
+                    <span className="text-2xl font-bold leading-none" style={{ color: hayDato ? COLORS.charcoal : COLORS.slate, fontFamily: "'Barlow Condensed', sans-serif" }}>
             {hayDato ? `${valor > max ? "+" : ""}${valor.toFixed(1)}` : "—"}
           </span>
           <span className="text-[10px]" style={cSlate}>{hayDato ? unidad : "sin datos"}</span>
