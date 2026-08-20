@@ -682,20 +682,13 @@ function avancePlan(data, sedeIds) {
 }
 
 /* Satisfacción: promedio de las estrellas dadas por los solicitantes en las
-   solicitudes ya cerradas de las sedes indicadas. Solo se promedian las
-   solicitudes cuyo solicitante tiene rol "solicitante"; si el registro quedó
-   a nombre del propio supervisor o técnico de mantenimiento (autorreporte),
-   no entra en el promedio. */
+   solicitudes ya cerradas de las sedes indicadas. */
 function satisfaccion(data, sedeIds) {
-  const esDeSolicitante = (s) => {
-    const u = (data.usuarios || []).find((u) => u.id === s.solicitanteId);
-    return (u?.rol || "solicitante") === "solicitante";
-  };
   const calificadas = (data.solicitudes || []).filter(
-    (s) => sedeIds.includes(s.sedeId) && s.estado === "completada" && Number(s.calificacion) > 0 && esDeSolicitante(s)
+    (s) => sedeIds.includes(s.sedeId) && s.estado === "completada" && Number(s.calificacion) > 0
   );
   const cerradas = (data.solicitudes || []).filter(
-    (s) => sedeIds.includes(s.sedeId) && s.estado === "completada" && esDeSolicitante(s)
+    (s) => sedeIds.includes(s.sedeId) && s.estado === "completada"
   ).length;
 
   const total = calificadas.length;
@@ -864,7 +857,6 @@ function normalizeData(raw) {
     presupuestoPreventivo: Number(s.presupuestoPreventivo) || PRESUPUESTO_MENSUAL_SEDE,
     feeServicio: Number(s.feeServicio) || 0,
     constructor: s.constructor || "",
-    imagen: s.imagen || "",
   }));
 
   d.usuarios = (Array.isArray(d.usuarios) ? d.usuarios : base.usuarios).map((u) => {
@@ -1501,14 +1493,7 @@ function MesSelector({ mes, onChange }) {
 const FOTO_LADO_MAX = 1280;   // píxeles del lado más largo
 const FOTO_CALIDAD = 0.72;    // 0 a 1; por encima de 0.8 el peso sube mucho
 
-/* La imagen de la sede solo se muestra como miniatura en la tarjeta, así que
-   no necesita la resolución de una evidencia de trabajo. Se guarda mucho más
-   liviana (≈30 KB en vez de ≈300 KB) para no inflar el documento JSON, que se
-   reescribe entero en cada guardado. */
-const SEDE_LADO_MAX = 480;
-const SEDE_CALIDAD = 0.6;
-
-function comprimirImagen(file, ladoMax = FOTO_LADO_MAX, calidad = FOTO_CALIDAD) {
+function comprimirImagen(file) {
   return new Promise((resolve, reject) => {
     const lector = new FileReader();
     lector.onerror = () => reject(new Error("No se pudo leer el archivo"));
@@ -1517,8 +1502,8 @@ function comprimirImagen(file, ladoMax = FOTO_LADO_MAX, calidad = FOTO_CALIDAD) 
       img.onerror = () => reject(new Error("El archivo no es una imagen válida"));
       img.onload = () => {
         let w = img.width, h = img.height;
-        if (w > ladoMax || h > ladoMax) {
-          const escala = ladoMax / Math.max(w, h);
+        if (w > FOTO_LADO_MAX || h > FOTO_LADO_MAX) {
+          const escala = FOTO_LADO_MAX / Math.max(w, h);
           w = Math.round(w * escala);
           h = Math.round(h * escala);
         }
@@ -1527,7 +1512,7 @@ function comprimirImagen(file, ladoMax = FOTO_LADO_MAX, calidad = FOTO_CALIDAD) 
         lienzo.height = h;
         lienzo.getContext("2d").drawImage(img, 0, 0, w, h);
         try {
-          resolve(lienzo.toDataURL("image/jpeg", calidad));
+          resolve(lienzo.toDataURL("image/jpeg", FOTO_CALIDAD));
         } catch (e) {
           resolve(lector.result);   // si el navegador no puede exportar, se guarda el original
         }
@@ -1538,7 +1523,7 @@ function comprimirImagen(file, ladoMax = FOTO_LADO_MAX, calidad = FOTO_CALIDAD) 
   });
 }
 
-function FotoUploader({ foto, onChange, readOnly, label = "Foto", ladoMax = FOTO_LADO_MAX, calidad = FOTO_CALIDAD }) {
+function FotoUploader({ foto, onChange, readOnly, label = "Foto" }) {
   const inputRef = useRef(null);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState("");
@@ -1577,7 +1562,7 @@ function FotoUploader({ foto, onChange, readOnly, label = "Foto", ladoMax = FOTO
           setError("");
           setCargando(true);
           try {
-            onChange(await comprimirImagen(file, ladoMax, calidad));
+            onChange(await comprimirImagen(file));
           } catch (err) {
             console.error("[foto]", err);
             setError("No se pudo procesar la imagen. Intenta con otra.");
@@ -2675,9 +2660,9 @@ function Login({ usuarios, onLogin }) {
         <img src={logoInnova} alt="Innova Schools"
           className="mx-auto w-auto object-contain" style={{ maxHeight: 92 }} />
         <h1 className="mt-4 font-bold text-xl" style={{ color: COLORS.charcoal, fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.02em" }}>
-          Mantenimiento Facilidades - Innova Schools EC
+          Mantenimiento  - Innova Schools EC
         </h1>
-        <p className="text-xs mt-1" style={cSlate}>IndustriaMe · Gestión de instalaciones</p>
+        <p className="text-xs mt-1" style={cSlate}>IndustriaMe · Gestión de Activos</p>
       </div>
 
       <div className="space-y-3">
@@ -3599,7 +3584,6 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
     { id: "solicitudes", label: "Solicitudes", icon: <ClipboardList size={14} /> },
-    { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
   ];
 
   return (
@@ -3658,12 +3642,6 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
             ))}
             {misSolicitudes.length === 0 && <Empty>Aún no has enviado solicitudes.</Empty>}
           </div>
-        </div>
-      )}
-
-      {tab === "sedes" && (
-        <div className="mt-4">
-          <AdminSedes data={data} persist={persist} editable={false} sedeIds={[sede.id]} />
         </div>
       )}
 
@@ -4340,7 +4318,6 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
     { id: "bodega", label: "Bodega", icon: <Layers size={14} /> },
     { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
     { id: "historico", label: "Histórico", icon: <ClipboardList size={14} /> },
-    { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
   ];
 
   // El técnico adelanta una actividad pendiente y queda asignada a él
@@ -4431,7 +4408,6 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
       {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={misSedes} editable={false} />}
       {tab === "reportes" && <VistaReportes data={data} sedes={misSedes} user={user} />}
       {tab === "historico" && <VistaHistorico data={data} sedes={misSedes} rol="tecnico" />}
-      {tab === "sedes" && <AdminSedes data={data} persist={persist} editable={false} sedeIds={misSedeIds} />}
 
       {tab === "programacion" && (
         <PanelProgramacion data={data} sedes={misSedes} pendientes={pendientes} onActivar={setActivar}
@@ -4537,7 +4513,6 @@ function FormSede({ initial, onSave, onClose }) {
   const [presupuesto, setPresupuesto] = useState(initial?.presupuestoPreventivo ?? PRESUPUESTO_MENSUAL_SEDE);
   const [fee, setFee] = useState(initial?.feeServicio ?? "");
   const [constructor, setConstructor] = useState(initial?.constructor || "");
-  const [imagen, setImagen] = useState(initial?.imagen || "");
   const est = Number(estudiantes) || 0;
 
   return (
@@ -4545,9 +4520,6 @@ function FormSede({ initial, onSave, onClose }) {
       <Field label="Nombre de la sede">
         <input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Ej. Quitumbe" className={inputCls} style={inputStyle} />
       </Field>
-
-      <FotoUploader foto={imagen} onChange={setImagen} label="Imagen de la sede"
-        ladoMax={SEDE_LADO_MAX} calidad={SEDE_CALIDAD} />
 
       <div className="grid grid-cols-2 gap-2">
         <Field label="N° de estudiantes">
@@ -4581,7 +4553,6 @@ function FormSede({ initial, onSave, onClose }) {
             presupuestoPreventivo: Number(presupuesto) || 0,
             feeServicio: Number(fee) || 0,
             constructor: constructor.trim(),
-            imagen,
           });
           onClose();
         }}
@@ -4592,12 +4563,11 @@ function FormSede({ initial, onSave, onClose }) {
   );
 }
 
-function AdminSedes({ data, persist, editable = true, sedeIds = null }) {
+function AdminSedes({ data, persist }) {
   const [abiertas, setAbiertas] = useState({});
   const [qr, setQr] = useState(null);
   const [fichaSede, setFichaSede] = useState(null);
   const toggle = (id) => setAbiertas((p) => ({ ...p, [id]: !p[id] }));
-  const sedesMostradas = sedeIds ? data.sedes.filter((s) => sedeIds.includes(s.id)) : data.sedes;
 
   const setSedes = (sedes) => persist((data) => ({ ...data, sedes }));
   const mapSede = (sedeId, fn) => setSedes(data.sedes.map((s) => (s.id === sedeId ? fn(s) : s)));
@@ -4624,11 +4594,9 @@ function AdminSedes({ data, persist, editable = true, sedeIds = null }) {
   return (
     <div className="mt-4 space-y-2">
       <p className="text-xs mb-1" style={cSlate}>
-        {editable
-          ? "Cada sede guarda su ficha (estudiantes, presupuesto de materiales, fee de servicio y constructor) y su árbol de fases y activos."
-          : "Consulta de las sedes registradas. Solo el supervisor administrador puede editar esta información."}
+        Cada sede guarda su ficha (estudiantes, presupuesto de materiales, fee de servicio y constructor) y su árbol de fases y activos.
       </p>
-      {sedesMostradas.map((sede) => {
+      {data.sedes.map((sede) => {
         const abierta = !!abiertas[sede.id];
         return (
           <div key={sede.id} className="border rounded-md overflow-hidden" style={cardStyle}>
@@ -4636,11 +4604,7 @@ function AdminSedes({ data, persist, editable = true, sedeIds = null }) {
               <button onClick={() => toggle(sede.id)} className="shrink-0">
                 {abierta ? <ChevronDown size={16} color={COLORS.charcoal} /> : <ChevronRight size={16} color={COLORS.charcoal} />}
               </button>
-              {sede.imagen ? (
-                <img src={sede.imagen} alt={sede.nombre} className="w-10 h-10 rounded-md object-cover shrink-0 border" style={bLine} />
-              ) : (
-                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: sedeColor(data.sedes, sede.id) }} />
-              )}
+              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: sedeColor(data.sedes, sede.id) }} />
               <div className="min-w-0 flex-1 cursor-pointer" onClick={() => toggle(sede.id)}>
                 <p className="text-sm font-bold" style={cChar}>{sede.nombre}</p>
                 <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
@@ -4650,42 +4614,34 @@ function AdminSedes({ data, persist, editable = true, sedeIds = null }) {
                 </div>
                 <Resumen r={resumen(sede.id)} />
               </div>
-              {editable && (
-                <button onClick={(e) => { e.stopPropagation(); setFichaSede({ sede }); }} title="Editar ficha de la sede">
-                  <Pencil size={14} color={COLORS.slate} />
-                </button>
-              )}
-              {editable && (
-                <DeleteBtn size={14} onConfirm={() => setSedes(data.sedes.filter((s) => s.id !== sede.id))} />
-              )}
+              <button onClick={(e) => { e.stopPropagation(); setFichaSede({ sede }); }} title="Editar ficha de la sede">
+                <Pencil size={14} color={COLORS.slate} />
+              </button>
+              <DeleteBtn size={14} onConfirm={() => setSedes(data.sedes.filter((s) => s.id !== sede.id))} />
             </div>
 
             {abierta && (
               <div className="pl-4 pr-3 pb-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
                 {sede.fases.map((fase) => (
                   <FaseAdmin key={fase.id} sede={sede} fase={fase} resumen={resumen} Resumen={Resumen}
-                    mapFase={mapFase} mapSede={mapSede} setQr={setQr} editable={editable} />
+                    mapFase={mapFase} mapSede={mapSede} setQr={setQr} />
                 ))}
                 {sede.fases.length === 0 && <Empty>Esta sede aún no tiene fases.</Empty>}
-                {editable && (
-                  <div className="mt-2">
-                    <InlineAdd placeholder="Agregar fase"
-                      onAdd={(nombre) => mapSede(sede.id, (s) => ({ ...s, fases: [...s.fases, { id: uid("fase"), nombre, activos: [] }] }))} />
-                  </div>
-                )}
+                <div className="mt-2">
+                  <InlineAdd placeholder="Agregar fase"
+                    onAdd={(nombre) => mapSede(sede.id, (s) => ({ ...s, fases: [...s.fases, { id: uid("fase"), nombre, activos: [] }] }))} />
+                </div>
               </div>
             )}
           </div>
         );
       })}
 
-      {editable && (
-        <button onClick={() => setFichaSede({})} className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white mt-1" style={{ background: COLORS.orange }}>
-          <Plus size={13} /> Nueva sede
-        </button>
-      )}
+      <button onClick={() => setFichaSede({})} className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white mt-1" style={{ background: COLORS.orange }}>
+        <Plus size={13} /> Nueva sede
+      </button>
 
-      {editable && fichaSede && (
+      {fichaSede && (
         <Modal title={fichaSede.sede ? "Ficha de la sede" : "Nueva sede"} onClose={() => setFichaSede(null)} wide>
           <FormSede initial={fichaSede.sede} onClose={() => setFichaSede(null)}
             onSave={(f) => fichaSede.sede
@@ -4713,7 +4669,7 @@ function AdminSedes({ data, persist, editable = true, sedeIds = null }) {
   );
 }
 
-function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr, editable = true }) {
+function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="border-l-2 pl-3 mt-2" style={bLine}>
@@ -4722,18 +4678,12 @@ function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr, edit
           {open ? <ChevronDown size={14} color={COLORS.slate} /> : <ChevronRight size={14} color={COLORS.slate} />}
           <Layers size={13} color={COLORS.orange} />
           <div className="min-w-0">
-            {editable ? (
-              <EditableLabel value={fase.nombre} className="text-sm font-semibold block" style={cChar}
-                onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, nombre }))} />
-            ) : (
-              <span className="text-sm font-semibold block" style={cChar}>{fase.nombre}</span>
-            )}
+            <EditableLabel value={fase.nombre} className="text-sm font-semibold block" style={cChar}
+              onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, nombre }))} />
             <Resumen r={resumen(sede.id, fase.id)} />
           </div>
         </div>
-        {editable && (
-          <DeleteBtn onConfirm={() => mapSede(sede.id, (s) => ({ ...s, fases: s.fases.filter((f) => f.id !== fase.id) }))} />
-        )}
+        <DeleteBtn onConfirm={() => mapSede(sede.id, (s) => ({ ...s, fases: s.fases.filter((f) => f.id !== fase.id) }))} />
       </div>
 
       {open && (
@@ -4743,12 +4693,8 @@ function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr, edit
             {fase.activos.map((act) => (
               <div key={act.id} className="rounded-md p-2.5 border flex items-center justify-between gap-3" style={{ borderColor: COLORS.line, background: COLORS.paper }}>
                 <div className="min-w-0 flex-1">
-                  {editable ? (
-                    <EditableLabel value={act.nombre} className="text-xs font-semibold" style={cChar}
-                      onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.map((a) => (a.id === act.id ? { ...a, nombre } : a)) }))} />
-                  ) : (
-                    <span className="text-xs font-semibold" style={cChar}>{act.nombre}</span>
-                  )}
+                  <EditableLabel value={act.nombre} className="text-xs font-semibold" style={cChar}
+                    onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.map((a) => (a.id === act.id ? { ...a, nombre } : a)) }))} />
                   <Resumen r={resumen(sede.id, fase.id, act.id)} />
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
@@ -4756,20 +4702,16 @@ function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr, edit
                     className="text-[11px] font-semibold px-2.5 py-1.5 rounded flex items-center gap-1" style={{ background: COLORS.charcoal, color: "white" }}>
                     <QrCode size={11} /> QR
                   </button>
-                  {editable && (
-                    <DeleteBtn onConfirm={() => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.filter((a) => a.id !== act.id) }))} />
-                  )}
+                  <DeleteBtn onConfirm={() => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.filter((a) => a.id !== act.id) }))} />
                 </div>
               </div>
             ))}
             {fase.activos.length === 0 && <Empty>Sin activos todavía.</Empty>}
           </div>
-          {editable && (
-            <div className="mt-2">
-              <InlineAdd placeholder="Agregar activo" small
-                onAdd={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: [...f.activos, { id: uid("act"), nombre }] }))} />
-            </div>
-          )}
+          <div className="mt-2">
+            <InlineAdd placeholder="Agregar activo" small
+              onAdd={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: [...f.activos, { id: uid("act"), nombre }] }))} />
+          </div>
         </div>
       )}
     </div>
@@ -8203,7 +8145,6 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
     { id: "presupuesto", label: "Presupuesto", icon: <Wallet size={14} /> },
     { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
     { id: "historico", label: "Histórico", icon: <ClipboardList size={14} /> },
-    { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
   ];
 
   return (
@@ -8216,7 +8157,6 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
       {tab === "presupuesto" && <VistaPresupuesto data={data} mes={mes} onMesChange={setMes} />}
       {tab === "reportes" && <VistaReportes data={data} sedes={data.sedes} user={user} />}
       {tab === "historico" && <VistaHistorico data={data} sedes={data.sedes} rol="cliente" />}
-      {tab === "sedes" && <AdminSedes data={data} persist={persist} editable={false} />}
 
       {tab === "aprobaciones" && (
         <div className="mt-4 space-y-5">
