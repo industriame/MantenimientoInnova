@@ -1501,7 +1501,14 @@ function MesSelector({ mes, onChange }) {
 const FOTO_LADO_MAX = 1280;   // píxeles del lado más largo
 const FOTO_CALIDAD = 0.72;    // 0 a 1; por encima de 0.8 el peso sube mucho
 
-function comprimirImagen(file) {
+/* La imagen de la sede solo se muestra como miniatura en la tarjeta, así que
+   no necesita la resolución de una evidencia de trabajo. Se guarda mucho más
+   liviana (≈30 KB en vez de ≈300 KB) para no inflar el documento JSON, que se
+   reescribe entero en cada guardado. */
+const SEDE_LADO_MAX = 480;
+const SEDE_CALIDAD = 0.6;
+
+function comprimirImagen(file, ladoMax = FOTO_LADO_MAX, calidad = FOTO_CALIDAD) {
   return new Promise((resolve, reject) => {
     const lector = new FileReader();
     lector.onerror = () => reject(new Error("No se pudo leer el archivo"));
@@ -1510,8 +1517,8 @@ function comprimirImagen(file) {
       img.onerror = () => reject(new Error("El archivo no es una imagen válida"));
       img.onload = () => {
         let w = img.width, h = img.height;
-        if (w > FOTO_LADO_MAX || h > FOTO_LADO_MAX) {
-          const escala = FOTO_LADO_MAX / Math.max(w, h);
+        if (w > ladoMax || h > ladoMax) {
+          const escala = ladoMax / Math.max(w, h);
           w = Math.round(w * escala);
           h = Math.round(h * escala);
         }
@@ -1520,7 +1527,7 @@ function comprimirImagen(file) {
         lienzo.height = h;
         lienzo.getContext("2d").drawImage(img, 0, 0, w, h);
         try {
-          resolve(lienzo.toDataURL("image/jpeg", FOTO_CALIDAD));
+          resolve(lienzo.toDataURL("image/jpeg", calidad));
         } catch (e) {
           resolve(lector.result);   // si el navegador no puede exportar, se guarda el original
         }
@@ -1531,7 +1538,7 @@ function comprimirImagen(file) {
   });
 }
 
-function FotoUploader({ foto, onChange, readOnly, label = "Foto" }) {
+function FotoUploader({ foto, onChange, readOnly, label = "Foto", ladoMax = FOTO_LADO_MAX, calidad = FOTO_CALIDAD }) {
   const inputRef = useRef(null);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState("");
@@ -1570,7 +1577,7 @@ function FotoUploader({ foto, onChange, readOnly, label = "Foto" }) {
           setError("");
           setCargando(true);
           try {
-            onChange(await comprimirImagen(file));
+            onChange(await comprimirImagen(file, ladoMax, calidad));
           } catch (err) {
             console.error("[foto]", err);
             setError("No se pudo procesar la imagen. Intenta con otra.");
@@ -4539,7 +4546,8 @@ function FormSede({ initial, onSave, onClose }) {
         <input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Ej. Quitumbe" className={inputCls} style={inputStyle} />
       </Field>
 
-      <FotoUploader foto={imagen} onChange={setImagen} label="Imagen de la sede" />
+      <FotoUploader foto={imagen} onChange={setImagen} label="Imagen de la sede"
+        ladoMax={SEDE_LADO_MAX} calidad={SEDE_CALIDAD} />
 
       <div className="grid grid-cols-2 gap-2">
         <Field label="N° de estudiantes">
