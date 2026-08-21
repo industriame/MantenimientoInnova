@@ -3174,7 +3174,7 @@ function FormReportarNovedad({
   const sede = sedes.find((s) => s.id === sedeId);
   const fase = sede?.fases.find((f) => f.id === faseId);
   const ahora = new Date();
-  const valido = sedeId && faseId && activoId && descripcion.trim() && solicitanteId;
+  const valido = sedeId && faseId && descripcion.trim() && solicitanteId;
 
   // Quién pudo haber detectado la novedad en esa sede
   const posiblesSolicitantes = elegirSolicitante
