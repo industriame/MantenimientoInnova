@@ -1628,10 +1628,13 @@ function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, catalogo = [
             ) : (
               <div className="flex items-center justify-between text-xs gap-2">
                 <span className="min-w-0 truncate" style={cChar}>
-                  {m.nombre || "—"} · {m.cantidad}{puedeCostear ? "" : ` ${m.unidad}`}
+                  {m.nombre || "—"}{puedeCostear ? "" : ` · ${m.cantidad} ${m.unidad}`}
                 </span>
                 {puedeCostear ? (
                   <div className="flex items-center gap-1 shrink-0">
+                    <CampoVivo type="number" min="0" value={m.cantidad} onCommit={(v) => set(m.id, { cantidad: v })}
+                      title="Cantidad"
+                      className="w-14 border rounded px-1.5 py-1 text-xs text-right outline-none" style={{ borderColor: COLORS.orange }} />
                     <CampoVivo value={m.unidad} onCommit={(v) => set(m.id, { unidad: v })} placeholder="Unid."
                       title="La unidad puede cambiar según el proveedor"
                       className="w-14 border rounded px-1.5 py-1 text-xs outline-none" style={{ borderColor: COLORS.orange }} />
