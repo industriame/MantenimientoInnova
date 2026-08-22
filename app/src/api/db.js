@@ -1,15 +1,19 @@
 /**
  * Cliente PostgREST / Supabase para el estado de la app.
  * RPCs: has_app_data, get_app_state, put_app_state (schema api)
+ * Storage: subida de imágenes (evidencias) vía Supabase Storage.
  *
  * Local:  VITE_POSTGREST_URL=/rest  (proxy Vite → PostgREST :3000)
  * Supabase:
  *   VITE_POSTGREST_URL=https://TU_REF.supabase.co/rest/v1
  *   VITE_SUPABASE_ANON_KEY=eyJ...
+ *   VITE_SUPABASE_URL=https://TU_REF.supabase.co   (raíz del proyecto, sin /rest/v1 — la usa Storage)
  */
 
 const BASE = (import.meta.env.VITE_POSTGREST_URL || "/rest").replace(/\/$/, "");
 const ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
+const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || "").replace(/\/$/, "");
+const BUCKET_EVIDENCIAS = "evidencias";
 
 function headers() {
   const h = {
@@ -50,4 +54,35 @@ export async function loadAppState() {
 /** @param {object} data documento completo de la app */
 export async function saveAppState(data) {
   return rpc("put_app_state", { payload: data });
+}
+
+/**
+ * Sube un archivo al bucket de Storage y devuelve su URL pública.
+ * El bucket debe existir y tener políticas de INSERT/SELECT para el rol anon
+ * (ver instrucciones de configuración de Supabase Storage).
+ * @param {string} path    ej. "solicitudes/foto_ab12c3d.jpg"
+ * @param {Blob} blob       contenido ya comprimido
+ * @param {string} [bucket] nombre del bucket (por defecto "evidencias")
+ * @returns {Promise<string>} URL pública del archivo subido
+ */
+export async function uploadFile(path, blob, bucket = BUCKET_EVIDENCIAS) {
+  if (!SUPABASE_URL) {
+    throw new Error(
+      "Falta VITE_SUPABASE_URL: no se puede subir la imagen a Storage.",
+    );
+  }
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${path}`, {
+    method: "POST",
+    headers: {
+      ...headers(),
+      "Content-Type": blob.type || "application/octet-stream",
+      "x-upsert": "true",
+    },
+    body: blob,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Storage upload: ${res.status} ${text}`);
+  }
+  return `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${path}`;
 }
