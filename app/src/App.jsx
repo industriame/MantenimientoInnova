@@ -10,7 +10,7 @@ import logoInnova from "./assets/Logo_ISE.png";
 import logoReporte from "./assets/innova.png";
 import { jsPDF } from "jspdf";
 import html2canvas from "html2canvas";
-import { hasAppData, loadAppState, saveAppState } from "./api/db.js";
+import { hasAppData, loadAppState, saveAppState, uploadFile } from "./api/db.js";
 import {
   QrCode, Wrench, ClipboardList, BarChart3, Plus, X, ChevronRight, ChevronDown,
   ChevronLeft, ChevronUp, AlertTriangle, CheckCircle2, Clock, DollarSign, Building2, Layers,
@@ -1484,12 +1484,13 @@ function MesSelector({ mes, onChange }) {
   );
 }
 
-/* Adjuntar foto, con reducción automática antes de guardar.
+/* Adjuntar foto, con reducción automática antes de subirla.
 
-   Las imágenes viajan dentro del documento JSON en base64, y ese documento se
-   carga y se guarda entero en cada operación. Una foto de celular sin tratar
-   pesa varios megas y volvería lenta toda la aplicación, así que aquí se
-   redimensiona y recomprime antes de almacenarla. */
+   Las fotos nuevas se comprimen en el navegador y se suben a Supabase
+   Storage; en el documento JSON (el que se carga y guarda entero en cada
+   operación) solo queda la URL pública del archivo, no la imagen. Las fotos
+   antiguas guardadas en base64 (antes de este cambio) se siguen mostrando
+   igual, ya que un data-URL también es un <img src> válido. */
 const FOTO_LADO_MAX = 1280;   // píxeles del lado más largo
 const FOTO_CALIDAD = 0.72;    // 0 a 1; por encima de 0.8 el peso sube mucho
 
@@ -1511,11 +1512,11 @@ function comprimirImagen(file) {
         lienzo.width = w;
         lienzo.height = h;
         lienzo.getContext("2d").drawImage(img, 0, 0, w, h);
-        try {
-          resolve(lienzo.toDataURL("image/jpeg", FOTO_CALIDAD));
-        } catch (e) {
-          resolve(lector.result);   // si el navegador no puede exportar, se guarda el original
-        }
+        lienzo.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(new Error("No se pudo comprimir la imagen"))),
+          "image/jpeg",
+          FOTO_CALIDAD,
+        );
       };
       img.src = lector.result;
     };
@@ -1523,14 +1524,17 @@ function comprimirImagen(file) {
   });
 }
 
-function FotoUploader({ foto, onChange, readOnly, label = "Foto" }) {
+function FotoUploader({ foto, onChange, readOnly, label = "Foto", carpeta = "general" }) {
   const inputRef = useRef(null);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState("");
 
   if (readOnly && !foto) return null;
 
-  const pesoKB = foto ? Math.round((foto.length * 0.75) / 1024) : 0;
+  // Solo las fotos viejas (formato anterior) pesan como base64; las nuevas
+  // son una URL corta y no tiene sentido mostrarles un peso en KB.
+  const esBase64 = typeof foto === "string" && foto.startsWith("data:");
+  const pesoKB = esBase64 ? Math.round((foto.length * 0.75) / 1024) : 0;
 
   return (
     <Field label={label}>
@@ -1548,7 +1552,7 @@ function FotoUploader({ foto, onChange, readOnly, label = "Foto" }) {
         <button onClick={() => inputRef.current?.click()} disabled={cargando}
           className="text-xs font-semibold px-3 py-2 rounded-md border flex items-center gap-1.5 disabled:opacity-50"
           style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
-          <Camera size={13} /> {cargando ? "Procesando…" : "Adjuntar foto"}
+          <Camera size={13} /> {cargando ? "Subiendo…" : "Adjuntar foto"}
         </button>
       )}
 
@@ -1562,10 +1566,12 @@ function FotoUploader({ foto, onChange, readOnly, label = "Foto" }) {
           setError("");
           setCargando(true);
           try {
-            onChange(await comprimirImagen(file));
+            const blob = await comprimirImagen(file);
+            const ruta = `${carpeta}/${uid("foto")}.jpg`;
+            onChange(await uploadFile(ruta, blob));
           } catch (err) {
             console.error("[foto]", err);
-            setError("No se pudo procesar la imagen. Intenta con otra.");
+            setError("No se pudo subir la imagen. Intenta con otra o revisa tu conexión.");
           } finally {
             setCargando(false);
           }
@@ -3270,7 +3276,7 @@ function FormReportarNovedad({
         </div>
       </Field>
 
-      <FotoUploader foto={foto} onChange={setFoto} label="Foto de la novedad (opcional)" />
+      <FotoUploader foto={foto} onChange={setFoto} label="Foto de la novedad (opcional)" carpeta="solicitudes" />
 
       <button disabled={!valido}
         onClick={() => { onSubmit({ sedeId, faseId, activoId, descripcion, criticidad, foto, solicitanteId }); onClose(); }}
@@ -4197,7 +4203,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             </Field>
           )}
           <FotoUploader foto={item.foto} onChange={(foto) => acciones.updateActividad(item, { foto })}
-            label="Evidencia del técnico" />
+            label="Evidencia del técnico" carpeta={esPrev ? "ordenes" : esServ ? "servicios" : "solicitudes"} />
           {esPrev && (
             <ConsumoStock item={item} stockSede={stockSede}
               onRegistrar={registrarConsumo} onQuitar={quitarConsumo}
@@ -5731,7 +5737,7 @@ function FormServicio({ data, initial, onSave, onClose }) {
         </Field>
       </div>
 
-      <FotoUploader foto={foto} onChange={setFoto} />
+      <FotoUploader foto={foto} onChange={setFoto} carpeta="servicios" />
 
       <p className="text-[11px] rounded-md p-2.5" style={{ background: `${COLORS.ambar}15`, color: COLORS.charcoal }}>
         Al guardar, la solicitud se envía al cliente para su aprobación. El proveedor y la fecha se definen después.
