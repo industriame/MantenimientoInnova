@@ -1116,6 +1116,37 @@ function useAcciones(data, persist, usuario) {
         ? { ...data, stock, ordenes: data.ordenes.map((o) => (o.id === item.id ? sinConsumo(o) : o)) }
         : { ...data, stock, solicitudes: data.solicitudes.map((x) => (x.id === item.id ? sinConsumo(x) : x)) });
     },
+    /* Al cerrar una actividad con materiales ya aprobados, se descuenta bodega
+       (el material nuevo también quedó de alta ahí desde que se agregó, con
+       stockId propio) y se deja el registro en el histórico de consumo.
+       materialesLiquidados evita que un segundo guardado vuelva a descontar. */
+    liquidarMateriales: (item) => {
+      const materiales = item.materiales || [];
+      if (item.materialesLiquidados || item.materialesEstado !== "aprobado" || materiales.length === 0) return;
+      persist((data) => {
+        let stock = data.stock;
+        const nuevosConsumos = materiales.map((m) => {
+          if (m.stockId) {
+            stock = stock.map((x) =>
+              x.id === m.stockId ? { ...x, cantidad: Math.max(0, x.cantidad - (Number(m.cantidad) || 0)) } : x
+            );
+          }
+          return {
+            id: uid("con"), materialId: m.id, stockId: m.stockId || null,
+            nombre: m.nombre, unidad: m.unidad, cantidad: m.cantidad,
+            costoUnitario: m.costoUnitario, fecha: fmtDate(new Date()),
+          };
+        });
+        const conLiquidacion = (a) => ({
+          ...a,
+          consumos: [...(a.consumos || []), ...nuevosConsumos],
+          materialesLiquidados: true,
+        });
+        return item.tipo === "preventivo"
+          ? { ...data, stock, ordenes: data.ordenes.map((o) => (o.id === item.id ? conLiquidacion(o) : o)) }
+          : { ...data, stock, solicitudes: data.solicitudes.map((x) => (x.id === item.id ? conLiquidacion(x) : x)) };
+      });
+    },
     /* Eliminar una actividad por completo. Pensado para depurar durante las
        pruebas: en operación normal las órdenes se cierran, no se borran. */
     eliminarActividad: (item) => {
@@ -3936,6 +3967,11 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
     /* El supervisor corrige registros de captura, así que sus cambios de datos
        no se anotan en el historial. Los movimientos del técnico sí. */
     acciones.updateActividad(item, patch, { sinRegistro: corrige });
+    // Materiales aprobados: se descuentan de bodega y quedan en el histórico
+    // de consumo justo al cerrar (liquidarMateriales no hace nada si no aplica).
+    if (estado === "completada") {
+      acciones.liquidarMateriales(item);
+    }
     setGuardado("ok");
     setTimeout(() => setGuardado(null), 2500);
   };
