@@ -8135,6 +8135,111 @@ function FilaUsuario({ user, data, onEdit, onDelete }) {
 }
 
 /* ============================================================================
+   16.5. MONITOREO DE CONDICIÓN — solo activos de planes marcados "monitoreo"
+   ========================================================================= */
+function VistaMonitoreo({ data }) {
+  const grupos = useMemo(() => {
+    const planIds = new Set((data.planes || []).filter((p) => p.monitoreo).map((p) => p.id));
+    const porActivo = {};
+    (data.ordenes || []).forEach((o) => {
+      if (!o.planId || !planIds.has(o.planId) || !o.activoId) return;
+      const checklist = o.checklist || [];
+      if (!checklist.length) return;
+      const fecha = o.fechaCompletada || o.fechaProgramada || "";
+      const g = porActivo[o.activoId] || (porActivo[o.activoId] = {
+        activoId: o.activoId, sedeId: o.sedeId, faseId: o.faseId, variables: {},
+      });
+      checklist.forEach((it) => {
+        if (it.tipo === "texto") return;
+        const v = g.variables[it.texto] || (g.variables[it.texto] = { tipo: it.tipo, unidad: it.unidad, lecturas: [] });
+        v.lecturas.push({ fecha, valor: it.tipo === "numero" ? Number(it.valor) || 0 : it.valor });
+      });
+    });
+    Object.values(porActivo).forEach((g) =>
+      Object.values(g.variables).forEach((v) => v.lecturas.sort((a, b) => (a.fecha || "").localeCompare(b.fecha || "")))
+    );
+    return Object.values(porActivo).sort((a, b) =>
+      ubicacionTexto(data.sedes, a).localeCompare(ubicacionTexto(data.sedes, b))
+    );
+  }, [data.planes, data.ordenes, data.sedes]);
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs" style={cSlate}>
+        Activos que reciben seguimiento porque su plan de mantenimiento fue marcado como "monitoreo de condición".
+        Para agregar más, edita el plan correspondiente en la pestaña Configuración.
+      </p>
+      {grupos.length ? (
+        grupos.map((g) => <TarjetaMonitoreoActivo key={g.activoId} grupo={g} sedes={data.sedes} />)
+      ) : (
+        <Empty>
+          Aún no hay lecturas. Marca un plan como "monitoreo de condición" y completa al menos una orden con checklist para ver datos aquí.
+        </Empty>
+      )}
+    </div>
+  );
+}
+
+function TarjetaMonitoreoActivo({ grupo, sedes }) {
+  const titulo = ubicacionTexto(sedes, grupo);
+  const numericas = Object.entries(grupo.variables).filter(([, v]) => v.tipo === "numero");
+  const otras = Object.entries(grupo.variables).filter(([, v]) => v.tipo !== "numero");
+
+  return (
+    <div className="border rounded-md p-3" style={cardStyle}>
+      <p className="text-sm font-semibold" style={cChar}>{titulo}</p>
+
+      {numericas.map(([texto, v]) => {
+        const ultima = v.lecturas[v.lecturas.length - 1];
+        return (
+          <div key={texto} className="mt-3">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <p className="text-xs font-semibold uppercase tracking-wide" style={cSlate}>{texto}</p>
+              <span className="text-sm font-bold" style={cOrange}>
+                {ultima ? `${ultima.valor} ${v.unidad || ""}`.trim() : "—"}
+              </span>
+            </div>
+            {v.lecturas.length > 1 ? (
+              <ResponsiveContainer width="100%" height={140}>
+                <LineChart data={v.lecturas} margin={{ top: 5, right: 8, left: -20, bottom: 0 }}>
+                  <CartesianGrid stroke={COLORS.line} vertical={false} />
+                  <XAxis dataKey="fecha" tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
+                  <Tooltip formatter={(val) => [`${val} ${v.unidad || ""}`.trim(), texto]} />
+                  <Line type="monotone" dataKey="valor" stroke={COLORS.orange} strokeWidth={2.5}
+                    dot={{ r: 3, fill: COLORS.orange }} activeDot={{ r: 5 }} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="text-[11px]" style={cSlate}>Todavía solo hay una lectura — el histórico aparece a partir de la segunda.</p>
+            )}
+          </div>
+        );
+      })}
+
+      {otras.length > 0 && (
+        <div className="mt-3 pt-2.5 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+          {otras.map(([texto, v]) => {
+            const ultima = v.lecturas[v.lecturas.length - 1];
+            const meta =
+              v.tipo === "estado" ? ESTADO_PASO[ultima?.valor] :
+              v.tipo === "validacion" ? VALIDACION[ultima?.valor] :
+              v.tipo === "check" ? (ultima?.valor ? { label: "Hecho", color: COLORS.verde } : { label: "Pendiente", color: COLORS.slate }) :
+              null;
+            return (
+              <div key={texto} className="flex items-center justify-between gap-2 text-xs">
+                <span style={cSlate}>{texto}</span>
+                {meta ? <Chip color={meta.color}>{meta.label}</Chip> : <span style={cSlate}>—</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
    17. VISTA ADMIN (control total)  y  VISTA SUPERVISOR CLIENTE (solo aprueba)
    ========================================================================= */
 
@@ -8147,6 +8252,7 @@ function VistaAdmin({ data, persist, user, onLogout, ultimaSync }) {
     { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
     { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
     { id: "actividades", label: "Actividades", icon: <ClipboardList size={14} /> },
+    { id: "monitoreo", label: "Monitoreo", icon: <BarChart3 size={14} /> },
     { id: "bodega", label: "Bodega", icon: <Layers size={14} /> },
     { id: "presupuesto", label: "Presupuesto", icon: <Wallet size={14} /> },
     { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
@@ -8166,6 +8272,7 @@ function VistaAdmin({ data, persist, user, onLogout, ultimaSync }) {
       {tab === "sedes" && <AdminSedes data={data} persist={persist} />}
       {tab === "programacion" && <AdminProgramacion data={data} persist={persist} user={user} />}
       {tab === "actividades" && <AdminActividades data={data} persist={persist} user={user} />}
+      {tab === "monitoreo" && <VistaMonitoreo data={data} />}
       {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={data.sedes} editable />}
       {tab === "reportes" && <VistaReportes data={data} sedes={data.sedes} user={user} />}
       {tab === "config" && <AdminConfiguracion data={data} persist={persist} setPlanModal={setPlanModal} />}
