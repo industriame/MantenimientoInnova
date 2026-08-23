@@ -8135,19 +8135,21 @@ function FilaUsuario({ user, data, onEdit, onDelete }) {
 }
 
 /* ============================================================================
-   16.5. MONITOREO DE CONDICIÓN — solo activos de planes marcados "monitoreo"
+   16.5. MONITOREO DE CONDICIÓN — árbol sede → fase → activo, solo lo
+   que aplica un plan marcado "monitoreo" (a nivel de sede, fase o activo)
    ========================================================================= */
 function VistaMonitoreo({ data }) {
   const grupos = useMemo(() => {
     const planIds = new Set((data.planes || []).filter((p) => p.monitoreo).map((p) => p.id));
-    const porActivo = {};
+    const mapa = {};
     (data.ordenes || []).forEach((o) => {
-      if (!o.planId || !planIds.has(o.planId) || !o.activoId) return;
+      if (!o.planId || !planIds.has(o.planId) || !o.sedeId) return;
       const checklist = o.checklist || [];
       if (!checklist.length) return;
+      const key = `${o.sedeId}|${o.faseId || ""}|${o.activoId || ""}`;
       const fecha = o.fechaCompletada || o.fechaProgramada || "";
-      const g = porActivo[o.activoId] || (porActivo[o.activoId] = {
-        activoId: o.activoId, sedeId: o.sedeId, faseId: o.faseId, variables: {},
+      const g = mapa[key] || (mapa[key] = {
+        sedeId: o.sedeId, faseId: o.faseId || "", activoId: o.activoId || "", variables: {},
       });
       checklist.forEach((it) => {
         if (it.tipo === "texto") return;
@@ -8155,22 +8157,24 @@ function VistaMonitoreo({ data }) {
         v.lecturas.push({ fecha, valor: it.tipo === "numero" ? Number(it.valor) || 0 : it.valor });
       });
     });
-    Object.values(porActivo).forEach((g) =>
+    Object.values(mapa).forEach((g) =>
       Object.values(g.variables).forEach((v) => v.lecturas.sort((a, b) => (a.fecha || "").localeCompare(b.fecha || "")))
     );
-    return Object.values(porActivo).sort((a, b) =>
-      ubicacionTexto(data.sedes, a).localeCompare(ubicacionTexto(data.sedes, b))
-    );
-  }, [data.planes, data.ordenes, data.sedes]);
+    return mapa;
+  }, [data.planes, data.ordenes]);
+
+  const sedesConDatos = (data.sedes || []).filter((sede) =>
+    Object.values(grupos).some((g) => g.sedeId === sede.id)
+  );
 
   return (
     <div className="space-y-3">
       <p className="text-xs" style={cSlate}>
-        Activos que reciben seguimiento porque su plan de mantenimiento fue marcado como "monitoreo de condición".
+        Sedes, fases y activos con seguimiento activo — porque su plan de mantenimiento está marcado como "monitoreo de condición".
         Para agregar más, edita el plan correspondiente en la pestaña Configuración.
       </p>
-      {grupos.length ? (
-        grupos.map((g) => <TarjetaMonitoreoActivo key={g.activoId} grupo={g} sedes={data.sedes} />)
+      {sedesConDatos.length ? (
+        sedesConDatos.map((sede) => <SedeMonitoreo key={sede.id} sede={sede} grupos={grupos} />)
       ) : (
         <Empty>
           Aún no hay lecturas. Marca un plan como "monitoreo de condición" y completa al menos una orden con checklist para ver datos aquí.
@@ -8180,19 +8184,84 @@ function VistaMonitoreo({ data }) {
   );
 }
 
-function TarjetaMonitoreoActivo({ grupo, sedes }) {
-  const titulo = ubicacionTexto(sedes, grupo);
-  const numericas = Object.entries(grupo.variables).filter(([, v]) => v.tipo === "numero");
-  const otras = Object.entries(grupo.variables).filter(([, v]) => v.tipo !== "numero");
+function SedeMonitoreo({ sede, grupos }) {
+  const [open, setOpen] = useState(false);
+  const fasesConDatos = (sede.fases || []).filter((fase) =>
+    Object.values(grupos).some((g) => g.sedeId === sede.id && g.faseId === fase.id && g.activoId)
+    || grupos[`${sede.id}|${fase.id}|`]
+  );
+  const grupoSede = grupos[`${sede.id}||`];
 
   return (
-    <div className="border rounded-md p-3" style={cardStyle}>
-      <p className="text-sm font-semibold" style={cChar}>{titulo}</p>
+    <div className="border rounded-md overflow-hidden" style={cardStyle}>
+      <div className="flex items-center gap-2.5 p-3 cursor-pointer" style={{ background: open ? COLORS.cream : "white" }} onClick={() => setOpen(!open)}>
+        {open ? <ChevronDown size={16} color={COLORS.charcoal} /> : <ChevronRight size={16} color={COLORS.charcoal} />}
+        <p className="text-sm font-bold flex-1" style={cChar}>{sede.nombre}</p>
+      </div>
+      {open && (
+        <div className="pl-4 pr-3 pb-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+          {grupoSede && <TarjetaMonitoreoGrupo titulo="Sede completa" grupo={grupoSede} />}
+          {fasesConDatos.map((fase) => (
+            <FaseMonitoreo key={fase.id} sede={sede} fase={fase} grupos={grupos} />
+          ))}
+          {!grupoSede && fasesConDatos.length === 0 && <Empty>Sin lecturas todavía.</Empty>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FaseMonitoreo({ sede, fase, grupos }) {
+  const [open, setOpen] = useState(false);
+  const activosConDatos = (fase.activos || []).filter((a) => grupos[`${sede.id}|${fase.id}|${a.id}`]);
+  const grupoFase = grupos[`${sede.id}|${fase.id}|`];
+
+  return (
+    <div className="border-l-2 pl-3 mt-2" style={bLine}>
+      <div className="flex items-center gap-2 py-2 cursor-pointer" onClick={() => setOpen(!open)}>
+        {open ? <ChevronDown size={14} color={COLORS.slate} /> : <ChevronRight size={14} color={COLORS.slate} />}
+        <Layers size={13} color={COLORS.orange} />
+        <p className="text-sm font-semibold" style={cChar}>{fase.nombre}</p>
+      </div>
+      {open && (
+        <div className="pl-2 pb-1">
+          {grupoFase && <TarjetaMonitoreoGrupo titulo="Fase completa" grupo={grupoFase} />}
+          {activosConDatos.map((a) => (
+            <ActivoMonitoreo key={a.id} activo={a} grupo={grupos[`${sede.id}|${fase.id}|${a.id}`]} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActivoMonitoreo({ activo, grupo }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border-l-2 pl-3 mt-1.5" style={bLine}>
+      <div className="flex items-center gap-2 py-1.5 cursor-pointer" onClick={() => setOpen(!open)}>
+        {open ? <ChevronDown size={13} color={COLORS.slate} /> : <ChevronRight size={13} color={COLORS.slate} />}
+        <p className="text-xs font-semibold" style={cChar}>{activo.nombre}</p>
+      </div>
+      {open && <div className="pl-1 pb-2"><TarjetaMonitoreoGrupo grupo={grupo} /></div>}
+    </div>
+  );
+}
+
+function TarjetaMonitoreoGrupo({ titulo, grupo }) {
+  const variables = grupo?.variables || {};
+  const numericas = Object.entries(variables).filter(([, v]) => v.tipo === "numero");
+  const otras = Object.entries(variables).filter(([, v]) => v.tipo !== "numero");
+  if (!numericas.length && !otras.length) return null;
+
+  return (
+    <div className="rounded-md p-2.5 mt-1.5" style={{ background: COLORS.cream }}>
+      {titulo && <p className="text-[11px] font-bold uppercase tracking-wide mb-1.5" style={cOrange}>{titulo}</p>}
 
       {numericas.map(([texto, v]) => {
         const ultima = v.lecturas[v.lecturas.length - 1];
         return (
-          <div key={texto} className="mt-3">
+          <div key={texto} className="mt-2 first:mt-0">
             <div className="flex items-center justify-between gap-2 mb-1">
               <p className="text-xs font-semibold uppercase tracking-wide" style={cSlate}>{texto}</p>
               <span className="text-sm font-bold" style={cOrange}>
@@ -8200,7 +8269,7 @@ function TarjetaMonitoreoActivo({ grupo, sedes }) {
               </span>
             </div>
             {v.lecturas.length > 1 ? (
-              <ResponsiveContainer width="100%" height={140}>
+              <ResponsiveContainer width="100%" height={130}>
                 <LineChart data={v.lecturas} margin={{ top: 5, right: 8, left: -20, bottom: 0 }}>
                   <CartesianGrid stroke={COLORS.line} vertical={false} />
                   <XAxis dataKey="fecha" tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
@@ -8218,7 +8287,7 @@ function TarjetaMonitoreoActivo({ grupo, sedes }) {
       })}
 
       {otras.length > 0 && (
-        <div className="mt-3 pt-2.5 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+        <div className={numericas.length ? "mt-2 pt-2 space-y-1.5" : "space-y-1.5"} style={numericas.length ? { borderTop: `1px solid ${COLORS.line}` } : undefined}>
           {otras.map(([texto, v]) => {
             const ultima = v.lecturas[v.lecturas.length - 1];
             const meta =
