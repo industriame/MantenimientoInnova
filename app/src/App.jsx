@@ -2377,23 +2377,23 @@ function FormReprogramar({ item, data, usuario, onConfirm, onClose }) {
 
 /* Sección plegable por estado. Cada etapa se abre y cierra por separado para
    que la pestaña no crezca sin control cuando hay muchas actividades. */
-function SeccionPlegable({ titulo, count, color, nota, defaultOpen = true, children }) {
+function SeccionPlegable({ titulo, count, color, nota, defaultOpen = false, children }) {
   const [open, setOpen] = useState(defaultOpen);
   const c = color || COLORS.slate;
   return (
     <div className="border rounded-md overflow-hidden" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${c}` }}>
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-3 py-2.5"
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-2.5 py-2"
         style={{ background: open ? COLORS.paper : "white" }}>
-        {open ? <ChevronDown size={14} color={COLORS.slate} /> : <ChevronRight size={14} color={COLORS.slate} />}
+        {open ? <ChevronDown size={13} color={COLORS.slate} /> : <ChevronRight size={13} color={COLORS.slate} />}
         <span className="text-xs font-bold uppercase tracking-wide flex-1 text-left" style={{ color: c }}>
           {titulo}
         </span>
         <Chip color={count > 0 ? c : COLORS.slate}>{count}</Chip>
       </button>
       {open && (
-        <div className="p-2.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-          {nota && <p className="text-[11px] mb-2" style={cSlate}>{nota}</p>}
-          <div className="space-y-2">{children}</div>
+        <div className="p-2" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+          {nota && <p className="text-[11px] mb-1.5" style={cSlate}>{nota}</p>}
+          <div className="space-y-1.5">{children}</div>
         </div>
       )}
     </div>
@@ -3214,7 +3214,7 @@ function FormReportarNovedad({
   const sede = sedes.find((s) => s.id === sedeId);
   const fase = sede?.fases.find((f) => f.id === faseId);
   const ahora = new Date();
-  const valido = sedeId && faseId && descripcion.trim() && solicitanteId;
+  const valido = sedeId && descripcion.trim() && solicitanteId;
 
   // Quién pudo haber detectado la novedad en esa sede
   const posiblesSolicitantes = elegirSolicitante
@@ -3764,14 +3764,14 @@ const TIPO_PLURAL = { preventivo: "Preventivos", correctivo: "Correctivos", serv
    la vista corta; se abre solo si tiene actividades urgentes. */
 function GrupoTipo({ tipo, items, todosLosSedes, usuarios, onActivar, ocultarCosto }) {
   const urgentes = items.filter((i) => semaforoDe(i).nivel >= 3).length;
-  const [open, setOpen] = useState(urgentes > 0);
+  const [open, setOpen] = useState(false);
   const meta = tipoMeta(tipo);
 
   return (
     <div className="border rounded-md overflow-hidden" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${meta.color}` }}>
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-2.5 py-2"
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-2 py-1.5"
         style={{ background: open ? COLORS.paper : "white" }}>
-        {open ? <ChevronDown size={13} color={COLORS.slate} /> : <ChevronRight size={13} color={COLORS.slate} />}
+        {open ? <ChevronDown size={12} color={COLORS.slate} /> : <ChevronRight size={12} color={COLORS.slate} />}
         <span className="text-[11px] font-bold uppercase tracking-wide flex-1 text-left" style={{ color: meta.color }}>
           {TIPO_PLURAL[tipo]}
         </span>
@@ -3780,7 +3780,7 @@ function GrupoTipo({ tipo, items, todosLosSedes, usuarios, onActivar, ocultarCos
       </button>
 
       {open && (
-        <div className="p-2 space-y-2" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+        <div className="p-1.5 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
           {ordenarPorUrgencia(items).map((item) => (
             <TarjetaPendiente key={item.key} item={item} sedes={todosLosSedes} usuarios={usuarios}
               onActivar={onActivar ? () => onActivar(item) : null} ocultarCosto={ocultarCosto} />
@@ -3805,7 +3805,7 @@ function ArbolPendientes({ sedes, todosLosSedes, usuarios, pendientes, onActivar
 
         return (
           <div key={sede.id} className="border rounded-md overflow-hidden" style={cardStyle}>
-            <button onClick={() => toggle(sede.id)} className="w-full flex items-center gap-2.5 p-3" style={{ background: abierta ? COLORS.cream : "white" }}>
+            <button onClick={() => toggle(sede.id)} className="w-full flex items-center gap-2.5 p-2.5" style={{ background: abierta ? COLORS.cream : "white" }}>
               {abierta ? <ChevronDown size={15} color={COLORS.charcoal} /> : <ChevronRight size={15} color={COLORS.charcoal} />}
               <span className="w-2 h-2 rounded-full shrink-0" style={{ background: sedeColor(todosLosSedes, sede.id) }} />
               <span className="text-sm font-bold flex-1 text-left truncate" style={cChar}>{sede.nombre}</span>
@@ -3819,7 +3819,7 @@ function ArbolPendientes({ sedes, todosLosSedes, usuarios, pendientes, onActivar
             </button>
 
             {abierta && (
-              <div className="p-2.5 space-y-2" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+              <div className="p-2 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
                 {["preventivo", "correctivo", "servicio"].map((tipo) => {
                   const grupo = items.filter((i) => i.tipo === tipo);
                   if (grupo.length === 0) return null;
@@ -3994,7 +3994,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
 
   return (
     <div className="border rounded-md" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${tipoMeta(item.tipo).color}`, background: "white" }}>
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between p-3 text-left gap-2">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between p-2.5 text-left gap-2">
         <div className="flex items-start gap-2.5 min-w-0">
           {open ? <ChevronDown size={16} color={COLORS.slate} className="mt-0.5 shrink-0" /> : <ChevronRight size={16} color={COLORS.slate} className="mt-0.5 shrink-0" />}
           <div className="min-w-0">
@@ -4003,7 +4003,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               <span className="text-[10px] font-bold" style={cChar}>{item.codigo}</span>
               {item.criticidad && <Chip color={CRITICIDAD[item.criticidad].color}>{CRITICIDAD[item.criticidad].label}</Chip>}
             </div>
-            <p className="font-semibold text-sm mt-1 truncate" style={cChar}>{item.tarea}</p>
+            <p className="font-semibold text-sm mt-0.5 truncate" style={cChar}>{item.tarea}</p>
             <p className="text-xs truncate" style={cSlate}>{ubicacionTexto(data.sedes, item)}</p>
           </div>
         </div>
@@ -4014,7 +4014,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
       </button>
 
       {open && (
-        <div className="px-3 pb-3 space-y-3 border-t pt-3" style={bLine}>
+        <div className="px-2.5 pb-2.5 space-y-3 border-t pt-2.5" style={bLine}>
           {!corrige ? (
             <p className="text-xs" style={cSlate}>
               Programada: {item.fechaProgramada || "—"}
