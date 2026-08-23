@@ -7540,6 +7540,70 @@ async function compartirPDF(blob, nombre) {
   return "descargado";
 }
 
+/* Reporte de monitoreo: tabla pivote (variable en filas, fecha en columnas)
+   para descargar en PDF desde el popup de cada nodo monitoreado. */
+function construirReporteMonitoreoHTML(titulo, breadcrumb, variablesConDelta, fechas) {
+  const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
+
+  const etiqueta = (tipo, valor) => {
+    if (tipo === "estado") return ESTADO_PASO[valor]?.label || valor || "—";
+    if (tipo === "validacion") return VALIDACION[valor]?.label || valor || "—";
+    if (tipo === "check") return valor ? "Hecho" : "Pendiente";
+    return valor ?? "—";
+  };
+
+  const filas = Object.entries(variablesConDelta).map(([texto, v]) => {
+    const porFecha = {};
+    v.lecturas.forEach((l) => { porFecha[l.fecha] = l; });
+    const celdas = fechas.map((f) => {
+      const l = porFecha[f];
+      if (!l) return `<td class="c mut">—</td>`;
+      if (v.tipo === "numero") {
+        const diff = (l.diferencia !== null && l.diferencia !== undefined)
+          ? `<br><span class="mut" style="color:${l.diferencia >= 0 ? "#3E8E5B" : "#C0392B"}">${l.diferencia >= 0 ? "+" : ""}${l.diferencia}</span>`
+          : "";
+        return `<td class="c"><b>${esc(l.valor)}</b>${diff}</td>`;
+      }
+      return `<td class="c">${esc(etiqueta(v.tipo, l.valor))}</td>`;
+    }).join("");
+    return `<tr><td><b>${esc(texto)}</b>${v.unidad ? ` <span class="mut">(${esc(v.unidad)})</span>` : ""}</td>${celdas}</tr>`;
+  }).join("");
+
+  const encabezadoFechas = fechas.map((f) => `<th class="c">${esc(f)}</th>`).join("");
+
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Monitoreo · ${esc(titulo)}</title>
+<style>
+@page { size: A4 landscape; margin: 12mm; }
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:9pt;line-height:1.4}
+.hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #35383C;padding-bottom:8px;margin-bottom:12px}
+.hdr h1{font-size:14pt;letter-spacing:.02em;text-transform:uppercase}
+.hdr .sub{font-size:8.5pt;color:#787D85;margin-top:2px}
+.hdr .marca{text-align:right;font-size:8.5pt;color:#787D85}
+.hdr .marca b{display:block;font-size:11pt;color:#ED5B23;letter-spacing:.06em}
+.marca img{max-height:30px;margin-bottom:3px}
+table{width:100%;border-collapse:collapse;font-size:8pt}
+thead th{background:#35383C;color:#fff;text-align:left;padding:5px 4px;font-size:7.5pt;text-transform:uppercase;white-space:nowrap}
+tbody td{padding:4px;border-bottom:1px solid #E3E0D8;vertical-align:top;white-space:nowrap}
+tbody tr:nth-child(even){background:#F7F6F3}
+.c{text-align:center}
+.mut{color:#8D939B;font-size:7pt}
+.pie{margin-top:14px;padding-top:6px;border-top:1px solid #D8D4CB;font-size:7.5pt;color:#8D939B;display:flex;justify-content:space-between}
+</style></head><body>
+<div class="hdr">
+  <div><h1>Monitoreo de condición</h1><p class="sub">${esc(titulo)} · ${esc(breadcrumb)}</p></div>
+  <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div>
+</div>
+<table>
+  <thead><tr><th>Variable</th>${encabezadoFechas}</tr></thead>
+  <tbody>${filas || `<tr><td colspan="${fechas.length + 1}" class="c">Sin lecturas</td></tr>`}</tbody>
+</table>
+<div class="pie"><span>IndustriaMe S.A.S. · Reporte de monitoreo</span><span>Generado el ${esc(emitido)}</span></div>
+</body></html>`;
+}
+
 function construirReporteHTML(items, data, meta) {
   const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   const nom = (id) => esc(usuarioNombre(data.usuarios, id));
@@ -8259,39 +8323,76 @@ function FilaActivo({ sede, fase, activo, grupo, onVer }) {
   );
 }
 
-/* Popup con el histórico completo de un nodo (sede/fase/activo). Numéricas se
-   ven como gráfica + tabla; estado/validación/check siempre como tabla. */
+/* Popup con el histórico completo de un nodo (sede/fase/activo): tabla
+   compacta con las fechas en columnas (giradas, para ahorrar espacio) y
+   cada variable en una fila. En variables numéricas se calcula, de forma
+   automática y genérica, la diferencia contra la lectura anterior de esa
+   misma variable — útil para contadores acumulados (ej. horas de un
+   generador: 80 - 50 = 30 horas de uso). En variables donde ese dato no
+   aplica (ej. voltaje) simplemente se ve la fluctuación entre tomas, sin
+   necesidad de configurar nada por variable. */
 function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
   const variables = grupo?.variables || {};
-  const numericas = Object.entries(variables).filter(([, v]) => v.tipo === "numero");
-  const otras = Object.entries(variables).filter(([, v]) => v.tipo !== "numero");
 
-  const todasFechas = Object.values(variables).flatMap((v) => v.lecturas.map((l) => l.fecha)).filter(Boolean).sort();
+  const variablesConDelta = useMemo(() => {
+    const out = {};
+    Object.entries(variables).forEach(([texto, v]) => {
+      out[texto] = {
+        ...v,
+        lecturas: v.lecturas.map((l, i) => ({
+          ...l,
+          diferencia: v.tipo === "numero" && i > 0 ? l.valor - v.lecturas[i - 1].valor : null,
+        })),
+      };
+    });
+    return out;
+  }, [variables]);
+
+  const todasFechas = [...new Set(Object.values(variablesConDelta).flatMap((v) => v.lecturas.map((l) => l.fecha)).filter(Boolean))].sort();
   const [verTodo, setVerTodo] = useState(true);
   const [mes, setMes] = useState(() => mesKey(todasFechas[todasFechas.length - 1] || fmtDate(new Date())));
+  const fechasVisibles = todasFechas.filter((f) => verTodo || mesKey(f) === mes);
 
-  const filtrar = (lecturas) => (verTodo ? lecturas : lecturas.filter((l) => mesKey(l.fecha) === mes));
-
-  const etiquetaValor = (tipo, valor) => {
-    if (tipo === "estado") return ESTADO_PASO[valor]?.label || valor || "—";
-    if (tipo === "validacion") return VALIDACION[valor]?.label || valor || "—";
-    if (tipo === "check") return valor ? "Hecho" : "Pendiente";
-    return valor ?? "—";
+  const etiquetaCorta = (tipo, valor) => {
+    if (tipo === "estado") return { txt: valor === "bueno" ? "Bueno" : valor === "alarma" ? "Alarma" : valor === "malo" ? "Malo" : "—", color: ESTADO_PASO[valor]?.color || COLORS.slate };
+    if (tipo === "validacion") return { txt: valor === "si" ? "Sí" : valor === "no" ? "No" : "—", color: VALIDACION[valor]?.color || COLORS.slate };
+    if (tipo === "check") return { txt: valor ? "✓" : "–", color: valor ? COLORS.verde : COLORS.slate };
+    return { txt: String(valor ?? "—"), color: COLORS.charcoal };
   };
-  const colorValor = (tipo, valor) => {
-    if (tipo === "estado") return ESTADO_PASO[valor]?.color || COLORS.slate;
-    if (tipo === "validacion") return VALIDACION[valor]?.color || COLORS.slate;
-    if (tipo === "check") return valor ? COLORS.verde : COLORS.slate;
-    return COLORS.slate;
+
+  const [generando, setGenerando] = useState(false);
+  const [progreso, setProgreso] = useState("");
+  const [avisoPDF, setAvisoPDF] = useState("");
+
+  const hacerPDF = async () => {
+    setGenerando(true); setAvisoPDF(""); setProgreso("Preparando…");
+    try {
+      const html = construirReporteMonitoreoHTML(titulo, breadcrumb, variablesConDelta, fechasVisibles);
+      const blob = await generarPDF(html, { onProgreso: setProgreso });
+      const slug = `${titulo}`.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+      const nombre = `monitoreo-${slug || "reporte"}-${fmtDate(new Date())}.pdf`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = nombre;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setAvisoPDF(`Descargado ${nombre}`);
+    } catch (e) {
+      console.error("[pdf monitoreo]", e);
+      setAvisoPDF("No se pudo generar el PDF.");
+    } finally {
+      setGenerando(false); setProgreso("");
+      setTimeout(() => setAvisoPDF(""), 6000);
+    }
   };
 
   return (
     <Modal title={titulo} onClose={onClose} wide>
-      <div className="space-y-4">
+      <div className="space-y-3">
         <p className="text-xs -mt-2" style={cSlate}>{breadcrumb}</p>
 
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
             <button onClick={() => setVerTodo(true)} className="text-[11px] font-semibold px-2.5 py-1.5 rounded-md"
               style={verTodo ? { background: COLORS.orange, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
               Todo el histórico
@@ -8300,73 +8401,81 @@ function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
               style={!verTodo ? { background: COLORS.orange, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
               Por mes
             </button>
+            {!verTodo && <MesSelector mes={mes} onChange={setMes} />}
           </div>
-          {!verTodo && <MesSelector mes={mes} onChange={setMes} />}
+          <button onClick={hacerPDF} disabled={generando}
+            className="flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-md text-white disabled:opacity-60 shrink-0"
+            style={{ background: COLORS.charcoal }}>
+            <Download size={12} /> {generando ? (progreso || "Generando…") : "Descargar PDF"}
+          </button>
         </div>
+        {avisoPDF && <p className="text-[11px]" style={cSlate}>{avisoPDF}</p>}
 
-        {numericas.map(([texto, v]) => {
-          const lecturas = filtrar(v.lecturas);
-          return (
-            <div key={texto} className="border-t pt-3" style={bLine}>
-              <p className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={cSlate}>{texto}</p>
-              {lecturas.length ? (
-                <>
-                  <ResponsiveContainer width="100%" height={140}>
-                    <LineChart data={lecturas} margin={{ top: 5, right: 8, left: -20, bottom: 0 }}>
-                      <CartesianGrid stroke={COLORS.line} vertical={false} />
-                      <XAxis dataKey="fecha" tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
-                      <YAxis tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
-                      <Tooltip formatter={(val) => [`${val} ${v.unidad || ""}`.trim(), texto]} />
-                      <Line type="monotone" dataKey="valor" stroke={COLORS.orange} strokeWidth={2.5}
-                        dot={{ r: 3, fill: COLORS.orange }} activeDot={{ r: 5 }} isAnimationActive={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                  <table className="w-full text-xs mt-2">
-                    <tbody>
-                      {[...lecturas].reverse().map((l, i) => (
-                        <tr key={i} style={i > 0 ? { borderTop: `1px solid ${COLORS.line}` } : undefined}>
-                          <td className="py-1" style={cSlate}>{l.fecha || "—"}</td>
-                          <td className="py-1 text-right font-semibold" style={cChar}>{l.valor} {v.unidad || ""}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </>
-              ) : <Empty>Sin lecturas en este periodo.</Empty>}
-            </div>
-          );
-        })}
-
-        {otras.map(([texto, v]) => {
-          const lecturas = filtrar(v.lecturas);
-          return (
-            <div key={texto} className="border-t pt-3" style={bLine}>
-              <p className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={cSlate}>{texto}</p>
-              {lecturas.length ? (
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-left" style={cSlate}>
-                      <th className="font-semibold pb-1">Fecha</th>
-                      <th className="font-semibold pb-1 text-right">Valor</th>
+        {fechasVisibles.length ? (
+          <div className="overflow-x-auto border rounded-md" style={bLine}>
+            <table style={{ borderCollapse: "collapse", width: "max-content" }}>
+              <thead>
+                <tr>
+                  <th className="sticky left-0 z-10 bg-white text-left px-2 py-1.5 text-xs font-semibold"
+                    style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, minWidth: 130, ...cChar }}>
+                    Variable
+                  </th>
+                  {fechasVisibles.map((f) => (
+                    <th key={f} className="px-0.5 py-1 align-bottom" style={{ borderBottom: `1px solid ${COLORS.line}`, width: 26 }}>
+                      <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 10, fontWeight: 600, color: COLORS.slate, whiteSpace: "nowrap" }}>
+                        {f}
+                      </div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(variablesConDelta).map(([texto, v]) => {
+                  const porFecha = {};
+                  v.lecturas.forEach((l) => { porFecha[l.fecha] = l; });
+                  return (
+                    <tr key={texto}>
+                      <td className="sticky left-0 z-10 bg-white px-2 py-1.5 text-xs font-semibold"
+                        style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, ...cSlate }}>
+                        {texto}{v.unidad ? ` (${v.unidad})` : ""}
+                      </td>
+                      {fechasVisibles.map((f) => {
+                        const l = porFecha[f];
+                        if (!l) {
+                          return <td key={f} className="text-center text-xs" style={{ borderBottom: `1px solid ${COLORS.line}`, ...cSlate }}>—</td>;
+                        }
+                        if (v.tipo === "numero") {
+                          return (
+                            <td key={f} className="text-center px-1 py-1" style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                              <div className="text-xs font-semibold" style={cChar}>{l.valor}</div>
+                              {l.diferencia !== null && (
+                                <div style={{ fontSize: 9, color: l.diferencia >= 0 ? COLORS.verde : COLORS.rojo }}>
+                                  {l.diferencia >= 0 ? "+" : ""}{l.diferencia}
+                                </div>
+                              )}
+                            </td>
+                          );
+                        }
+                        const et = etiquetaCorta(v.tipo, l.valor);
+                        return (
+                          <td key={f} className="text-center px-1 py-1 text-xs font-bold" style={{ borderBottom: `1px solid ${COLORS.line}`, color: et.color }}>
+                            {et.txt}
+                          </td>
+                        );
+                      })}
                     </tr>
-                  </thead>
-                  <tbody>
-                    {[...lecturas].reverse().map((l, i) => (
-                      <tr key={i} style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                        <td className="py-1.5" style={cSlate}>{l.fecha || "—"}</td>
-                        <td className="py-1.5 text-right">
-                          <Chip color={colorValor(v.tipo, l.valor)}>{etiquetaValor(v.tipo, l.valor)}</Chip>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : <Empty>Sin lecturas en este periodo.</Empty>}
-            </div>
-          );
-        })}
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <Empty>Sin lecturas en este periodo.</Empty>
+        )}
 
-        {numericas.length === 0 && otras.length === 0 && <Empty>Sin lecturas todavía.</Empty>}
+        <p className="text-[10px]" style={cSlate}>
+          En variables numéricas, el número pequeño debajo del valor es la diferencia con la lectura anterior — por ejemplo, horas de uso desde la última toma.
+        </p>
       </div>
     </Modal>
   );
