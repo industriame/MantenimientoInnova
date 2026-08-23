@@ -8134,9 +8134,11 @@ function FilaUsuario({ user, data, onEdit, onDelete }) {
   );
 }
 
+
 /* ============================================================================
-   16.5. MONITOREO DE CONDICIÓN — árbol sede → fase → activo, solo lo
-   que aplica un plan marcado "monitoreo" (a nivel de sede, fase o activo)
+   16.5. MONITOREO DE CONDICIÓN — árbol compacto sede → fase → activo.
+   Cada nivel con datos muestra un botón (i) que abre el histórico completo
+   en un popup, filtrable por mes; validación/estado/check se ven en tabla.
    ========================================================================= */
 function VistaMonitoreo({ data }) {
   const grupos = useMemo(() => {
@@ -8163,148 +8165,210 @@ function VistaMonitoreo({ data }) {
     return mapa;
   }, [data.planes, data.ordenes]);
 
-  const sedesConDatos = (data.sedes || []).filter((sede) =>
-    Object.values(grupos).some((g) => g.sedeId === sede.id)
-  );
+  const [popup, setPopup] = useState(null);
+  const sedesConDatos = (data.sedes || []).filter((sede) => Object.values(grupos).some((g) => g.sedeId === sede.id));
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       <p className="text-xs" style={cSlate}>
-        Sedes, fases y activos con seguimiento activo — porque su plan de mantenimiento está marcado como "monitoreo de condición".
-        Para agregar más, edita el plan correspondiente en la pestaña Configuración.
+        Sedes, fases y activos con seguimiento activo. El ícono <Info size={11} className="inline align-text-top" color={COLORS.orange} /> abre
+        el histórico completo. Para agregar más, marca un plan como "monitoreo de condición" en Configuración.
       </p>
       {sedesConDatos.length ? (
-        sedesConDatos.map((sede) => <SedeMonitoreo key={sede.id} sede={sede} grupos={grupos} />)
+        <div className="border rounded-md overflow-hidden divide-y" style={cardStyle}>
+          {sedesConDatos.map((sede) => (
+            <FilaSede key={sede.id} sede={sede} grupos={grupos} onVer={setPopup} />
+          ))}
+        </div>
       ) : (
         <Empty>
           Aún no hay lecturas. Marca un plan como "monitoreo de condición" y completa al menos una orden con checklist para ver datos aquí.
         </Empty>
       )}
+
+      {popup && <PopupMonitoreo {...popup} onClose={() => setPopup(null)} />}
     </div>
   );
 }
 
-function SedeMonitoreo({ sede, grupos }) {
+function FilaSede({ sede, grupos, onVer }) {
   const [open, setOpen] = useState(false);
   const fasesConDatos = (sede.fases || []).filter((fase) =>
-    Object.values(grupos).some((g) => g.sedeId === sede.id && g.faseId === fase.id && g.activoId)
-    || grupos[`${sede.id}|${fase.id}|`]
+    (fase.activos || []).some((a) => grupos[`${sede.id}|${fase.id}|${a.id}`]) || grupos[`${sede.id}|${fase.id}|`]
   );
   const grupoSede = grupos[`${sede.id}||`];
+  const hayHijos = fasesConDatos.length > 0;
 
   return (
-    <div className="border rounded-md overflow-hidden" style={cardStyle}>
-      <div className="flex items-center gap-2.5 p-3 cursor-pointer" style={{ background: open ? COLORS.cream : "white" }} onClick={() => setOpen(!open)}>
-        {open ? <ChevronDown size={16} color={COLORS.charcoal} /> : <ChevronRight size={16} color={COLORS.charcoal} />}
-        <p className="text-sm font-bold flex-1" style={cChar}>{sede.nombre}</p>
+    <div style={bLine}>
+      <div className="flex items-center gap-1.5 py-1.5 px-2.5 cursor-pointer hover:bg-black/[0.02]"
+        onClick={() => hayHijos && setOpen(!open)}>
+        {hayHijos ? (open ? <ChevronDown size={13} color={COLORS.charcoal} /> : <ChevronRight size={13} color={COLORS.charcoal} />)
+          : <span className="w-[13px] shrink-0" />}
+        <p className="text-xs font-bold flex-1 truncate" style={cChar}>{sede.nombre}</p>
+        {grupoSede && (
+          <button onClick={(e) => { e.stopPropagation(); onVer({ titulo: "Sede completa", breadcrumb: sede.nombre, grupo: grupoSede }); }}
+            className="shrink-0 p-0.5">
+            <Info size={14} color={COLORS.orange} />
+          </button>
+        )}
       </div>
-      {open && (
-        <div className="pl-4 pr-3 pb-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-          {grupoSede && <TarjetaMonitoreoGrupo titulo="Sede completa" grupo={grupoSede} />}
-          {fasesConDatos.map((fase) => (
-            <FaseMonitoreo key={fase.id} sede={sede} fase={fase} grupos={grupos} />
-          ))}
-          {!grupoSede && fasesConDatos.length === 0 && <Empty>Sin lecturas todavía.</Empty>}
-        </div>
-      )}
+      {open && fasesConDatos.map((fase) => (
+        <FilaFase key={fase.id} sede={sede} fase={fase} grupos={grupos} onVer={onVer} />
+      ))}
     </div>
   );
 }
 
-function FaseMonitoreo({ sede, fase, grupos }) {
+function FilaFase({ sede, fase, grupos, onVer }) {
   const [open, setOpen] = useState(false);
   const activosConDatos = (fase.activos || []).filter((a) => grupos[`${sede.id}|${fase.id}|${a.id}`]);
   const grupoFase = grupos[`${sede.id}|${fase.id}|`];
+  const hayHijos = activosConDatos.length > 0;
 
   return (
-    <div className="border-l-2 pl-3 mt-2" style={bLine}>
-      <div className="flex items-center gap-2 py-2 cursor-pointer" onClick={() => setOpen(!open)}>
-        {open ? <ChevronDown size={14} color={COLORS.slate} /> : <ChevronRight size={14} color={COLORS.slate} />}
-        <Layers size={13} color={COLORS.orange} />
-        <p className="text-sm font-semibold" style={cChar}>{fase.nombre}</p>
+    <div style={bLine}>
+      <div className="flex items-center gap-1.5 py-1.5 pl-7 pr-2.5 cursor-pointer hover:bg-black/[0.02]"
+        style={{ borderTop: `1px solid ${COLORS.line}` }} onClick={() => hayHijos && setOpen(!open)}>
+        {hayHijos ? (open ? <ChevronDown size={12} color={COLORS.slate} /> : <ChevronRight size={12} color={COLORS.slate} />)
+          : <span className="w-3 shrink-0" />}
+        <Layers size={11} color={COLORS.orange} className="shrink-0" />
+        <p className="text-xs font-semibold flex-1 truncate" style={cSlate}>{fase.nombre}</p>
+        {grupoFase && (
+          <button onClick={(e) => { e.stopPropagation(); onVer({ titulo: "Fase completa", breadcrumb: `${sede.nombre} · ${fase.nombre}`, grupo: grupoFase }); }}
+            className="shrink-0 p-0.5">
+            <Info size={13} color={COLORS.orange} />
+          </button>
+        )}
       </div>
-      {open && (
-        <div className="pl-2 pb-1">
-          {grupoFase && <TarjetaMonitoreoGrupo titulo="Fase completa" grupo={grupoFase} />}
-          {activosConDatos.map((a) => (
-            <ActivoMonitoreo key={a.id} activo={a} grupo={grupos[`${sede.id}|${fase.id}|${a.id}`]} />
-          ))}
-        </div>
-      )}
+      {open && activosConDatos.map((a) => (
+        <FilaActivo key={a.id} sede={sede} fase={fase} activo={a} grupo={grupos[`${sede.id}|${fase.id}|${a.id}`]} onVer={onVer} />
+      ))}
     </div>
   );
 }
 
-function ActivoMonitoreo({ activo, grupo }) {
-  const [open, setOpen] = useState(false);
+function FilaActivo({ sede, fase, activo, grupo, onVer }) {
   return (
-    <div className="border-l-2 pl-3 mt-1.5" style={bLine}>
-      <div className="flex items-center gap-2 py-1.5 cursor-pointer" onClick={() => setOpen(!open)}>
-        {open ? <ChevronDown size={13} color={COLORS.slate} /> : <ChevronRight size={13} color={COLORS.slate} />}
-        <p className="text-xs font-semibold" style={cChar}>{activo.nombre}</p>
-      </div>
-      {open && <div className="pl-1 pb-2"><TarjetaMonitoreoGrupo grupo={grupo} /></div>}
+    <div className="flex items-center gap-1.5 py-1.5 pl-11 pr-2.5 cursor-pointer hover:bg-black/[0.02]"
+      style={{ borderTop: `1px solid ${COLORS.line}` }}
+      onClick={() => onVer({ titulo: activo.nombre, breadcrumb: `${sede.nombre} · ${fase.nombre} · ${activo.nombre}`, grupo })}>
+      <p className="text-xs flex-1 truncate" style={cSlate}>{activo.nombre}</p>
+      <Info size={13} color={COLORS.orange} className="shrink-0" />
     </div>
   );
 }
 
-function TarjetaMonitoreoGrupo({ titulo, grupo }) {
+/* Popup con el histórico completo de un nodo (sede/fase/activo). Numéricas se
+   ven como gráfica + tabla; estado/validación/check siempre como tabla. */
+function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
   const variables = grupo?.variables || {};
   const numericas = Object.entries(variables).filter(([, v]) => v.tipo === "numero");
   const otras = Object.entries(variables).filter(([, v]) => v.tipo !== "numero");
-  if (!numericas.length && !otras.length) return null;
+
+  const todasFechas = Object.values(variables).flatMap((v) => v.lecturas.map((l) => l.fecha)).filter(Boolean).sort();
+  const [verTodo, setVerTodo] = useState(true);
+  const [mes, setMes] = useState(() => mesKey(todasFechas[todasFechas.length - 1] || fmtDate(new Date())));
+
+  const filtrar = (lecturas) => (verTodo ? lecturas : lecturas.filter((l) => mesKey(l.fecha) === mes));
+
+  const etiquetaValor = (tipo, valor) => {
+    if (tipo === "estado") return ESTADO_PASO[valor]?.label || valor || "—";
+    if (tipo === "validacion") return VALIDACION[valor]?.label || valor || "—";
+    if (tipo === "check") return valor ? "Hecho" : "Pendiente";
+    return valor ?? "—";
+  };
+  const colorValor = (tipo, valor) => {
+    if (tipo === "estado") return ESTADO_PASO[valor]?.color || COLORS.slate;
+    if (tipo === "validacion") return VALIDACION[valor]?.color || COLORS.slate;
+    if (tipo === "check") return valor ? COLORS.verde : COLORS.slate;
+    return COLORS.slate;
+  };
 
   return (
-    <div className="rounded-md p-2.5 mt-1.5" style={{ background: COLORS.cream }}>
-      {titulo && <p className="text-[11px] font-bold uppercase tracking-wide mb-1.5" style={cOrange}>{titulo}</p>}
+    <Modal title={titulo} onClose={onClose} wide>
+      <div className="space-y-4">
+        <p className="text-xs -mt-2" style={cSlate}>{breadcrumb}</p>
 
-      {numericas.map(([texto, v]) => {
-        const ultima = v.lecturas[v.lecturas.length - 1];
-        return (
-          <div key={texto} className="mt-2 first:mt-0">
-            <div className="flex items-center justify-between gap-2 mb-1">
-              <p className="text-xs font-semibold uppercase tracking-wide" style={cSlate}>{texto}</p>
-              <span className="text-sm font-bold" style={cOrange}>
-                {ultima ? `${ultima.valor} ${v.unidad || ""}`.trim() : "—"}
-              </span>
-            </div>
-            {v.lecturas.length > 1 ? (
-              <ResponsiveContainer width="100%" height={130}>
-                <LineChart data={v.lecturas} margin={{ top: 5, right: 8, left: -20, bottom: 0 }}>
-                  <CartesianGrid stroke={COLORS.line} vertical={false} />
-                  <XAxis dataKey="fecha" tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
-                  <Tooltip formatter={(val) => [`${val} ${v.unidad || ""}`.trim(), texto]} />
-                  <Line type="monotone" dataKey="valor" stroke={COLORS.orange} strokeWidth={2.5}
-                    dot={{ r: 3, fill: COLORS.orange }} activeDot={{ r: 5 }} isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : (
-              <p className="text-[11px]" style={cSlate}>Todavía solo hay una lectura — el histórico aparece a partir de la segunda.</p>
-            )}
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5">
+            <button onClick={() => setVerTodo(true)} className="text-[11px] font-semibold px-2.5 py-1.5 rounded-md"
+              style={verTodo ? { background: COLORS.orange, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
+              Todo el histórico
+            </button>
+            <button onClick={() => setVerTodo(false)} className="text-[11px] font-semibold px-2.5 py-1.5 rounded-md"
+              style={!verTodo ? { background: COLORS.orange, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
+              Por mes
+            </button>
           </div>
-        );
-      })}
-
-      {otras.length > 0 && (
-        <div className={numericas.length ? "mt-2 pt-2 space-y-1.5" : "space-y-1.5"} style={numericas.length ? { borderTop: `1px solid ${COLORS.line}` } : undefined}>
-          {otras.map(([texto, v]) => {
-            const ultima = v.lecturas[v.lecturas.length - 1];
-            const meta =
-              v.tipo === "estado" ? ESTADO_PASO[ultima?.valor] :
-              v.tipo === "validacion" ? VALIDACION[ultima?.valor] :
-              v.tipo === "check" ? (ultima?.valor ? { label: "Hecho", color: COLORS.verde } : { label: "Pendiente", color: COLORS.slate }) :
-              null;
-            return (
-              <div key={texto} className="flex items-center justify-between gap-2 text-xs">
-                <span style={cSlate}>{texto}</span>
-                {meta ? <Chip color={meta.color}>{meta.label}</Chip> : <span style={cSlate}>—</span>}
-              </div>
-            );
-          })}
+          {!verTodo && <MesSelector mes={mes} onChange={setMes} />}
         </div>
-      )}
-    </div>
+
+        {numericas.map(([texto, v]) => {
+          const lecturas = filtrar(v.lecturas);
+          return (
+            <div key={texto} className="border-t pt-3" style={bLine}>
+              <p className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={cSlate}>{texto}</p>
+              {lecturas.length ? (
+                <>
+                  <ResponsiveContainer width="100%" height={140}>
+                    <LineChart data={lecturas} margin={{ top: 5, right: 8, left: -20, bottom: 0 }}>
+                      <CartesianGrid stroke={COLORS.line} vertical={false} />
+                      <XAxis dataKey="fecha" tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
+                      <YAxis tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
+                      <Tooltip formatter={(val) => [`${val} ${v.unidad || ""}`.trim(), texto]} />
+                      <Line type="monotone" dataKey="valor" stroke={COLORS.orange} strokeWidth={2.5}
+                        dot={{ r: 3, fill: COLORS.orange }} activeDot={{ r: 5 }} isAnimationActive={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                  <table className="w-full text-xs mt-2">
+                    <tbody>
+                      {[...lecturas].reverse().map((l, i) => (
+                        <tr key={i} style={i > 0 ? { borderTop: `1px solid ${COLORS.line}` } : undefined}>
+                          <td className="py-1" style={cSlate}>{l.fecha || "—"}</td>
+                          <td className="py-1 text-right font-semibold" style={cChar}>{l.valor} {v.unidad || ""}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              ) : <Empty>Sin lecturas en este periodo.</Empty>}
+            </div>
+          );
+        })}
+
+        {otras.map(([texto, v]) => {
+          const lecturas = filtrar(v.lecturas);
+          return (
+            <div key={texto} className="border-t pt-3" style={bLine}>
+              <p className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={cSlate}>{texto}</p>
+              {lecturas.length ? (
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left" style={cSlate}>
+                      <th className="font-semibold pb-1">Fecha</th>
+                      <th className="font-semibold pb-1 text-right">Valor</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...lecturas].reverse().map((l, i) => (
+                      <tr key={i} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                        <td className="py-1.5" style={cSlate}>{l.fecha || "—"}</td>
+                        <td className="py-1.5 text-right">
+                          <Chip color={colorValor(v.tipo, l.valor)}>{etiquetaValor(v.tipo, l.valor)}</Chip>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : <Empty>Sin lecturas en este periodo.</Empty>}
+            </div>
+          );
+        })}
+
+        {numericas.length === 0 && otras.length === 0 && <Empty>Sin lecturas todavía.</Empty>}
+      </div>
+    </Modal>
   );
 }
 
