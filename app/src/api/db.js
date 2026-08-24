@@ -57,6 +57,17 @@ export async function saveAppState(data) {
 }
 
 /**
+ * Igual que saveAppState, pero para el payload de escritura selectiva:
+ * las colecciones chicas (sedes, usuarios, planes, bodega, etc.) van
+ * completas como siempre, y ordenes/solicitudes/servicios van como
+ * *Upsert / *Delete — solo lo que realmente cambió desde el último guardado.
+ * @param {object} payload ver construirPayloadDiff en App.jsx
+ */
+export async function saveAppStateV2(payload) {
+  return rpc("put_app_state_v2", { payload });
+}
+
+/**
  * Sube un archivo al bucket de Storage y devuelve su URL pública.
  * El bucket debe existir y tener políticas de INSERT/SELECT para el rol anon
  * (ver instrucciones de configuración de Supabase Storage).
