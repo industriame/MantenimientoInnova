@@ -4555,10 +4555,13 @@ function FormSede({ initial, onSave, onClose }) {
   const [presupuesto, setPresupuesto] = useState(initial?.presupuestoPreventivo ?? PRESUPUESTO_MENSUAL_SEDE);
   const [fee, setFee] = useState(initial?.feeServicio ?? "");
   const [constructor, setConstructor] = useState(initial?.constructor || "");
+  const [foto, setFoto] = useState(initial?.foto || "");
   const est = Number(estudiantes) || 0;
 
   return (
     <div className="space-y-3">
+      <FotoUploader foto={foto} onChange={setFoto} carpeta="Asset/sedes" label="Foto de la sede" />
+
       <Field label="Nombre de la sede">
         <input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Ej. Quitumbe" className={inputCls} style={inputStyle} />
       </Field>
@@ -4595,12 +4598,56 @@ function FormSede({ initial, onSave, onClose }) {
             presupuestoPreventivo: Number(presupuesto) || 0,
             feeServicio: Number(fee) || 0,
             constructor: constructor.trim(),
+            foto,
           });
           onClose();
         }}
         className="w-full py-2.5 rounded-md font-semibold text-sm text-white disabled:opacity-40" style={{ background: COLORS.orange }}>
         {initial ? "Guardar cambios" : "Crear sede"}
       </button>
+    </div>
+  );
+}
+
+/* Miniatura de foto para usar inline en filas compactas (fila de fase o de
+   activo), donde el Field completo de FotoUploader no cabe. Mismo mecanismo
+   de subida (comprimir + Storage), solo que el control es un cuadrito con
+   la imagen o un ícono de cámara. */
+function FotoMini({ foto, onChange, carpeta, size = 36 }) {
+  const inputRef = useRef(null);
+  const [cargando, setCargando] = useState(false);
+
+  const subir = async (file) => {
+    if (!file) return;
+    setCargando(true);
+    try {
+      const blob = await comprimirImagen(file);
+      const ruta = `${carpeta}/${uid("foto")}.jpg`;
+      onChange(await uploadFile(ruta, blob));
+    } catch (err) {
+      console.error("[foto mini]", err);
+    } finally {
+      setCargando(false);
+    }
+  };
+
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <button onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }} disabled={cargando}
+        title={foto ? "Cambiar foto" : "Agregar foto"}
+        className="rounded-md border overflow-hidden flex items-center justify-center disabled:opacity-50"
+        style={{ width: size, height: size, borderColor: COLORS.line, background: foto ? "transparent" : COLORS.paper }}>
+        {foto ? <img src={foto} alt="" className="w-full h-full object-cover" /> : <Camera size={13} color={COLORS.slate} />}
+      </button>
+      {foto && !cargando && (
+        <button onClick={(e) => { e.stopPropagation(); onChange(""); }}
+          className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-white border flex items-center justify-center" style={bLine}>
+          <X size={9} color={COLORS.rojo} />
+        </button>
+      )}
+      <input ref={inputRef} type="file" accept="image/*" className="hidden"
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; subir(f); }} />
     </div>
   );
 }
@@ -4647,6 +4694,9 @@ function AdminSedes({ data, persist }) {
                 {abierta ? <ChevronDown size={16} color={COLORS.charcoal} /> : <ChevronRight size={16} color={COLORS.charcoal} />}
               </button>
               <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: sedeColor(data.sedes, sede.id) }} />
+              {sede.foto && (
+                <img src={sede.foto} alt="" className="w-9 h-9 rounded-md object-cover border shrink-0" style={bLine} />
+              )}
               <div className="min-w-0 flex-1 cursor-pointer" onClick={() => toggle(sede.id)}>
                 <p className="text-sm font-bold" style={cChar}>{sede.nombre}</p>
                 <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
@@ -4719,6 +4769,8 @@ function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr }) {
         <div className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer" onClick={() => setOpen(!open)}>
           {open ? <ChevronDown size={14} color={COLORS.slate} /> : <ChevronRight size={14} color={COLORS.slate} />}
           <Layers size={13} color={COLORS.orange} />
+          <FotoMini foto={fase.foto} carpeta="Asset/fases" size={30}
+            onChange={(foto) => mapFase(sede.id, fase.id, (f) => ({ ...f, foto }))} />
           <div className="min-w-0">
             <EditableLabel value={fase.nombre} className="text-sm font-semibold block" style={cChar}
               onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, nombre }))} />
@@ -4734,10 +4786,14 @@ function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr }) {
           <div className="space-y-2">
             {fase.activos.map((act) => (
               <div key={act.id} className="rounded-md p-2.5 border flex items-center justify-between gap-3" style={{ borderColor: COLORS.line, background: COLORS.paper }}>
-                <div className="min-w-0 flex-1">
-                  <EditableLabel value={act.nombre} className="text-xs font-semibold" style={cChar}
-                    onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.map((a) => (a.id === act.id ? { ...a, nombre } : a)) }))} />
-                  <Resumen r={resumen(sede.id, fase.id, act.id)} />
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <FotoMini foto={act.foto} carpeta="Asset/activos" size={30}
+                    onChange={(foto) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.map((a) => (a.id === act.id ? { ...a, foto } : a)) }))} />
+                  <div className="min-w-0 flex-1">
+                    <EditableLabel value={act.nombre} className="text-xs font-semibold" style={cChar}
+                      onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.map((a) => (a.id === act.id ? { ...a, nombre } : a)) }))} />
+                    <Resumen r={resumen(sede.id, fase.id, act.id)} />
+                  </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <button onClick={() => setQr({ activoId: act.id, activoNombre: act.nombre, sedeNombre: sede.nombre, faseNombre: fase.nombre })}
