@@ -3560,6 +3560,9 @@ function ModalReportarNovedad({ data, sedes, user, elegirSolicitante, onSubmit, 
 
 function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
   const sede = data.sedes.find((s) => s.id === user.sedeIds[0]);
+  const misSedes = sedesVisibles(data, user);
+  const misSedeIds = misSedes.map((s) => s.id);
+  const pendientes = getPendientes(data).filter((p) => misSedeIds.includes(p.sedeId));
   const [tab, setTab] = useState("dashboard");
   const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
   const [reportar, setReportar] = useState(false);
@@ -3624,6 +3627,7 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
     { id: "solicitudes", label: "Solicitudes", icon: <ClipboardList size={14} /> },
+    { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
   ];
 
   return (
@@ -3683,6 +3687,11 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
             {misSolicitudes.length === 0 && <Empty>Aún no has enviado solicitudes.</Empty>}
           </div>
         </div>
+      )}
+
+      {tab === "programacion" && (
+        <PanelProgramacion data={data} sedes={misSedes} pendientes={pendientes}
+          nota="Vista de solo lectura: aquí puedes consultar lo programado en tu sede, pero no puedes activar ni editar nada." />
       )}
 
       {ubicDirecta && (
@@ -4014,7 +4023,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
       </button>
 
       {open && (
-        <div className="px-2.5 pb-2.5 space-y-3 border-t pt-2.5" style={bLine}>
+        <div className="px-2.5 pb-2.5 space-y-2.5 border-t pt-2.5" style={bLine}>
           {!corrige ? (
             <p className="text-xs" style={cSlate}>
               Programada: {item.fechaProgramada || "—"}
@@ -4211,6 +4220,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             <ChecklistEjecucion
               items={item.checklist}
               readOnly={item.estado === "completada"}
+              compacto
               onChange={(items) => acciones.updateActividad(item, { checklist: items })} />
           )}
 
@@ -4429,24 +4439,11 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
       {tab === "mias" && (
         <div className="mt-4">
           <button onClick={() => setHallazgo(true)}
-            className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2.5 rounded-md border"
+            className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2.5 rounded-md border mb-3"
             style={{ borderColor: COLORS.orange, color: COLORS.orange, background: "white" }}>
             <Plus size={14} /> Reportar novedad
           </button>
-          <SectionTitle count={activas.length}>Por ejecutar</SectionTitle>
-          <div className="space-y-2">
-            {activas.map((a) => <TarjetaActividad key={a.id} item={a} data={data} acciones={acciones} />)}
-            {activas.length === 0 && <Empty>No tienes actividades activas asignadas.</Empty>}
-          </div>
-
-          {cerradas.length > 0 && (
-            <>
-              <SectionTitle count={cerradas.length}>Completadas</SectionTitle>
-              <div className="space-y-2">
-                {cerradas.map((a) => <TarjetaActividad key={a.id} item={a} data={data} acciones={acciones} />)}
-              </div>
-            </>
-          )}
+          <TecnicoMisActividades data={data} persist={persist} user={user} misSedeIds={misSedeIds} />
         </div>
       )}
 
@@ -5513,6 +5510,163 @@ function TarjetaCosto({ item, data, rol, onUpdate, defaultOpen }) {
           <ContextoPresupuesto item={item} data={data} />
         </div>
       )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   14b. TÉCNICO · "Mis actividades", con el mismo agrupado por etapa que ve
+   el supervisor (Programadas, En presupuesto, En aprobación, Resueltas),
+   pero solo con lo suyo, rol="tecnico" (sin permisos de corrección), y los
+   servicios sin mostrar el valor — el técnico solo ve qué le toca ejecutar.
+   ========================================================================= */
+function TecnicoPreventivos({ data, acciones, ordenes }) {
+  const abiertas = [...ordenes].filter((o) => ESTADOS_ABIERTOS.includes(o.estado))
+    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
+  const enCosteo = ordenes.filter((o) => o.materialesEstado === "pendiente_costeo");
+  const enAprobacion = ordenes.filter((o) => ["pendiente_aprobacion", "en_espera"].includes(o.materialesEstado));
+  const finalizadas = [...ordenes].filter((o) => o.estado === "completada")
+    .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
+
+  const tarjeta = (o) => <TarjetaActividad key={o.id} item={{ ...o, tipo: "preventivo" }} data={data} acciones={acciones} rol="tecnico" />;
+
+  return (
+    <div className="space-y-3">
+      <SeccionPlegable titulo="Programadas y en ejecución" count={abiertas.length} color={COLORS.orange} defaultOpen>
+        {abiertas.map(tarjeta)}
+        {abiertas.length === 0 && <Empty>Sin preventivos en curso.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="En presupuesto" count={enCosteo.length} color={COLORS.ambar}>
+        {enCosteo.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
+        {enCosteo.length === 0 && <Empty>Nada esperando precios.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="En espera de aprobación del cliente" count={enAprobacion.length} color={ESTADOS.por_aprobar.color}>
+        {enAprobacion.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
+        {enAprobacion.length === 0 && <Empty>Nada esperando decisión del cliente.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
+        {finalizadas.slice(0, 5).map(tarjeta)}
+        {finalizadas.length > 5 && <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Histórico.</p>}
+        {finalizadas.length === 0 && <Empty>Aún no hay preventivos resueltos.</Empty>}
+      </SeccionPlegable>
+    </div>
+  );
+}
+
+function TecnicoCorrectivos({ data, acciones, solicitudes }) {
+  const programadas = [...solicitudes].filter((s) => ESTADOS_ABIERTOS.includes(s.estado))
+    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
+  const enCosteo = solicitudes.filter((s) => s.materialesEstado === "pendiente_costeo");
+  const enAprobacion = solicitudes.filter((s) => ["pendiente_aprobacion", "en_espera"].includes(s.materialesEstado));
+  const finalizadas = [...solicitudes].filter((s) => s.estado === "completada")
+    .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
+
+  const tarjeta = (s) => <TarjetaActividad key={s.id} item={{ ...s, tipo: "correctivo", tarea: s.descripcion }} data={data} acciones={acciones} rol="tecnico" />;
+
+  return (
+    <div className="space-y-3">
+      <SeccionPlegable titulo="Programadas y en ejecución" count={programadas.length} color={COLORS.orange} defaultOpen>
+        {programadas.map(tarjeta)}
+        {programadas.length === 0 && <Empty>Sin correctivos en curso.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="En presupuesto" count={enCosteo.length} color={COLORS.ambar}>
+        {enCosteo.map((i) => <TarjetaCosto key={i.id} item={{ ...i, tipo: "correctivo", tarea: i.descripcion }} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
+        {enCosteo.length === 0 && <Empty>Nada esperando precios.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="En espera de aprobación del cliente" count={enAprobacion.length} color={ESTADOS.por_aprobar.color}>
+        {enAprobacion.map((i) => <TarjetaCosto key={i.id} item={{ ...i, tipo: "correctivo", tarea: i.descripcion }} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
+        {enAprobacion.length === 0 && <Empty>Nada esperando decisión del cliente.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
+        {finalizadas.slice(0, 5).map(tarjeta)}
+        {finalizadas.length > 5 && <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Histórico.</p>}
+        {finalizadas.length === 0 && <Empty>Aún no hay correctivos resueltos.</Empty>}
+      </SeccionPlegable>
+    </div>
+  );
+}
+
+/* Igual estructura visual que AdminServicios, pero sin mostrar ningún monto:
+   el técnico solo necesita saber qué servicio le toca ejecutar y cuándo. */
+function TecnicoServicios({ data, servicios }) {
+  const porAprobar = servicios.filter((s) => s.estado === "por_aprobar");
+  const programados = servicios.filter((s) => ESTADOS_ABIERTOS.includes(s.estado));
+  const finalizados = [...servicios].filter((s) => s.estado === "completada")
+    .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
+
+  const tarjeta = (srv) => (
+    <div key={srv.id} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${ESTADOS[srv.estado]?.color || COLORS.line}` }}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-bold" style={cChar}>{srv.codigo}</span>
+            <EstadoChip estado={srv.estado} />
+            {srv.tipoProveedor && <Chip>{srv.tipoProveedor}</Chip>}
+          </div>
+          <p className="text-sm font-semibold mt-1" style={cChar}>{srv.trabajo}</p>
+          <p className="text-xs" style={cSlate}>{ubicacionTexto(data.sedes, srv)}</p>
+          <p className="text-[11px] mt-1" style={cSlate}>
+            {srv.proveedor || "Proveedor por definir"}{srv.fecha ? ` · ${srv.fecha}` : " · sin fecha"}
+          </p>
+        </div>
+        <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: srv.trabajo, fechaProgramada: srv.fecha }} size={13} />
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-3">
+      <SeccionPlegable titulo="En espera de aprobación del cliente" count={porAprobar.length} color={ESTADOS.por_aprobar.color}>
+        {porAprobar.map(tarjeta)}
+        {porAprobar.length === 0 && <Empty>Sin solicitudes esperando aprobación.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="Programados y en ejecución" count={programados.length} color={COLORS.orange} defaultOpen>
+        {programados.map(tarjeta)}
+        {programados.length === 0 && <Empty>Sin servicios en curso.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="Finalizados" count={finalizados.length} color={COLORS.verde} defaultOpen={false}>
+        {finalizados.slice(0, 5).map(tarjeta)}
+        {finalizados.length > 5 && <p className="text-[11px] text-center" style={cSlate}>{finalizados.length - 5} más en Histórico.</p>}
+        {finalizados.length === 0 && <Empty>Aún no hay servicios finalizados.</Empty>}
+      </SeccionPlegable>
+    </div>
+  );
+}
+
+function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
+  const acciones = useAcciones(data, persist, user);
+  const [sub, setSub] = useState("preventivos");
+
+  const misOrdenes = data.ordenes.filter((o) => o.tecnicoId === user.id);
+  const misSolicitudes = data.solicitudes.filter((s) => s.tecnicoId === user.id);
+  const misServicios = (data.servicios || []).filter((s) => misSedeIds.includes(s.sedeId));
+
+  const subs = [
+    { id: "preventivos", label: "Preventivos", icon: <ClipboardList size={14} />, n: misOrdenes.filter((o) => o.estado !== "completada").length },
+    { id: "correctivos", label: "Correctivos", icon: <AlertTriangle size={14} />, n: misSolicitudes.filter((s) => s.estado !== "completada").length },
+    { id: "servicios", label: "Servicios", icon: <Wrench size={14} />, n: misServicios.filter((s) => s.estado !== "completada").length },
+  ];
+
+  return (
+    <div>
+      <div className="flex gap-1 mb-3 overflow-x-auto pb-1">
+        {subs.map((t) => (
+          <button key={t.id} onClick={() => setSub(t.id)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-semibold whitespace-nowrap shrink-0"
+            style={{
+              background: sub === t.id ? `${COLORS.orange}15` : "white",
+              color: sub === t.id ? COLORS.orange : COLORS.slate,
+              border: `1px solid ${sub === t.id ? COLORS.orange : COLORS.line}`,
+            }}>
+            {t.icon} {t.label}
+            {t.n > 0 && <Chip color={sub === t.id ? COLORS.orange : COLORS.slate}>{t.n}</Chip>}
+          </button>
+        ))}
+      </div>
+
+      {sub === "preventivos" && <TecnicoPreventivos data={data} acciones={acciones} ordenes={misOrdenes} />}
+      {sub === "correctivos" && <TecnicoCorrectivos data={data} acciones={acciones} solicitudes={misSolicitudes} />}
+      {sub === "servicios" && <TecnicoServicios data={data} servicios={misServicios} />}
     </div>
   );
 }
