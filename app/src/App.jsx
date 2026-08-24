@@ -10,7 +10,7 @@ import logoInnova from "./assets/Logo_ISE.png";
 import logoReporte from "./assets/innova.png";
 import { jsPDF } from "jspdf";
 import html2canvas from "html2canvas";
-import { hasAppData, loadAppState, saveAppState, uploadFile } from "./api/db.js";
+import { hasAppData, loadAppState, saveAppState, saveAppStateV2, uploadFile } from "./api/db.js";
 import {
   QrCode, Wrench, ClipboardList, BarChart3, Plus, X, ChevronRight, ChevronDown,
   ChevronLeft, ChevronUp, AlertTriangle, CheckCircle2, Clock, DollarSign, Building2, Layers,
@@ -939,6 +939,25 @@ function isEmptyState(raw) {
   );
 }
 
+/* Compara dos listas por id y devuelve solo lo que cambió: qué insertar o
+   actualizar (upsert) y qué ids ya no están (para borrarlos explícitamente).
+   Es la base de la escritura selectiva: nunca se manda a la base algo que
+   ya está igual a como se guardó la última vez. */
+function diffPorId(anterior, actual) {
+  const antMap = new Map((anterior || []).map((x) => [x.id, x]));
+  const actMap = new Map((actual || []).map((x) => [x.id, x]));
+  const upsert = [];
+  for (const [id, item] of actMap) {
+    const prev = antMap.get(id);
+    if (!prev || JSON.stringify(prev) !== JSON.stringify(item)) upsert.push(item);
+  }
+  const del = [];
+  for (const id of antMap.keys()) {
+    if (!actMap.has(id)) del.push(id);
+  }
+  return { upsert, delete: del };
+}
+
 function useSystemData() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -946,6 +965,7 @@ function useSystemData() {
   const [syncError, setSyncError] = useState(null);
 
   const dataRef = useRef(null);
+  const servidorRef = useRef(null); // último estado confirmado como guardado en la base — base para el diff
   const snapshotRef = useRef(null); // JSON que este cliente considera vigente
   const escribiendoRef = useRef(false); // evita que el polling pise una escritura
   const flushTimerRef = useRef(null);
@@ -961,20 +981,44 @@ function useSystemData() {
     return normalized;
   };
 
+  /* Arma el payload de escritura selectiva: las colecciones chicas van
+     completas (barato, siempre acotado), y ordenes/solicitudes/servicios
+     van como upsert/delete comparando contra lo último confirmado en la
+     base (servidorRef) — nunca el historial completo. */
+  const construirPayloadDiff = (toSave) => {
+    const base = servidorRef.current || {};
+    const dOrd = diffPorId(base.ordenes, toSave.ordenes);
+    const dSol = diffPorId(base.solicitudes, toSave.solicitudes);
+    const dSrv = diffPorId(base.servicios, toSave.servicios);
+    const payload = {
+      ...toSave,
+      ordenesUpsert: dOrd.upsert, ordenesDelete: dOrd.delete,
+      solicitudesUpsert: dSol.upsert, solicitudesDelete: dSol.delete,
+      serviciosUpsert: dSrv.upsert, serviciosDelete: dSrv.delete,
+    };
+    delete payload.ordenes;
+    delete payload.solicitudes;
+    delete payload.servicios;
+    return payload;
+  };
+
   const flushToDb = useCallback(async () => {
     const toSave = dataRef.current;
     if (!toSave) return false;
     escribiendoRef.current = true;
     try {
-      const saved = normalizeData(await saveAppState(toSave));
+      const saved = normalizeData(await saveAppStateV2(construirPayloadDiff(toSave)));
+      servidorRef.current = saved;
       // Si hubo más edits durante el POST, no pisar el estado local más nuevo
       if (snapshotRef.current === JSON.stringify(toSave)) {
         dataRef.current = saved;
         snapshotRef.current = JSON.stringify(saved);
         setData(saved);
       } else {
-        // Reenviar el estado más reciente
-        const again = normalizeData(await saveAppState(dataRef.current));
+        // Reenviar el estado más reciente (el diff ahora es contra "saved")
+        const toSave2 = dataRef.current;
+        const again = normalizeData(await saveAppStateV2(construirPayloadDiff(toSave2)));
+        servidorRef.current = again;
         dataRef.current = again;
         snapshotRef.current = JSON.stringify(again);
         setData(again);
@@ -999,11 +1043,9 @@ function useSystemData() {
     (async () => {
       try {
         const populated = await hasAppData();
-        if (populated) {
-          applyLocal(await loadAppState());
-        } else {
-          applyLocal(await saveAppState(normalizeData(seedData())));
-        }
+        const cargado = populated ? await loadAppState() : await saveAppState(normalizeData(seedData()));
+        const normalizado = applyLocal(cargado);
+        servidorRef.current = normalizado;
         setUltimaSync(new Date());
         setSyncError(null);
       } catch (e) {
@@ -1027,6 +1069,7 @@ function useSystemData() {
       try {
         const remote = normalizeData(await loadAppState());
         if (isEmptyState(remote)) return;
+        servidorRef.current = remote;
         const json = JSON.stringify(remote);
         if (json !== snapshotRef.current) {
           dataRef.current = remote;
