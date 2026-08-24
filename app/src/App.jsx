@@ -1555,10 +1555,24 @@ function comprimirImagen(file) {
   });
 }
 
+/* Visor de imagen ampliada: se abre encima de cualquier cosa (incluso de un
+   Modal, por eso el z-index alto). Clic en cualquier lado, o la X, cierra. */
+function ImagenAmpliada({ src, onClose }) {
+  return (
+    <div className="fixed inset-0 bg-black/85 flex items-center justify-center p-4 z-[70]" onClick={onClose}>
+      <button onClick={onClose} className="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/15 flex items-center justify-center">
+        <X size={18} color="white" />
+      </button>
+      <img src={src} alt="" className="max-w-full max-h-full rounded-md object-contain" onClick={(e) => e.stopPropagation()} />
+    </div>
+  );
+}
+
 function FotoUploader({ foto, onChange, readOnly, label = "Foto", carpeta = "general" }) {
   const inputRef = useRef(null);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState("");
+  const [ampliada, setAmpliada] = useState(false);
 
   if (readOnly && !foto) return null;
 
@@ -1571,13 +1585,15 @@ function FotoUploader({ foto, onChange, readOnly, label = "Foto", carpeta = "gen
     <Field label={label}>
       {foto ? (
         <div className="relative inline-block">
-          <img src={foto} alt="Evidencia" className="rounded-md max-h-40 border" style={bLine} />
+          <img src={foto} alt="Evidencia" onClick={() => setAmpliada(true)}
+            className="rounded-md max-h-40 border cursor-zoom-in" style={bLine} />
           {!readOnly && (
             <button onClick={() => onChange("")} className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-white border flex items-center justify-center" style={bLine}>
               <X size={11} color={COLORS.rojo} />
             </button>
           )}
           {pesoKB > 0 && <p className="text-[9px] mt-1" style={cSlate}>{pesoKB} KB</p>}
+          {ampliada && <ImagenAmpliada src={foto} onClose={() => setAmpliada(false)} />}
         </div>
       ) : (
         <button onClick={() => inputRef.current?.click()} disabled={cargando}
@@ -3628,6 +3644,7 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
     { id: "solicitudes", label: "Solicitudes", icon: <ClipboardList size={14} /> },
     { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
+    { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
   ];
 
   return (
@@ -3692,6 +3709,10 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
       {tab === "programacion" && (
         <PanelProgramacion data={data} sedes={misSedes} pendientes={pendientes}
           nota="Vista de solo lectura: aquí puedes consultar lo programado en tu sede, pero no puedes activar ni editar nada." />
+      )}
+
+      {tab === "sedes" && (
+        <AdminSedes data={{ ...data, sedes: misSedes }} persist={persist} editable={false} />
       )}
 
       {ubicDirecta && (
@@ -4370,6 +4391,7 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
     { id: "mias", label: `Mis actividades (${activas.length})`, icon: <Wrench size={14} /> },
     { id: "programacion", label: `Programación (${activables})`, icon: <CalendarDays size={14} /> },
+    { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
     { id: "bodega", label: "Bodega", icon: <Layers size={14} /> },
     { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
     { id: "historico", label: "Histórico", icon: <ClipboardList size={14} /> },
@@ -4448,6 +4470,9 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
       )}
 
       {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={misSedes} editable={false} />}
+      {tab === "sedes" && (
+        <AdminSedes data={{ ...data, sedes: misSedes }} persist={persist} editable={false} />
+      )}
       {tab === "reportes" && <VistaReportes data={data} sedes={misSedes} user={user} />}
       {tab === "historico" && <VistaHistorico data={data} sedes={misSedes} rol="tecnico" />}
 
@@ -4613,9 +4638,10 @@ function FormSede({ initial, onSave, onClose }) {
    activo), donde el Field completo de FotoUploader no cabe. Mismo mecanismo
    de subida (comprimir + Storage), solo que el control es un cuadrito con
    la imagen o un ícono de cámara. */
-function FotoMini({ foto, onChange, carpeta, size = 36 }) {
+function FotoMini({ foto, onChange, carpeta, size = 36, editable = true }) {
   const inputRef = useRef(null);
   const [cargando, setCargando] = useState(false);
+  const [ampliada, setAmpliada] = useState(false);
 
   const subir = async (file) => {
     if (!file) return;
@@ -4631,28 +4657,50 @@ function FotoMini({ foto, onChange, carpeta, size = 36 }) {
     }
   };
 
+  if (!editable && !foto) return null;
+
   return (
     <div className="relative shrink-0" style={{ width: size, height: size }}>
-      <button onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }} disabled={cargando}
-        title={foto ? "Cambiar foto" : "Agregar foto"}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          if (foto) setAmpliada(true);
+          else if (editable) inputRef.current?.click();
+        }}
+        disabled={cargando}
+        title={foto ? "Ver foto" : editable ? "Agregar foto" : undefined}
         className="rounded-md border overflow-hidden flex items-center justify-center disabled:opacity-50"
         style={{ width: size, height: size, borderColor: COLORS.line, background: foto ? "transparent" : COLORS.paper }}>
-        {foto ? <img src={foto} alt="" className="w-full h-full object-cover" /> : <Camera size={13} color={COLORS.slate} />}
+        {foto ? <img src={foto} alt="" className="w-full h-full object-cover" /> : editable ? <Camera size={13} color={COLORS.slate} /> : null}
       </button>
-      {foto && !cargando && (
-        <button onClick={(e) => { e.stopPropagation(); onChange(""); }}
-          className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-white border flex items-center justify-center" style={bLine}>
-          <X size={9} color={COLORS.rojo} />
-        </button>
+
+      {editable && foto && !cargando && (
+        <>
+          <button onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}
+            title="Cambiar foto"
+            className="absolute -bottom-1.5 -right-1.5 w-4 h-4 rounded-full bg-white border flex items-center justify-center" style={bLine}>
+            <Pencil size={8} color={COLORS.orange} />
+          </button>
+          <button onClick={(e) => { e.stopPropagation(); onChange(""); }}
+            title="Quitar foto"
+            className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-white border flex items-center justify-center" style={bLine}>
+            <X size={9} color={COLORS.rojo} />
+          </button>
+        </>
       )}
-      <input ref={inputRef} type="file" accept="image/*" className="hidden"
-        onClick={(e) => e.stopPropagation()}
-        onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; subir(f); }} />
+
+      {editable && (
+        <input ref={inputRef} type="file" accept="image/*" className="hidden"
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; subir(f); }} />
+      )}
+
+      {ampliada && foto && <ImagenAmpliada src={foto} onClose={() => setAmpliada(false)} />}
     </div>
   );
 }
 
-function AdminSedes({ data, persist }) {
+function AdminSedes({ data, persist, editable = true }) {
   const [abiertas, setAbiertas] = useState({});
   const [qr, setQr] = useState(null);
   const [fichaSede, setFichaSede] = useState(null);
@@ -4683,7 +4731,9 @@ function AdminSedes({ data, persist }) {
   return (
     <div className="mt-4 space-y-2">
       <p className="text-xs mb-1" style={cSlate}>
-        Cada sede guarda su ficha (estudiantes, presupuesto de materiales, fee de servicio y constructor) y su árbol de fases y activos.
+        {editable
+          ? "Cada sede guarda su ficha (estudiantes, presupuesto de materiales, fee de servicio y constructor) y su árbol de fases y activos."
+          : "Sedes, fases y activos de tu alcance, con sus actividades registradas."}
       </p>
       {data.sedes.map((sede) => {
         const abierta = !!abiertas[sede.id];
@@ -4694,44 +4744,52 @@ function AdminSedes({ data, persist }) {
                 {abierta ? <ChevronDown size={16} color={COLORS.charcoal} /> : <ChevronRight size={16} color={COLORS.charcoal} />}
               </button>
               <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: sedeColor(data.sedes, sede.id) }} />
-              {sede.foto && (
-                <img src={sede.foto} alt="" className="w-9 h-9 rounded-md object-cover border shrink-0" style={bLine} />
-              )}
+              <FotoMini foto={sede.foto} editable={false} size={36} />
               <div className="min-w-0 flex-1 cursor-pointer" onClick={() => toggle(sede.id)}>
                 <p className="text-sm font-bold" style={cChar}>{sede.nombre}</p>
-                <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-                  <Chip><Users size={9} /> {sede.estudiantes || 0} est.</Chip>
-                  <Chip color={COLORS.orange}>{money(sede.presupuestoPreventivo)}/mes mat.</Chip>
-                  <Chip color={COLORS.verde}>fee {money(sede.feeServicio)}</Chip>
-                </div>
+                {editable && (
+                  <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                    <Chip><Users size={9} /> {sede.estudiantes || 0} est.</Chip>
+                    <Chip color={COLORS.orange}>{money(sede.presupuestoPreventivo)}/mes mat.</Chip>
+                    <Chip color={COLORS.verde}>fee {money(sede.feeServicio)}</Chip>
+                  </div>
+                )}
                 <Resumen r={resumen(sede.id)} />
               </div>
-              <button onClick={(e) => { e.stopPropagation(); setFichaSede({ sede }); }} title="Editar ficha de la sede">
-                <Pencil size={14} color={COLORS.slate} />
-              </button>
-              <DeleteBtn size={14} onConfirm={() => setSedes(data.sedes.filter((s) => s.id !== sede.id))} />
+              {editable && (
+                <>
+                  <button onClick={(e) => { e.stopPropagation(); setFichaSede({ sede }); }} title="Editar ficha de la sede">
+                    <Pencil size={14} color={COLORS.slate} />
+                  </button>
+                  <DeleteBtn size={14} onConfirm={() => setSedes(data.sedes.filter((s) => s.id !== sede.id))} />
+                </>
+              )}
             </div>
 
             {abierta && (
               <div className="pl-4 pr-3 pb-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
                 {sede.fases.map((fase) => (
                   <FaseAdmin key={fase.id} sede={sede} fase={fase} resumen={resumen} Resumen={Resumen}
-                    mapFase={mapFase} mapSede={mapSede} setQr={setQr} />
+                    mapFase={mapFase} mapSede={mapSede} setQr={setQr} editable={editable} />
                 ))}
                 {sede.fases.length === 0 && <Empty>Esta sede aún no tiene fases.</Empty>}
-                <div className="mt-2">
-                  <InlineAdd placeholder="Agregar fase"
-                    onAdd={(nombre) => mapSede(sede.id, (s) => ({ ...s, fases: [...s.fases, { id: uid("fase"), nombre, activos: [] }] }))} />
-                </div>
+                {editable && (
+                  <div className="mt-2">
+                    <InlineAdd placeholder="Agregar fase"
+                      onAdd={(nombre) => mapSede(sede.id, (s) => ({ ...s, fases: [...s.fases, { id: uid("fase"), nombre, activos: [] }] }))} />
+                  </div>
+                )}
               </div>
             )}
           </div>
         );
       })}
 
-      <button onClick={() => setFichaSede({})} className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white mt-1" style={{ background: COLORS.orange }}>
-        <Plus size={13} /> Nueva sede
-      </button>
+      {editable && (
+        <button onClick={() => setFichaSede({})} className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white mt-1" style={{ background: COLORS.orange }}>
+          <Plus size={13} /> Nueva sede
+        </button>
+      )}
 
       {fichaSede && (
         <Modal title={fichaSede.sede ? "Ficha de la sede" : "Nueva sede"} onClose={() => setFichaSede(null)} wide>
@@ -4761,7 +4819,7 @@ function AdminSedes({ data, persist }) {
   );
 }
 
-function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr }) {
+function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr, editable = true }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="border-l-2 pl-3 mt-2" style={bLine}>
@@ -4769,15 +4827,21 @@ function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr }) {
         <div className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer" onClick={() => setOpen(!open)}>
           {open ? <ChevronDown size={14} color={COLORS.slate} /> : <ChevronRight size={14} color={COLORS.slate} />}
           <Layers size={13} color={COLORS.orange} />
-          <FotoMini foto={fase.foto} carpeta="Asset/fases" size={30}
+          <FotoMini foto={fase.foto} carpeta="Asset/fases" size={30} editable={editable}
             onChange={(foto) => mapFase(sede.id, fase.id, (f) => ({ ...f, foto }))} />
           <div className="min-w-0">
-            <EditableLabel value={fase.nombre} className="text-sm font-semibold block" style={cChar}
-              onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, nombre }))} />
+            {editable ? (
+              <EditableLabel value={fase.nombre} className="text-sm font-semibold block" style={cChar}
+                onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, nombre }))} />
+            ) : (
+              <p className="text-sm font-semibold" style={cChar}>{fase.nombre}</p>
+            )}
             <Resumen r={resumen(sede.id, fase.id)} />
           </div>
         </div>
-        <DeleteBtn onConfirm={() => mapSede(sede.id, (s) => ({ ...s, fases: s.fases.filter((f) => f.id !== fase.id) }))} />
+        {editable && (
+          <DeleteBtn onConfirm={() => mapSede(sede.id, (s) => ({ ...s, fases: s.fases.filter((f) => f.id !== fase.id) }))} />
+        )}
       </div>
 
       {open && (
@@ -4787,11 +4851,15 @@ function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr }) {
             {fase.activos.map((act) => (
               <div key={act.id} className="rounded-md p-2.5 border flex items-center justify-between gap-3" style={{ borderColor: COLORS.line, background: COLORS.paper }}>
                 <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <FotoMini foto={act.foto} carpeta="Asset/activos" size={30}
+                  <FotoMini foto={act.foto} carpeta="Asset/activos" size={30} editable={editable}
                     onChange={(foto) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.map((a) => (a.id === act.id ? { ...a, foto } : a)) }))} />
                   <div className="min-w-0 flex-1">
-                    <EditableLabel value={act.nombre} className="text-xs font-semibold" style={cChar}
-                      onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.map((a) => (a.id === act.id ? { ...a, nombre } : a)) }))} />
+                    {editable ? (
+                      <EditableLabel value={act.nombre} className="text-xs font-semibold" style={cChar}
+                        onSave={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.map((a) => (a.id === act.id ? { ...a, nombre } : a)) }))} />
+                    ) : (
+                      <p className="text-xs font-semibold" style={cChar}>{act.nombre}</p>
+                    )}
                     <Resumen r={resumen(sede.id, fase.id, act.id)} />
                   </div>
                 </div>
@@ -4800,16 +4868,20 @@ function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr }) {
                     className="text-[11px] font-semibold px-2.5 py-1.5 rounded flex items-center gap-1" style={{ background: COLORS.charcoal, color: "white" }}>
                     <QrCode size={11} /> QR
                   </button>
-                  <DeleteBtn onConfirm={() => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.filter((a) => a.id !== act.id) }))} />
+                  {editable && (
+                    <DeleteBtn onConfirm={() => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.filter((a) => a.id !== act.id) }))} />
+                  )}
                 </div>
               </div>
             ))}
             {fase.activos.length === 0 && <Empty>Sin activos todavía.</Empty>}
           </div>
-          <div className="mt-2">
-            <InlineAdd placeholder="Agregar activo" small
-              onAdd={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: [...f.activos, { id: uid("act"), nombre }] }))} />
-          </div>
+          {editable && (
+            <div className="mt-2">
+              <InlineAdd placeholder="Agregar activo" small
+                onAdd={(nombre) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: [...f.activos, { id: uid("act"), nombre }] }))} />
+            </div>
+          )}
         </div>
       )}
     </div>
