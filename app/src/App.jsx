@@ -3685,9 +3685,9 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
 
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
-    { id: "solicitudes", label: "Solicitudes", icon: <ClipboardList size={14} /> },
-    { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
     { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
+    { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
+    { id: "solicitudes", label: "Solicitudes", icon: <ClipboardList size={14} /> },
   ];
 
   return (
@@ -4432,9 +4432,10 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
 
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
-    { id: "mias", label: `Mis actividades (${activas.length})`, icon: <Wrench size={14} /> },
-    { id: "programacion", label: `Programación (${activables})`, icon: <CalendarDays size={14} /> },
     { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
+    { id: "programacion", label: `Programación (${activables})`, icon: <CalendarDays size={14} /> },
+    { id: "mias", label: `Mis actividades (${activas.length})`, icon: <Wrench size={14} /> },
+    { id: "monitoreo", label: "Monitoreo", icon: <BarChart3 size={14} /> },
     { id: "bodega", label: "Bodega", icon: <Layers size={14} /> },
     { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
     { id: "historico", label: "Histórico", icon: <ClipboardList size={14} /> },
@@ -4516,6 +4517,7 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
       {tab === "sedes" && (
         <AdminSedes data={{ ...data, sedes: misSedes }} persist={persist} editable={false} />
       )}
+      {tab === "monitoreo" && <VistaMonitoreo data={{ ...data, sedes: misSedes }} />}
       {tab === "reportes" && <VistaReportes data={data} sedes={misSedes} user={user} />}
       {tab === "historico" && <VistaHistorico data={data} sedes={misSedes} rol="tecnico" />}
 
@@ -4743,6 +4745,31 @@ function FotoMini({ foto, onChange, carpeta, size = 36, editable = true }) {
   );
 }
 
+/* Intercambia un elemento con su vecino (arriba o abajo) para reordenar
+   visualmente sedes/fases/activos. dir: -1 sube, +1 baja. */
+function moverEnArray(arr, index, dir) {
+  const destino = index + dir;
+  if (destino < 0 || destino >= arr.length) return arr;
+  const copia = [...arr];
+  [copia[index], copia[destino]] = [copia[destino], copia[index]];
+  return copia;
+}
+
+function BotonesMover({ index, total, onMover }) {
+  return (
+    <div className="flex flex-col gap-0.5 shrink-0">
+      <button onClick={(e) => { e.stopPropagation(); onMover(-1); }} disabled={index === 0}
+        title="Subir" className="w-5 h-4 flex items-center justify-center rounded disabled:opacity-25" style={{ background: COLORS.paper }}>
+        <ChevronUp size={11} color={COLORS.slate} />
+      </button>
+      <button onClick={(e) => { e.stopPropagation(); onMover(1); }} disabled={index === total - 1}
+        title="Bajar" className="w-5 h-4 flex items-center justify-center rounded disabled:opacity-25" style={{ background: COLORS.paper }}>
+        <ChevronDown size={11} color={COLORS.slate} />
+      </button>
+    </div>
+  );
+}
+
 function AdminSedes({ data, persist, editable = true }) {
   const [abiertas, setAbiertas] = useState({});
   const [qr, setQr] = useState(null);
@@ -4778,11 +4805,15 @@ function AdminSedes({ data, persist, editable = true }) {
           ? "Cada sede guarda su ficha (estudiantes, presupuesto de materiales, fee de servicio y constructor) y su árbol de fases y activos."
           : "Sedes, fases y activos de tu alcance, con sus actividades registradas."}
       </p>
-      {data.sedes.map((sede) => {
+      {data.sedes.map((sede, iSede) => {
         const abierta = !!abiertas[sede.id];
         return (
           <div key={sede.id} className="border rounded-md overflow-hidden" style={cardStyle}>
             <div className="flex items-center gap-2.5 p-3" style={{ background: abierta ? COLORS.cream : "white" }}>
+              {editable && (
+                <BotonesMover index={iSede} total={data.sedes.length}
+                  onMover={(dir) => setSedes(moverEnArray(data.sedes, iSede, dir))} />
+              )}
               <button onClick={() => toggle(sede.id)} className="shrink-0">
                 {abierta ? <ChevronDown size={16} color={COLORS.charcoal} /> : <ChevronRight size={16} color={COLORS.charcoal} />}
               </button>
@@ -4811,9 +4842,11 @@ function AdminSedes({ data, persist, editable = true }) {
 
             {abierta && (
               <div className="pl-4 pr-3 pb-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                {sede.fases.map((fase) => (
+                {sede.fases.map((fase, iFase) => (
                   <FaseAdmin key={fase.id} sede={sede} fase={fase} resumen={resumen} Resumen={Resumen}
-                    mapFase={mapFase} mapSede={mapSede} setQr={setQr} editable={editable} />
+                    mapFase={mapFase} mapSede={mapSede} setQr={setQr} editable={editable}
+                    index={iFase} total={sede.fases.length}
+                    onMover={(dir) => mapSede(sede.id, (s) => ({ ...s, fases: moverEnArray(s.fases, iFase, dir) }))} />
                 ))}
                 {sede.fases.length === 0 && <Empty>Esta sede aún no tiene fases.</Empty>}
                 {editable && (
@@ -4862,12 +4895,13 @@ function AdminSedes({ data, persist, editable = true }) {
   );
 }
 
-function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr, editable = true }) {
+function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr, editable = true, index, total, onMover }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="border-l-2 pl-3 mt-2" style={bLine}>
       <div className="flex items-center justify-between py-2 gap-2">
         <div className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer" onClick={() => setOpen(!open)}>
+          {editable && onMover && <BotonesMover index={index} total={total} onMover={onMover} />}
           {open ? <ChevronDown size={14} color={COLORS.slate} /> : <ChevronRight size={14} color={COLORS.slate} />}
           <Layers size={13} color={COLORS.orange} />
           <FotoMini foto={fase.foto} carpeta="Asset/fases" size={30} editable={editable}
@@ -4891,9 +4925,13 @@ function FaseAdmin({ sede, fase, resumen, Resumen, mapFase, mapSede, setQr, edit
         <div className="pb-2">
           <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={cSlate}>Activos</p>
           <div className="space-y-2">
-            {fase.activos.map((act) => (
+            {fase.activos.map((act, iAct) => (
               <div key={act.id} className="rounded-md p-2.5 border flex items-center justify-between gap-3" style={{ borderColor: COLORS.line, background: COLORS.paper }}>
                 <div className="flex items-center gap-2 min-w-0 flex-1">
+                  {editable && (
+                    <BotonesMover index={iAct} total={fase.activos.length}
+                      onMover={(dir) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: moverEnArray(f.activos, iAct, dir) }))} />
+                  )}
                   <FotoMini foto={act.foto} carpeta="Asset/activos" size={30} editable={editable}
                     onChange={(foto) => mapFase(sede.id, fase.id, (f) => ({ ...f, activos: f.activos.map((a) => (a.id === act.id ? { ...a, foto } : a)) }))} />
                   <div className="min-w-0 flex-1">
@@ -8873,11 +8911,14 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
 
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
+    { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
     { id: "aprobaciones", label: `Aprobaciones (${bandeja})`, icon: <CheckCircle2 size={14} /> },
     { id: "presupuesto", label: "Presupuesto", icon: <Wallet size={14} /> },
     { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
     { id: "historico", label: "Histórico", icon: <ClipboardList size={14} /> },
   ];
+
+  const pendientesCliente = getPendientes(data);
 
   return (
    <ProveedorDetalle data={data}>
@@ -8889,6 +8930,11 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
       {tab === "presupuesto" && <VistaPresupuesto data={data} mes={mes} onMesChange={setMes} />}
       {tab === "reportes" && <VistaReportes data={data} sedes={data.sedes} user={user} />}
       {tab === "historico" && <VistaHistorico data={data} sedes={data.sedes} rol="cliente" />}
+
+      {tab === "programacion" && (
+        <PanelProgramacion data={data} sedes={data.sedes} pendientes={pendientesCliente}
+          nota="Vista de solo lectura: aquí puedes consultar toda la programación, pero no puedes activar ni editar nada." />
+      )}
 
       {tab === "aprobaciones" && (
         <div className="mt-4 space-y-5">
