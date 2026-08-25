@@ -4796,7 +4796,7 @@ function AdminSedes({ data, persist, editable = true }) {
     </div>
   );
 
-  const qrUrl = qr ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(`https://industria-me.net/reportar?activo=${qr.activoId}`)}` : null;
+  const qrUrl = qr ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(`https://industria-me.net/?activo=${qr.activoId}`)}` : null;
 
   return (
     <div className="mt-4 space-y-2">
