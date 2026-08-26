@@ -3688,6 +3688,7 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
     { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
     { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
     { id: "solicitudes", label: "Solicitudes", icon: <ClipboardList size={14} /> },
+    { id: "historico", label: "Histórico", icon: <ClipboardList size={14} /> },
   ];
 
   return (
@@ -3757,6 +3758,8 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
       {tab === "sedes" && (
         <AdminSedes data={{ ...data, sedes: misSedes }} persist={persist} editable={false} />
       )}
+
+      {tab === "historico" && <VistaHistorico data={data} sedes={misSedes} rol="solicitante" />}
 
       {ubicDirecta && (
         <Modal title="Reportar novedad" onClose={() => setUbicDirecta(null)} wide>
