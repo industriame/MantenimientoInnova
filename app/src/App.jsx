@@ -638,45 +638,35 @@ function indicadoresMes(data, sedeIds, mes) {
   };
 }
 
-/* Avance del plan de mantenimiento: estado de cada aplicación de plan en las
-   sedes dadas. Sirve para medir cumplimiento del programa preventivo. */
-function avancePlan(data, sedeIds) {
-  const cats = { ejecucion: 0, alDia: 0, porVencer: 0, vencido: 0, muyVencido: 0 };
-  let total = 0;
+/* Cumplimiento del plan preventivo: para cada aplicación de plan (un activo
+   con un preventivo asignado), se mira si ya tiene una orden para el mes
+   elegido y en qué estado quedó esa orden. Solo 3 categorías: Sin Programar
+   (nada generado aún para este mes), En Ejecución (programada, en espera o
+   en proceso) y Completadas. Lo de otros meses no cuenta. */
+function avancePlan(data, sedeIds, mes) {
+  let sinProgramar = 0, enEjecucion = 0, completadas = 0;
 
   (data.planes || []).forEach((plan) => {
     (plan.aplicaciones || []).forEach((ap) => {
       if (!sedeIds.includes(ap.sedeId)) return;
-      total++;
       const rel = (data.ordenes || []).filter(
         (o) => o.planId === plan.id && o.sedeId === ap.sedeId && o.faseId === ap.faseId && o.activoId === ap.activoId
+          && mesKey(o.fechaProgramada) === mes
       );
-      if (rel.some((o) => ESTADOS_ABIERTOS.includes(o.estado))) { cats.ejecucion++; return; }
-      const ultima = rel.filter((o) => o.estado === "completada")
-        .sort((a, b) => (a.fechaCompletada < b.fechaCompletada ? 1 : -1))[0];
-      const sem = semaforoPreventivo({
-        frecuencia: plan.frecuencia,
-        fechaInicial: ap.fechaInicial,
-        ultimoMantenimiento: ultima?.fechaCompletada || null,
-      });
-      if (sem.nivel <= 1) cats.alDia++;
-      else if (sem.nivel === 2) cats.porVencer++;
-      else if (sem.nivel === 3) cats.vencido++;
-      else cats.muyVencido++;
+      if (rel.some((o) => o.estado === "completada")) { completadas++; return; }
+      if (rel.some((o) => ["programada", "en_proceso", "espera"].includes(o.estado))) { enEjecucion++; return; }
+      sinProgramar++;
     });
   });
 
-  // Cumplimiento: solo las tareas al día sobre el total del programa
-  const cumplidas = cats.alDia;
+  const total = sinProgramar + enEjecucion + completadas;
   return {
-    total, ...cats,
-    cumplimiento: total > 0 ? (cumplidas / total) * 100 : null,
+    total, sinProgramar, enEjecucion, completadas,
+    cumplimiento: total > 0 ? (completadas / total) * 100 : null,
     datos: [
-      { name: "Al día", value: cats.alDia, color: COLORS.verde },
-      { name: "En ejecución", value: cats.ejecucion, color: COLORS.orange },
-      { name: "Por vencer", value: cats.porVencer, color: COLORS.ambar },
-      { name: "Vencido", value: cats.vencido, color: COLORS.rojo },
-      { name: "Muy vencido", value: cats.muyVencido, color: COLORS.vino },
+      { name: "Completadas", value: completadas, color: COLORS.verde },
+      { name: "En Ejecución", value: enEjecucion, color: COLORS.orange },
+      { name: "Sin Programar", value: sinProgramar, color: COLORS.rojo },
     ].filter((d) => d.value > 0),
   };
 }
@@ -2956,13 +2946,13 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
   const alcance = sedeFiltro ? [sedeFiltro] : sedeIds;
   const kpi = useMemo(() => indicadoresMes(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
   const serieCosto = useMemo(() => serieCostoEstudiante(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
-  const avanceGlobal = useMemo(() => avancePlan(data, alcance), [data, sedeFiltro, sedeIds.join(",")]);
+  const avanceGlobal = useMemo(() => avancePlan(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
   const sat = useMemo(() => satisfaccion(data, alcance), [data, sedeFiltro, sedeIds.join(",")]);
   const avancePorSede = useMemo(
     () => sedes.filter((s) => !sedeFiltro || s.id === sedeFiltro)
-      .map((s) => ({ ...avancePlan(data, [s.id]), sedeId: s.id, nombre: s.nombre }))
+      .map((s) => ({ ...avancePlan(data, [s.id], mes), sedeId: s.id, nombre: s.nombre }))
       .filter((a) => a.total > 0),
-    [data, sedeFiltro, sedeIds.join(",")]
+    [data, sedeFiltro, mes, sedeIds.join(",")]
   );
 
   const presupuestos = sedes.map((s) => ({ ...presupuestoSedeMes(data, s.id, mes), nombre: s.nombre }));
@@ -3052,7 +3042,7 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
           <div className="flex items-center justify-between gap-2 mb-3">
             <p className="text-xs font-semibold uppercase tracking-wide" style={cSlate}>Cumplimiento del plan preventivo</p>
             {avanceGlobal.cumplimiento !== null && (
-              <Chip color={colorCumpl(avanceGlobal.cumplimiento)}>{avanceGlobal.cumplimiento.toFixed(0)}% al día</Chip>
+              <Chip color={colorCumpl(avanceGlobal.cumplimiento)}>{avanceGlobal.cumplimiento.toFixed(0)}% completado</Chip>
             )}
           </div>
 
@@ -3070,21 +3060,19 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
                     </span>
                   </div>
                   <div className="h-3 rounded-sm overflow-hidden flex" style={{ background: COLORS.line }}>
-                    <div style={{ width: `${a.total ? (a.alDia / a.total) * 100 : 0}%`, background: COLORS.verde }} title={`${a.alDia} al día`} />
-                    <div style={{ width: `${a.total ? (a.ejecucion / a.total) * 100 : 0}%`, background: COLORS.orange }} title={`${a.ejecucion} en ejecución`} />
-                    <div style={{ width: `${a.total ? (a.porVencer / a.total) * 100 : 0}%`, background: COLORS.ambar }} title={`${a.porVencer} por vencer`} />
-                    <div style={{ width: `${a.total ? ((a.vencido + a.muyVencido) / a.total) * 100 : 0}%`, background: COLORS.rojo }} title={`${a.vencido + a.muyVencido} vencidas`} />
+                    <div style={{ width: `${a.total ? (a.completadas / a.total) * 100 : 0}%`, background: COLORS.verde }} title={`${a.completadas} completadas`} />
+                    <div style={{ width: `${a.total ? (a.enEjecucion / a.total) * 100 : 0}%`, background: COLORS.orange }} title={`${a.enEjecucion} en ejecución`} />
+                    <div style={{ width: `${a.total ? (a.sinProgramar / a.total) * 100 : 0}%`, background: COLORS.rojo }} title={`${a.sinProgramar} sin programar`} />
                   </div>
                   <p className="text-[10px] mt-1" style={cSlate}>
-                    {a.total} tareas · {a.alDia} al día · {a.ejecucion} en ejecución
-                    {a.porVencer > 0 ? ` · ${a.porVencer} por vencer` : ""}
-                    {a.vencido + a.muyVencido > 0 ? ` · ${a.vencido + a.muyVencido} vencidas` : ""}
+                    {a.total} tareas · {a.completadas} completadas · {a.enEjecucion} en ejecución
+                    {a.sinProgramar > 0 ? ` · ${a.sinProgramar} sin programar` : ""}
                   </p>
                 </div>
               ))}
 
               <div className="flex items-center gap-3 flex-wrap pt-2 border-t" style={bLine}>
-                {[["Al día (cuenta al %)", COLORS.verde], ["En ejecución", COLORS.orange], ["Por vencer", COLORS.ambar], ["Vencidas", COLORS.rojo]].map(([l, c]) => (
+                {[["Completadas", COLORS.verde], ["En Ejecución", COLORS.orange], ["Sin Programar", COLORS.rojo]].map(([l, c]) => (
                   <span key={l} className="flex items-center gap-1 text-[10px]" style={cSlate}>
                     <span className="w-2.5 h-2.5 rounded-sm" style={{ background: c }} />{l}
                   </span>
@@ -7443,7 +7431,7 @@ function generarResumenUnificado(data, sedes, mes) {
   const sedeIds = sedes.map((s) => s.id);
   const kpi = indicadoresMes(data, sedeIds, mes);
   const sat = satisfaccion(data, sedeIds);
-  const avance = avancePlan(data, sedeIds);
+  const avance = avancePlan(data, sedeIds, mes);
   const presu = sedeIds.length > 1 ? presupuestoGlobalMes(data, mes) : { ...presupuestoSedeMes(data, sedeIds[0], mes) };
   const ambito = sedes.length > 1 ? "el conjunto de sedes" : sedes[0]?.nombre || "la sede";
 
@@ -7631,12 +7619,11 @@ function filaCumplimiento(a, nombre) {
   return `<div class="cump">
     <div class="cump-h"><span>${_esc(nombre)}</span><b style="color:${c}">${pct === null ? "—" : pct.toFixed(0) + "%"}</b></div>
     ${barraApilada([
-      { n: "Al día", v: a.alDia, c: "#2E7D5B" },
-      { n: "En ejecución", v: a.ejecucion, c: "#ED5B23" },
-      { n: "Por vencer", v: a.porVencer, c: "#D9A441" },
-      { n: "Vencidas", v: a.vencido + a.muyVencido, c: "#C1442D" },
+      { n: "Completadas", v: a.completadas, c: "#2E7D5B" },
+      { n: "En Ejecución", v: a.enEjecucion, c: "#ED5B23" },
+      { n: "Sin Programar", v: a.sinProgramar, c: "#C1442D" },
     ])}
-    <span class="cump-d">${a.total} tareas · ${a.alDia} al día · ${a.ejecucion} en ejecución${a.porVencer ? ` · ${a.porVencer} por vencer` : ""}${a.vencido + a.muyVencido ? ` · ${a.vencido + a.muyVencido} vencidas` : ""}</span>
+    <span class="cump-d">${a.total} tareas · ${a.completadas} completadas · ${a.enEjecucion} en ejecución${a.sinProgramar ? ` · ${a.sinProgramar} sin programar` : ""}</span>
   </div>`;
 }
 
@@ -7674,7 +7661,7 @@ function construirReporteMensualHTML(data, mes) {
   const kpi = indicadoresMes(data, ids, mes);
   const sat = satisfaccion(data, ids);
   const glob = presupuestoGlobalMes(data, mes);
-  const avanceG = avancePlan(data, ids);
+  const avanceG = avancePlan(data, ids, mes);
   const serie = serieCostoEstudiante(data, ids, mes).map((p) => ({ label: p.mes, v: p.costo }));
 
   // Conteo de actividades del mes
@@ -7705,7 +7692,7 @@ function construirReporteMensualHTML(data, mes) {
     const k = indicadoresMes(data, [s.id], mes);
     const st = satisfaccion(data, [s.id]);
     const p = { ...presupuestoSedeMes(data, s.id, mes), nombre: s.nombre };
-    const a = avancePlan(data, [s.id]);
+    const a = avancePlan(data, [s.id], mes);
     const acts = [
       ...data.ordenes.filter((o) => o.sedeId === s.id && mesContable(o) === mes).map((o) => ({ ...o, tipo: "preventivo" })),
       ...data.solicitudes.filter((x) => x.sedeId === s.id && mesContable(x) === mes).map((x) => ({ ...x, tipo: "correctivo", tarea: x.descripcion })),
@@ -7828,9 +7815,9 @@ ${bloqueIndicadores(kpi, sat)}
 
 <div class="cols2">
   <div><h4>Cumplimiento del plan preventivo</h4>
-    ${sedes.map((s) => { const a = avancePlan(data, [s.id]); return a.total ? filaCumplimiento(a, s.nombre) : ""; }).join("") ||
+    ${sedes.map((s) => { const a = avancePlan(data, [s.id], mes); return a.total ? filaCumplimiento(a, s.nombre) : ""; }).join("") ||
       '<p class="mut">Sin planes asignados.</p>'}
-    <p class="mut">Global: ${avanceG.cumplimiento === null ? "—" : avanceG.cumplimiento.toFixed(0) + "% al día"} sobre ${avanceG.total} tareas.</p>
+    <p class="mut">Global: ${avanceG.cumplimiento === null ? "—" : avanceG.cumplimiento.toFixed(0) + "% completado"} sobre ${avanceG.total} tareas.</p>
   </div>
   <div><h4>Presupuesto de materiales por sede</h4>
     ${glob.porSede.map((p) => filaPresupuesto(p)).join("")}
