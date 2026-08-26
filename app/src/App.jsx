@@ -1539,9 +1539,10 @@ function AppHeader({ user, onLogout, sedesTexto, ultimaSync }) {
   const rol = rolDe(user);
   return (
     <div className="flex items-center gap-3 pt-4">
-      <div className="flex items-center gap-1 p-1 rounded-md shrink-0" style={{ background: COLORS.charcoal }}>
-        <img src={logoISE} alt="IndustriaMe" className="h-7 w-7 object-contain rounded-sm bg-white p-0.5" />
-        <img src={logoCliente} alt="Innova Schools" className="h-7 w-7 object-contain rounded-sm bg-white p-0.5" />
+      <div className="relative shrink-0 w-11 h-11">
+        <img src={logoISE} alt="IndustriaMe" className="w-11 h-11 object-contain rounded-md" />
+        <img src={logoCliente} alt="Innova Schools"
+          className="absolute -bottom-1.5 -right-1.5 w-5 h-5 object-contain rounded-full bg-white ring-2 ring-white shadow-sm" />
       </div>
       <div className="min-w-0 flex-1">
         <p className="font-bold text-sm leading-tight truncate" style={cChar}>{user.nombre}</p>
