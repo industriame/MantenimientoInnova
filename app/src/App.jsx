@@ -1677,6 +1677,13 @@ function FotoUploader({ foto, onChange, readOnly, label = "Foto", carpeta = "gen
   );
 }
 
+/* Un material "resuelto solo" es de bodega y ya trae precio conocido: no
+   necesita que nadie lo cotice ni lo apruebe. Si TODA la lista de una
+   actividad queda así, se aprueba sola. Basta con que se agregue un
+   material nuevo (sin ese origen) para que la lista completa vuelva a
+   necesitar presupuesto y aprobación, como antes. */
+const todosConPrecioConocido = (lista) => lista.length > 0 && lista.every((m) => m.stockId && Number(m.costoUnitario) > 0);
+
 /* Materiales según rol: técnico lista · admin costea · cliente decide.
    Los materiales se eligen del catálogo de bodega de la sede (aunque estén en
    cero); si no existe, se da de alta ahí mismo y queda disponible para la
@@ -1687,7 +1694,8 @@ function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, catalogo = [
   const [nuevaUnidad, setNuevaUnidad] = useState("u");
   const materiales = item.materiales || [];
   const estado = item.materialesEstado || "";
-  const puedeListar = (rol === "tecnico" || rol === "admin") && (estado === "" || estado === "borrador");
+  const puedeListar = (rol === "tecnico" || rol === "admin")
+    && (estado === "" || estado === "borrador" || (estado === "aprobado" && todosConPrecioConocido(materiales)));
   /* El admin costea mientras el cliente no haya decidido. Antes solo podía
      hacerlo en "pendiente_costeo", así que un precio mal digitado quedaba
      congelado en cuanto se enviaba a aprobación y no había forma de corregirlo. */
@@ -1723,7 +1731,13 @@ function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, catalogo = [
                   <CampoVivo type="number" min="0" value={m.cantidad} onCommit={(v) => set(m.id, { cantidad: v })}
                     className="w-16 border rounded px-2 py-1 text-xs text-right outline-none" style={inputStyle} />
                   <span className="text-[10px] w-10" style={cSlate}>{m.unidad}</span>
-                  <button onClick={() => onUpdate({ materiales: materiales.filter((x) => x.id !== m.id) })} className="shrink-0 px-1">
+                  <button onClick={() => {
+                    const restante = materiales.filter((x) => x.id !== m.id);
+                    onUpdate({
+                      materiales: restante,
+                      materialesEstado: restante.length === 0 ? "" : todosConPrecioConocido(restante) ? "aprobado" : "borrador",
+                    });
+                  }} className="shrink-0 px-1">
                     <Trash2 size={13} color={COLORS.slate} />
                   </button>
                 </div>
@@ -1765,12 +1779,13 @@ function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, catalogo = [
                 if (!e.target.value) return;
                 const art = catalogo.find((a) => a.id === e.target.value);
                 if (!art) return;
+                const nuevaLista = [...materiales, {
+                  id: uid("mat"), stockId: art.id, nombre: art.nombre, unidad: art.unidad,
+                  cantidad: 1, costoUnitario: art.costoUnitario || 0, enBodega: art.cantidad,
+                }];
                 onUpdate({
-                  materiales: [...materiales, {
-                    id: uid("mat"), stockId: art.id, nombre: art.nombre, unidad: art.unidad,
-                    cantidad: 1, costoUnitario: art.costoUnitario || 0, enBodega: art.cantidad,
-                  }],
-                  materialesEstado: "borrador",
+                  materiales: nuevaLista,
+                  materialesEstado: todosConPrecioConocido(nuevaLista) ? "aprobado" : "borrador",
                 });
                 setAgregando(false);
               }}
@@ -1796,12 +1811,13 @@ function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, catalogo = [
                   const art = onAltaArticulo
                     ? onAltaArticulo(nuevoNombre.trim(), nuevaUnidad.trim() || "u")
                     : { id: uid("stk"), nombre: nuevoNombre.trim(), unidad: nuevaUnidad.trim() || "u", cantidad: 0, costoUnitario: 0 };
+                  const nuevaLista = [...materiales, {
+                    id: uid("mat"), stockId: art.id, nombre: art.nombre, unidad: art.unidad,
+                    cantidad: 1, costoUnitario: 0, enBodega: 0,
+                  }];
                   onUpdate({
-                    materiales: [...materiales, {
-                      id: uid("mat"), stockId: art.id, nombre: art.nombre, unidad: art.unidad,
-                      cantidad: 1, costoUnitario: 0, enBodega: 0,
-                    }],
-                    materialesEstado: "borrador",
+                    materiales: nuevaLista,
+                    materialesEstado: todosConPrecioConocido(nuevaLista) ? "aprobado" : "borrador",
                   });
                   setNuevoNombre(""); setNuevaUnidad("u"); setAgregando(false);
                 }}
@@ -1823,7 +1839,7 @@ function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, catalogo = [
         )
       )}
 
-      {puedeListar && materiales.length > 0 && (
+      {puedeListar && materiales.length > 0 && (estado === "" || estado === "borrador") && (
         puedeEnviar ? (
           <button onClick={() => onUpdate({ materialesEstado: "pendiente_costeo" })}
             className="w-full mt-2 text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.charcoal }}>
@@ -1834,6 +1850,12 @@ function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, catalogo = [
             Activa la actividad (programada o en proceso) para enviar los materiales a presupuesto.
           </p>
         )
+      )}
+
+      {estado === "aprobado" && todosConPrecioConocido(materiales) && (
+        <p className="text-[11px] mt-2 rounded-md p-2" style={{ background: `${COLORS.verde}12`, color: COLORS.charcoal }}>
+          Todo viene de bodega con precio ya conocido — no necesita presupuesto ni aprobación. Se descuenta solo al completar la actividad.
+        </p>
       )}
 
       {(estado === "pendiente_aprobacion" || estado === "en_espera" || estado === "aprobado" || estado === "rechazado" || puedeCostear) && (
