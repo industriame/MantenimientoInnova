@@ -1198,12 +1198,30 @@ function useAcciones(data, persist, usuario) {
       return persist((d) => ({ ...d, solicitudes: d.solicitudes.filter((x) => x.id !== item.id) }));
     },
     updateActividad: (item, patch, opciones = {}) => {
+      /* Al entrar en "en presupuesto" o "pendiente de aprobación" (incluye
+         un rechazo, que se queda en espera hasta corregirse), el estado real
+         pasa a "espera" automáticamente, guardando el estado anterior para
+         restaurarlo — pero SOLO cuando se aprueba. Un rechazo no libera la
+         actividad: sigue en espera hasta que se corrija y se vuelva a
+         aprobar. Si ya estaba en espera (ej. yendo de costeo a aprobación,
+         o corrigiendo tras un rechazo), no se pisa el estado ya guardado. */
+      let conEspera = patch;
+      if (patch.materialesEstado !== undefined) {
+        const entraEnEspera = ["pendiente_costeo", "pendiente_aprobacion", "en_espera", "rechazado"].includes(patch.materialesEstado);
+        const seLibera = patch.materialesEstado === "aprobado";
+        if (entraEnEspera && item.estado !== "espera") {
+          conEspera = { ...patch, estado: "espera", estadoPrevioEspera: item.estado };
+        } else if (seLibera && item.estado === "espera") {
+          conEspera = { ...patch, estado: item.estadoPrevioEspera || "programada", estadoPrevioEspera: "" };
+        }
+      }
+
       /* Cada guardado deja rastro: se comparan los campos seguidos y se anexan
          al log de la actividad. Queda oculto en la tarjeta y se consulta desde
          el historial, para no ensuciar la vista de trabajo. */
       // Las correcciones administrativas no se registran: son ajustes de
       // captura durante las pruebas, no movimientos reales de la orden
-      const movimientos = opciones.sinRegistro ? [] : diffCambios(item, patch, data.usuarios);
+      const movimientos = opciones.sinRegistro ? [] : diffCambios(item, conEspera, data.usuarios);
       const sello = `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
       const nuevoLog = movimientos.length
         ? [...(item.log || []), ...movimientos.map((m) => ({
@@ -1211,7 +1229,7 @@ function useAcciones(data, persist, usuario) {
             usuarioId: usuario?.id || "", sello,
           }))]
         : null;
-      const conLog = nuevoLog ? { ...patch, log: nuevoLog } : patch;
+      const conLog = nuevoLog ? { ...conEspera, log: nuevoLog } : conEspera;
 
       if (item.tipo === "preventivo") {
         return persist((data) => ({ ...data, ordenes: data.ordenes.map((o) => (o.id === item.id ? { ...o, ...conLog } : o)) }));
@@ -2910,14 +2928,31 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
 
   const solicitudes = data.solicitudes.filter((s) => sedeIds.includes(s.sedeId) && (!sedeFiltro || s.sedeId === sedeFiltro));
   const ordenes = data.ordenes.filter((o) => sedeIds.includes(o.sedeId) && (!sedeFiltro || o.sedeId === sedeFiltro));
+  const serviciosDash = (data.servicios || []).filter((s) => sedeIds.includes(s.sedeId) && (!sedeFiltro || s.sedeId === sedeFiltro));
 
-  const cuenta = (estado) =>
-    solicitudes.filter((s) => s.estado === estado).length + ordenes.filter((o) => o.estado === estado).length;
+  // Solo cuentan si su fecha programada (o de cierre) cae en el mes elegido
+  // arriba — antes no se filtraba por mes y por eso aparecían actividades
+  // de otros meses mezcladas en los conteos del mes en curso.
+  const enMes = (fecha) => mesKey(fecha) === mes;
 
-  const pendientes = solicitudes.filter((s) => s.estado === "pendiente").length;
-  const enProceso = cuenta("en_proceso");
-  const programadas = cuenta("programada");
-  const completadas = cuenta("completada");
+  const sinProgramar = getPendientes(data)
+    .filter((p) => sedeIds.includes(p.sedeId) && (!sedeFiltro || p.sedeId === sedeFiltro)).length;
+
+  const programadas =
+    solicitudes.filter((s) => s.estado === "programada" && enMes(s.fechaProgramada)).length +
+    ordenes.filter((o) => o.estado === "programada" && enMes(o.fechaProgramada)).length +
+    serviciosDash.filter((s) => s.estado === "programada" && enMes(s.fecha)).length;
+
+  // "En Ejecución" junta en_proceso + espera (pausada, pero ya arrancada)
+  const enProceso =
+    solicitudes.filter((s) => ["en_proceso", "espera"].includes(s.estado) && enMes(s.fechaProgramada)).length +
+    ordenes.filter((o) => ["en_proceso", "espera"].includes(o.estado) && enMes(o.fechaProgramada)).length +
+    serviciosDash.filter((s) => ["en_proceso", "espera"].includes(s.estado) && enMes(s.fecha)).length;
+
+  const completadas =
+    solicitudes.filter((s) => s.estado === "completada" && enMes(s.fechaCompletada)).length +
+    ordenes.filter((o) => o.estado === "completada" && enMes(o.fechaCompletada)).length +
+    serviciosDash.filter((s) => s.estado === "completada" && enMes(s.fechaCompletada)).length;
 
   const alcance = sedeFiltro ? [sedeFiltro] : sedeIds;
   const kpi = useMemo(() => indicadoresMes(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
@@ -2991,9 +3026,9 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
       )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <Stat label="Sin programar" value={pendientes} icon={<AlertTriangle size={14} />} color={COLORS.rojo} sub="Correctivos por activar" />
+        <Stat label="Sin Programar" value={sinProgramar} icon={<AlertTriangle size={14} />} color={COLORS.rojo} sub="Preventivos, correctivos y servicios" />
         <Stat label="Programadas" value={programadas} icon={<CalendarDays size={14} />} color={COLORS.ambar} />
-        <Stat label="En proceso" value={enProceso} icon={<Clock size={14} />} color={COLORS.orange} />
+        <Stat label="En Ejecución" value={enProceso} icon={<Clock size={14} />} color={COLORS.orange} />
         <Stat label="Completadas" value={completadas} icon={<CheckCircle2 size={14} />} color={COLORS.verde} />
       </div>
 
@@ -5733,10 +5768,15 @@ function TarjetaCosto({ item, data, rol, onUpdate, defaultOpen }) {
    servicios sin mostrar el valor — el técnico solo ve qué le toca ejecutar.
    ========================================================================= */
 function TecnicoPreventivos({ data, acciones, ordenes }) {
-  const abiertas = [...ordenes].filter((o) => ESTADOS_ABIERTOS.includes(o.estado))
-    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
   const enCosteo = ordenes.filter((o) => o.materialesEstado === "pendiente_costeo");
   const enAprobacion = ordenes.filter((o) => ["pendiente_aprobacion", "en_espera"].includes(o.materialesEstado));
+  const rechazadas = ordenes.filter((o) => o.materialesEstado === "rechazado");
+  const idsEnFlujoCostos = new Set([...enCosteo, ...enAprobacion, ...rechazadas].map((o) => o.id));
+
+  const programadas = [...ordenes].filter((o) => o.estado === "programada")
+    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
+  const enEjecucion = [...ordenes].filter((o) => ["en_proceso", "espera"].includes(o.estado) && !idsEnFlujoCostos.has(o.id))
+    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
   const finalizadas = [...ordenes].filter((o) => o.estado === "completada")
     .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
 
@@ -5744,9 +5784,13 @@ function TecnicoPreventivos({ data, acciones, ordenes }) {
 
   return (
     <div className="space-y-3">
-      <SeccionPlegable titulo="Programadas y en ejecución" count={abiertas.length} color={COLORS.orange} defaultOpen>
-        {abiertas.map(tarjeta)}
-        {abiertas.length === 0 && <Empty>Sin preventivos en curso.</Empty>}
+      <SeccionPlegable titulo="Programadas" count={programadas.length} color={COLORS.ambar} defaultOpen>
+        {programadas.map(tarjeta)}
+        {programadas.length === 0 && <Empty>Sin preventivos programados.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange} defaultOpen>
+        {enEjecucion.map(tarjeta)}
+        {enEjecucion.length === 0 && <Empty>Sin preventivos en ejecución.</Empty>}
       </SeccionPlegable>
       <SeccionPlegable titulo="En presupuesto" count={enCosteo.length} color={COLORS.ambar}>
         {enCosteo.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
@@ -5755,6 +5799,10 @@ function TecnicoPreventivos({ data, acciones, ordenes }) {
       <SeccionPlegable titulo="En espera de aprobación del cliente" count={enAprobacion.length} color={ESTADOS.por_aprobar.color}>
         {enAprobacion.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
         {enAprobacion.length === 0 && <Empty>Nada esperando decisión del cliente.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="Rechazados" count={rechazadas.length} color={COLORS.rojo}>
+        {rechazadas.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
+        {rechazadas.length === 0 && <Empty>Nada rechazado.</Empty>}
       </SeccionPlegable>
       <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
         {finalizadas.slice(0, 5).map(tarjeta)}
@@ -5766,10 +5814,15 @@ function TecnicoPreventivos({ data, acciones, ordenes }) {
 }
 
 function TecnicoCorrectivos({ data, acciones, solicitudes }) {
-  const programadas = [...solicitudes].filter((s) => ESTADOS_ABIERTOS.includes(s.estado))
-    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
   const enCosteo = solicitudes.filter((s) => s.materialesEstado === "pendiente_costeo");
   const enAprobacion = solicitudes.filter((s) => ["pendiente_aprobacion", "en_espera"].includes(s.materialesEstado));
+  const rechazadas = solicitudes.filter((s) => s.materialesEstado === "rechazado");
+  const idsEnFlujoCostos = new Set([...enCosteo, ...enAprobacion, ...rechazadas].map((s) => s.id));
+
+  const programadas = [...solicitudes].filter((s) => s.estado === "programada")
+    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
+  const enEjecucion = [...solicitudes].filter((s) => ["en_proceso", "espera"].includes(s.estado) && !idsEnFlujoCostos.has(s.id))
+    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
   const finalizadas = [...solicitudes].filter((s) => s.estado === "completada")
     .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
 
@@ -5777,9 +5830,13 @@ function TecnicoCorrectivos({ data, acciones, solicitudes }) {
 
   return (
     <div className="space-y-3">
-      <SeccionPlegable titulo="Programadas y en ejecución" count={programadas.length} color={COLORS.orange} defaultOpen>
+      <SeccionPlegable titulo="Programadas" count={programadas.length} color={COLORS.ambar} defaultOpen>
         {programadas.map(tarjeta)}
-        {programadas.length === 0 && <Empty>Sin correctivos en curso.</Empty>}
+        {programadas.length === 0 && <Empty>Sin correctivos programados.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange} defaultOpen>
+        {enEjecucion.map(tarjeta)}
+        {enEjecucion.length === 0 && <Empty>Sin correctivos en ejecución.</Empty>}
       </SeccionPlegable>
       <SeccionPlegable titulo="En presupuesto" count={enCosteo.length} color={COLORS.ambar}>
         {enCosteo.map((i) => <TarjetaCosto key={i.id} item={{ ...i, tipo: "correctivo", tarea: i.descripcion }} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
@@ -5788,6 +5845,10 @@ function TecnicoCorrectivos({ data, acciones, solicitudes }) {
       <SeccionPlegable titulo="En espera de aprobación del cliente" count={enAprobacion.length} color={ESTADOS.por_aprobar.color}>
         {enAprobacion.map((i) => <TarjetaCosto key={i.id} item={{ ...i, tipo: "correctivo", tarea: i.descripcion }} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
         {enAprobacion.length === 0 && <Empty>Nada esperando decisión del cliente.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="Rechazados" count={rechazadas.length} color={COLORS.rojo}>
+        {rechazadas.map((i) => <TarjetaCosto key={i.id} item={{ ...i, tipo: "correctivo", tarea: i.descripcion }} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
+        {rechazadas.length === 0 && <Empty>Nada rechazado.</Empty>}
       </SeccionPlegable>
       <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
         {finalizadas.slice(0, 5).map(tarjeta)}
@@ -5802,7 +5863,8 @@ function TecnicoCorrectivos({ data, acciones, solicitudes }) {
    el técnico solo necesita saber qué servicio le toca ejecutar y cuándo. */
 function TecnicoServicios({ data, servicios }) {
   const porAprobar = servicios.filter((s) => s.estado === "por_aprobar");
-  const programados = servicios.filter((s) => ESTADOS_ABIERTOS.includes(s.estado));
+  const programados = servicios.filter((s) => s.estado === "programada");
+  const enEjecucion = servicios.filter((s) => s.estado === "en_proceso");
   const finalizados = [...servicios].filter((s) => s.estado === "completada")
     .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
 
@@ -5832,9 +5894,13 @@ function TecnicoServicios({ data, servicios }) {
         {porAprobar.map(tarjeta)}
         {porAprobar.length === 0 && <Empty>Sin solicitudes esperando aprobación.</Empty>}
       </SeccionPlegable>
-      <SeccionPlegable titulo="Programados y en ejecución" count={programados.length} color={COLORS.orange} defaultOpen>
+      <SeccionPlegable titulo="Programados" count={programados.length} color={COLORS.ambar} defaultOpen>
         {programados.map(tarjeta)}
-        {programados.length === 0 && <Empty>Sin servicios en curso.</Empty>}
+        {programados.length === 0 && <Empty>Sin servicios programados.</Empty>}
+      </SeccionPlegable>
+      <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange} defaultOpen>
+        {enEjecucion.map(tarjeta)}
+        {enEjecucion.length === 0 && <Empty>Sin servicios en ejecución.</Empty>}
       </SeccionPlegable>
       <SeccionPlegable titulo="Finalizados" count={finalizados.length} color={COLORS.verde} defaultOpen={false}>
         {finalizados.slice(0, 5).map(tarjeta)}
@@ -5912,17 +5978,24 @@ function AdminCorrectivos({ data, persist, user }) {
   };
 
   /* Mismas etapas que preventivos y servicios, para que las tres pestañas se
-     lean igual: por activar → programadas → costeo → aprobación → resueltas. */
+     lean igual: sin programar → programadas → en ejecución → costeo →
+     aprobación → rechazados → resueltas. */
   const visibles = data.solicitudes.filter((s) => fSede === "todas" || s.sedeId === fSede);
-  const porActivar = visibles.filter((s) => s.estado === "pendiente")
+  const sinProgramar = visibles.filter((s) => s.estado === "pendiente")
     .sort((a, b) => (CRITICIDAD[b.criticidad]?.nivel || 0) - (CRITICIDAD[a.criticidad]?.nivel || 0));
-  const programadas = visibles.filter((s) => ESTADOS_ABIERTOS.includes(s.estado))
+  const enFlujoCostosIds = new Set(
+    visibles.filter((s) => ["pendiente_costeo", "pendiente_aprobacion", "en_espera", "rechazado"].includes(s.materialesEstado)).map((s) => s.id)
+  );
+  const programadas = visibles.filter((s) => s.estado === "programada")
+    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
+  const enEjecucion = visibles.filter((s) => ["en_proceso", "espera"].includes(s.estado) && !enFlujoCostosIds.has(s.id))
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
   const finalizadas = visibles.filter((s) => s.estado === "completada")
     .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
 
   const enCosteo = itemsConMateriales(data, ["pendiente_costeo"]);
   const enAprobacion = itemsConMateriales(data, ["pendiente_aprobacion", "en_espera"]);
+  const rechazadas = itemsConMateriales(data, ["rechazado"]);
 
   const tarjetaAct = (sol) => (
     <TarjetaActividad key={sol.id} rol="admin" data={data} acciones={acciones}
@@ -5956,15 +6029,20 @@ function AdminCorrectivos({ data, persist, user }) {
           onSubmit={crearCorrectivo} onClose={() => setNuevo(false)} />
       )}
 
-      <SeccionPlegable titulo="Por activar" count={porActivar.length} color={COLORS.slate}
+      <SeccionPlegable titulo="Sin Programar" count={sinProgramar.length} color={COLORS.slate}
         nota="Reportadas, aún sin técnico ni fecha. Se programan desde Programación.">
-        {porActivar.map(tarjetaAct)}
-        {porActivar.length === 0 && <Empty>Nada esperando programación.</Empty>}
+        {sinProgramar.map(tarjetaAct)}
+        {sinProgramar.length === 0 && <Empty>Nada esperando programación.</Empty>}
       </SeccionPlegable>
 
-      <SeccionPlegable titulo="Programadas y en ejecución" count={programadas.length} color={COLORS.orange}>
+      <SeccionPlegable titulo="Programadas" count={programadas.length} color={COLORS.ambar}>
         {programadas.map(tarjetaAct)}
-        {programadas.length === 0 && <Empty>Sin correctivos en curso.</Empty>}
+        {programadas.length === 0 && <Empty>Sin correctivos programados.</Empty>}
+      </SeccionPlegable>
+
+      <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange}>
+        {enEjecucion.map(tarjetaAct)}
+        {enEjecucion.length === 0 && <Empty>Sin correctivos en ejecución.</Empty>}
       </SeccionPlegable>
 
       <SeccionPlegable titulo="En presupuesto" count={enCosteo.length} color={COLORS.ambar}>
@@ -5975,6 +6053,11 @@ function AdminCorrectivos({ data, persist, user }) {
       <SeccionPlegable titulo="En espera de aprobación del cliente" count={enAprobacion.length} color={ESTADOS.por_aprobar.color}>
         {enAprobacion.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="admin" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
         {enAprobacion.length === 0 && <Empty>Nada esperando decisión del cliente.</Empty>}
+      </SeccionPlegable>
+
+      <SeccionPlegable titulo="Rechazados" count={rechazadas.length} color={COLORS.rojo}>
+        {rechazadas.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="admin" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
+        {rechazadas.length === 0 && <Empty>Nada rechazado.</Empty>}
       </SeccionPlegable>
 
       <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
@@ -6253,7 +6336,8 @@ function AdminServicios({ data, persist, user }) {
   // Agrupación por etapa, en el mismo orden que preventivos y correctivos
   const porAprobar = servicios.filter((s) => s.estado === "por_aprobar");
   const aprobados = servicios.filter((s) => s.estado === "aprobada");
-  const programados = servicios.filter((s) => ESTADOS_ABIERTOS.includes(s.estado));
+  const programados = servicios.filter((s) => s.estado === "programada");
+  const enEjecucion = servicios.filter((s) => s.estado === "en_proceso");
   const finalizados = servicios.filter((s) => s.estado === "completada");
   const rechazados = servicios.filter((s) => s.estado === "rechazada");
 
@@ -6323,7 +6407,7 @@ function AdminServicios({ data, persist, user }) {
         {aprobados.length === 0 && <Empty>Nada aprobado pendiente de programar.</Empty>}
       </SeccionPlegable>
 
-      <SeccionPlegable titulo="Programados y en ejecución" count={programados.length} color={COLORS.orange}>
+      <SeccionPlegable titulo="Programados" count={programados.length} color={COLORS.ambar}>
         {programados.map((srv) => (
           <div key={srv.id}>
             <div className="flex justify-end mb-1">
@@ -6336,7 +6420,23 @@ function AdminServicios({ data, persist, user }) {
               data={data} acciones={acciones} rol="admin" />
           </div>
         ))}
-        {programados.length === 0 && <Empty>Sin servicios en curso.</Empty>}
+        {programados.length === 0 && <Empty>Sin servicios programados.</Empty>}
+      </SeccionPlegable>
+
+      <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange}>
+        {enEjecucion.map((srv) => (
+          <div key={srv.id}>
+            <div className="flex justify-end mb-1">
+              <button onClick={() => setModal({ srv })} className="flex items-center gap-1 text-[10px] font-semibold" style={cSlate}>
+                <Pencil size={10} /> Editar ficha
+              </button>
+            </div>
+            <TarjetaActividad
+              item={{ ...srv, tipo: "servicio", tarea: srv.trabajo, fechaProgramada: srv.fecha }}
+              data={data} acciones={acciones} rol="admin" />
+          </div>
+        ))}
+        {enEjecucion.length === 0 && <Empty>Sin servicios en ejecución.</Empty>}
       </SeccionPlegable>
 
       <SeccionPlegable titulo="Finalizados" count={finalizados.length} color={COLORS.verde} defaultOpen={false}>
@@ -6388,7 +6488,7 @@ function AdminPreventivos({ data, persist, user }) {
   };
 
   // Aún sin orden generada
-  const porActivar = ordenarPorUrgencia(
+  const sinProgramar = ordenarPorUrgencia(
     getPendientes(data).filter((p) => p.tipo === "preventivo" && coincide(p, p.tarea))
   );
 
@@ -6400,10 +6500,17 @@ function AdminPreventivos({ data, persist, user }) {
   const atrasadas = abiertas.filter((o) => o.fechaProgramada && o.fechaProgramada < hoy);
   const alDia = abiertas.filter((o) => !o.fechaProgramada || o.fechaProgramada >= hoy);
 
+  const enFlujoCostosIds = new Set(
+    data.ordenes.filter((o) => ["pendiente_costeo", "pendiente_aprobacion", "en_espera", "rechazado"].includes(o.materialesEstado)).map((o) => o.id)
+  );
+  const programadas = alDia.filter((o) => o.estado === "programada");
+  const enEjecucion = alDia.filter((o) => ["en_proceso", "espera"].includes(o.estado) && !enFlujoCostosIds.has(o.id));
+
   // Etapas de costo, solo de órdenes preventivas
   const soloPrev = (arr) => arr.filter((i) => i.tipo === "preventivo" && coincide(i, i.tarea));
   const enCosteo = soloPrev(itemsConMateriales(data, ["pendiente_costeo"]));
   const enAprobacion = soloPrev(itemsConMateriales(data, ["pendiente_aprobacion", "en_espera"]));
+  const rechazadas = soloPrev(itemsConMateriales(data, ["rechazado"]));
   const finalizadas = data.ordenes
     .filter((o) => o.estado === "completada" && coincide(o, o.tarea))
     .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
@@ -6452,7 +6559,7 @@ function AdminPreventivos({ data, persist, user }) {
       </div>
 
       <div className="grid grid-cols-3 gap-3 mb-4">
-        <Stat label="Por activar" value={porActivar.length} icon={<ClipboardList size={14} />} color={COLORS.slate} sub="Sin orden generada" />
+        <Stat label="Sin Programar" value={sinProgramar.length} icon={<ClipboardList size={14} />} color={COLORS.slate} sub="Sin orden generada" />
         <Stat label="Atrasadas" value={atrasadas.length} icon={<AlertTriangle size={14} />}
           color={atrasadas.length ? COLORS.rojo : COLORS.verde} sub="Fecha ya vencida" />
         <Stat label="Vigentes" value={alDia.length} icon={<CalendarDays size={14} />} color={COLORS.orange} sub="Programadas o en curso" />
@@ -6478,17 +6585,22 @@ function AdminPreventivos({ data, persist, user }) {
       )}
 
       <div className="space-y-3">
-        <SeccionPlegable titulo="Por activar" count={porActivar.length} color={COLORS.slate}>
-          {porActivar.map((item) => (
+        <SeccionPlegable titulo="Sin Programar" count={sinProgramar.length} color={COLORS.slate}>
+          {sinProgramar.map((item) => (
             <TarjetaPendiente key={item.key} item={item} sedes={data.sedes} usuarios={data.usuarios}
               onActivar={() => setActivar(item)} />
           ))}
-          {porActivar.length === 0 && <Empty>Todo el plan preventivo está activado.</Empty>}
+          {sinProgramar.length === 0 && <Empty>Todo el plan preventivo está activado.</Empty>}
         </SeccionPlegable>
 
-        <SeccionPlegable titulo="Programadas y en ejecución" count={alDia.length} color={COLORS.orange}>
-          {alDia.map(tarjeta)}
-          {alDia.length === 0 && <Empty>Sin órdenes preventivas en curso.</Empty>}
+        <SeccionPlegable titulo="Programadas" count={programadas.length} color={COLORS.ambar}>
+          {programadas.map(tarjeta)}
+          {programadas.length === 0 && <Empty>Sin preventivos programados.</Empty>}
+        </SeccionPlegable>
+
+        <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange}>
+          {enEjecucion.map(tarjeta)}
+          {enEjecucion.length === 0 && <Empty>Sin órdenes preventivas en ejecución.</Empty>}
         </SeccionPlegable>
 
         <SeccionPlegable titulo="En presupuesto" count={enCosteo.length} color={COLORS.ambar}>
@@ -6499,6 +6611,11 @@ function AdminPreventivos({ data, persist, user }) {
         <SeccionPlegable titulo="En espera de aprobación del cliente" count={enAprobacion.length} color={ESTADOS.por_aprobar.color}>
           {enAprobacion.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="admin" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
           {enAprobacion.length === 0 && <Empty>Nada esperando decisión del cliente.</Empty>}
+        </SeccionPlegable>
+
+        <SeccionPlegable titulo="Rechazados" count={rechazadas.length} color={COLORS.rojo}>
+          {rechazadas.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="admin" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
+          {rechazadas.length === 0 && <Empty>Nada rechazado.</Empty>}
         </SeccionPlegable>
 
         <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
