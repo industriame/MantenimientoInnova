@@ -6,8 +6,8 @@ import React, {
   useRef,
 } from "react";
 import jsQR from "jsqr";
-import logoInnova from "./assets/Logo_ISE.png";
-import logoReporte from "./assets/innova.png";
+import logoISE from "./assets/Logo_ISE.png";       // tu logo (IndustriaMe / ISE)
+import logoCliente from "./assets/innova.png";     // logo del cliente (Innova Schools)
 import { jsPDF } from "jspdf";
 import html2canvas from "html2canvas";
 import { hasAppData, loadAppState, saveAppState, saveAppStateV2, uploadFile } from "./api/db.js";
@@ -1539,8 +1539,9 @@ function AppHeader({ user, onLogout, sedesTexto, ultimaSync }) {
   const rol = rolDe(user);
   return (
     <div className="flex items-center gap-3 pt-4">
-      <div className="w-9 h-9 rounded-md flex items-center justify-center shrink-0" style={{ background: COLORS.charcoal }}>
-        <Wrench size={17} color={COLORS.orange} />
+      <div className="flex items-center gap-1 p-1 rounded-md shrink-0" style={{ background: COLORS.charcoal }}>
+        <img src={logoISE} alt="IndustriaMe" className="h-7 w-7 object-contain rounded-sm bg-white p-0.5" />
+        <img src={logoCliente} alt="Innova Schools" className="h-7 w-7 object-contain rounded-sm bg-white p-0.5" />
       </div>
       <div className="min-w-0 flex-1">
         <p className="font-bold text-sm leading-tight truncate" style={cChar}>{user.nombre}</p>
@@ -2774,7 +2775,7 @@ function Login({ usuarios, onLogin }) {
   return (
     <div className="max-w-sm mx-auto px-4 pt-12 pb-10">
       <div className="text-center mb-8">
-        <img src={logoInnova} alt="Innova Schools"
+        <img src={logoISE} alt="IndustriaMe"
           className="mx-auto w-auto object-contain" style={{ maxHeight: 92 }} />
         <h1 className="mt-4 font-bold text-xl" style={{ color: COLORS.charcoal, fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.02em" }}>
           Mantenimiento  - Innova Schools EC
@@ -7930,7 +7931,7 @@ function checklistHTML(items) {
 /* Documento HTML autónomo en A4 listo para imprimir o guardar como PDF. */
 /* El logo se referencia por su URL final, la que Vite genera al compilar.
    Dentro de las plantillas HTML no se puede usar el import directamente. */
-const LOGO_REPORTE = logoReporte;
+const LOGO_REPORTE = logoCliente;
 
 /* ============================================================================
    GENERACIÓN DE PDF
