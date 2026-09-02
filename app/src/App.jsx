@@ -502,7 +502,10 @@ const sedesVisibles = (data, user) =>
 
 // --- Costos: el costo SIEMPRE es la suma de materiales aprobados ---
 function costoAprobado(item) {
-  if (!item || item.materialesEstado !== "aprobado") return 0;
+  // Una vez liquidado (al completar la actividad), ese costo ya quedó
+  // registrado en "consumos" — si se sigue sumando aquí también, se cuenta
+  // dos veces la misma compra.
+  if (!item || item.materialesEstado !== "aprobado" || item.materialesLiquidados) return 0;
   return (item.materiales || []).reduce((s, m) => s + (Number(m.cantidad) || 0) * (Number(m.costoUnitario) || 0), 0);
 }
 /* Consumo de stock: se carga al presupuesto de inmediato, sin aprobación,
