@@ -4052,13 +4052,35 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
     acciones.devolverStock(item, c);
   };
 
-  // Hay cambios sin guardar si el formulario difiere de lo almacenado
+  /* Hay cambios sin guardar si CUALQUIER campo del formulario difiere de lo
+     almacenado. Antes solo se miraban 5 campos, así que al corregir la
+     descripción, la ubicación, las fechas o el proveedor el botón de guardar
+     no aparecía y el cambio se perdía al cerrar la tarjeta. */
+  const dif = (valorForm, valorItem) => String(valorForm ?? "") !== String(valorItem ?? "");
   const sinGuardar =
-    estado !== item.estado ||
-    observaciones !== (item.observaciones || "") ||
-    (!esPrev && resolucion !== (item.resolucion || "")) ||
-    (permitirReasignar && tecnicoId !== (item.tecnicoId || "")) ||
-    (puedeEditarTiempo && (String(durValor) !== String(item.duracionValor ?? "") || durUnidad !== (item.duracionUnidad || "minutos")));
+    dif(estado, item.estado) ||
+    dif(observaciones, item.observaciones) ||
+    (!esPrev && dif(resolucion, item.resolucion)) ||
+    (permitirReasignar && dif(tecnicoId, item.tecnicoId)) ||
+    (puedeEditarTiempo && (dif(durValor, item.duracionValor) || dif(durUnidad, item.duracionUnidad || "minutos"))) ||
+    (corrige && (
+      dif(txt, esServ ? item.trabajo : esPrev ? item.tarea : item.descripcion) ||
+      dif(detalle, item.detalle) ||
+      dif(criticidad, item.criticidad) ||
+      dif(solicitanteId, item.solicitanteId) ||
+      dif(sedeId, item.sedeId) ||
+      dif(faseId, item.faseId) ||
+      dif(activoId, item.activoId) ||
+      dif(fecha, item.fecha) ||
+      dif(hora, item.hora) ||
+      dif(fProg, esServ ? item.fecha : item.fechaProgramada) ||
+      dif(fCompl, item.fechaCompletada) ||
+      dif(hCompl, item.horaCompletada) ||
+      dif(proveedor, item.proveedor) ||
+      dif(presu, item.presupuesto) ||
+      dif(presuAp, item.presupuestoAprobado) ||
+      dif(calif, item.calificacion || 0)
+    ));
 
   return (
     <div className="border rounded-md" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${tipoMeta(item.tipo).color}`, background: "white" }}>
