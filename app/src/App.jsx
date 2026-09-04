@@ -1002,13 +1002,18 @@ function useSystemData() {
     try {
       const saved = normalizeData(await saveAppStateV2(construirPayloadDiff(toSave)));
       servidorRef.current = saved;
-      // Si hubo más edits durante el POST, no pisar el estado local más nuevo
-      if (snapshotRef.current === JSON.stringify(toSave)) {
+      /* ¿Se editó algo MIENTRAS se guardaba? Se compara la referencia del
+         objeto, no su texto: normalizeData reordena claves y rellena campos,
+         así que el texto casi nunca coincide aunque los datos sean iguales.
+         Comparando texto se disparaba un segundo guardado innecesario cuyo
+         diff ya se calculaba contra el estado recién guardado — y lo recién
+         creado se perdía. */
+      if (dataRef.current === toSave) {
         dataRef.current = saved;
         snapshotRef.current = JSON.stringify(saved);
         setData(saved);
       } else {
-        // Reenviar el estado más reciente (el diff ahora es contra "saved")
+        // Sí hubo cambios nuevos: se reenvían, ahora sí con diff contra "saved"
         const toSave2 = dataRef.current;
         const again = normalizeData(await saveAppStateV2(construirPayloadDiff(toSave2)));
         servidorRef.current = again;
@@ -1022,6 +1027,11 @@ function useSystemData() {
       return true;
     } catch (e) {
       console.error("No se pudo guardar en PostgREST", e);
+      /* Si falló, no se sabe qué alcanzó a quedar en la base. Se descarta la
+         referencia del servidor para que el próximo intento reenvíe todo lo
+         local completo, en vez de un diff calculado contra un estado que
+         quizá nunca se guardó (eso perdería lo recién creado). */
+      servidorRef.current = null;
       setSyncError(
         "No se pudo guardar en la base. Arranca PostgREST en el puerto 3000.",
       );
