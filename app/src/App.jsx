@@ -3125,9 +3125,12 @@ function cumpleFiltro(s, f) {
 /* Tarjeta de una solicitud propia. Se muestra compacta y el botón de
    información abre la ficha completa, para que la lista se pueda recorrer
    de un vistazo aunque haya muchas. */
-function TarjetaSolicitudMia({ s, data, onCalificar }) {
+function TarjetaSolicitudMia({ s, data, onCalificar, onActualizar }) {
   const [abierta, setAbierta] = useState(false);
   const porCalificar = s.estado === "completada" && !s.calificacion;
+  // Mientras la novedad no esté cerrada, el solicitante puede sumar o
+  // cambiar su foto — sirve cuando se le olvidó adjuntarla al reportarla.
+  const puedeEditarFoto = !!onActualizar && s.estado !== "completada";
 
   return (
     <div className="border rounded-md" style={{ ...cardStyle, borderLeft: `3px solid ${ESTADOS[s.estado]?.color || COLORS.line}` }}>
@@ -3176,7 +3179,10 @@ function TarjetaSolicitudMia({ s, data, onCalificar }) {
             </p>
           )}
 
-          {s.fotoSolicitante && (
+          {puedeEditarFoto ? (
+            <FotoUploader foto={s.fotoSolicitante} label="Foto que enviaste" carpeta="solicitudes"
+              onChange={(foto) => onActualizar({ fotoSolicitante: foto })} />
+          ) : s.fotoSolicitante && (
             <div>
               <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Foto que enviaste</p>
               <img src={s.fotoSolicitante} alt="Foto de la solicitud"
@@ -3708,7 +3714,9 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
 
           <div className="space-y-2">
             {visibles.map((s) => (
-              <TarjetaSolicitudMia key={s.id} s={s} data={data} onCalificar={(patch) => calificar(s.id, patch)} />
+              <TarjetaSolicitudMia key={s.id} s={s} data={data}
+                onCalificar={(patch) => calificar(s.id, patch)}
+                onActualizar={(patch) => calificar(s.id, patch)} />
             ))}
             {misSolicitudes.length === 0 && <Empty>Aún no has enviado solicitudes.</Empty>}
           </div>
@@ -4275,7 +4283,10 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             </Field>
           )}
 
-          {item.fotoSolicitante && (
+          {corrige ? (
+            <FotoUploader foto={item.fotoSolicitante} label="Foto del solicitante" carpeta="solicitudes"
+              onChange={(foto) => acciones.updateActividad(item, { fotoSolicitante: foto }, { sinRegistro: true })} />
+          ) : item.fotoSolicitante && (
             <Field label="Foto del solicitante">
               <img src={item.fotoSolicitante} alt="Reportado por el solicitante" className="rounded-md max-h-40 border" style={bLine} />
             </Field>
@@ -5677,12 +5688,19 @@ function TarjetaCosto({ item, data, rol, onUpdate, defaultOpen }) {
             {item.fechaProgramada ? ` · ${item.fechaProgramada}` : ""}
           </p>
           {item.observaciones && <Field label="Observaciones del técnico"><ReadOnly>{item.observaciones}</ReadOnly></Field>}
-          {item.fotoSolicitante && (
+          {/* El supervisor puede corregir la foto del solicitante desde aquí:
+              a veces llega sin foto o con una equivocada y hay que ajustarla
+              sin importar en qué etapa de costeo esté la actividad. */}
+          {rol === "admin" ? (
+            <FotoUploader foto={item.fotoSolicitante} label="Foto del solicitante" carpeta="solicitudes"
+              onChange={(foto) => onUpdate({ fotoSolicitante: foto })} />
+          ) : item.fotoSolicitante && (
             <Field label="Foto del solicitante">
               <img src={item.fotoSolicitante} alt="Reportado por el solicitante" className="rounded-md max-h-40 border" style={bLine} />
             </Field>
           )}
-          <FotoUploader foto={item.foto} onChange={() => {}} readOnly label="Evidencia del técnico" />
+          <FotoUploader foto={item.foto} onChange={(foto) => onUpdate({ foto })}
+            readOnly={rol !== "admin"} label="Evidencia del técnico" carpeta="evidencias" />
           <MaterialesPanel item={item} rol={rol} onUpdate={onUpdate} />
           <ContextoPresupuesto item={item} data={data} />
         </div>
@@ -6023,6 +6041,28 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
 
   const actividadesDetalle = detalle ? actividadesDeSedeMes(data, detalle, mes).filter((a) => costoEstimado(a) > 0) : [];
 
+  /* Acumulado del año: suma mes a mes desde enero hasta el mes elegido, para
+     ver el consumo total del período y no solo la foto de un mes suelto. */
+  const acumulado = useMemo(() => {
+    const [y, m] = mes.split("-").map(Number);
+    let presupuesto = 0, gastado = 0, comprometido = 0, servicios = 0;
+    const serie = [];
+    for (let i = 1; i <= m; i++) {
+      const k = `${y}-${String(i).padStart(2, "0")}`;
+      const gm = presupuestoGlobalMes(data, k);
+      presupuesto += gm.presupuesto;
+      gastado += gm.gastado;
+      comprometido += gm.comprometido;
+      servicios += gm.costoServicios || 0;
+      serie.push({ mes: MESES[i - 1].slice(0, 3), acumulado: Number(gastado.toFixed(2)) });
+    }
+    return {
+      anio: y, meses: m, presupuesto, gastado, comprometido, servicios, serie,
+      disponible: presupuesto - gastado - comprometido,
+      pct: presupuesto > 0 ? (gastado / presupuesto) * 100 : 0,
+    };
+  }, [data, mes]);
+
   return (
     <div className="mt-4 space-y-4">
       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -6038,6 +6078,44 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
         <Stat label="Comprometido" value={money(g.comprometido)} icon={<Clock size={14} />} color={COLORS.ambar} sub="Sin aprobar aún" />
         <Stat label="Disponible" value={money(g.disponible)} icon={<TrendingUp size={14} />} color={g.disponible >= 0 ? COLORS.verde : COLORS.rojo}
           sub={g.excedidas > 0 ? `${g.excedidas} sede(s) excedida(s)` : g.enRiesgo > 0 ? `${g.enRiesgo} sede(s) en riesgo` : "Todo en orden"} />
+      </div>
+
+      <div className="border rounded-md p-3" style={{ ...cardStyle, borderLeft: `3px solid ${COLORS.charcoal}` }}>
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+          <p className="text-xs font-semibold uppercase tracking-wide" style={cSlate}>
+            Acumulado {acumulado.anio} · enero a {mesLabel(mes).split(" ")[0].toLowerCase()}
+          </p>
+          <Chip color={acumulado.pct >= 100 ? COLORS.rojo : acumulado.pct >= 85 ? COLORS.ambar : COLORS.verde}>
+            {acumulado.pct.toFixed(0)}% del presupuesto
+          </Chip>
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+          <Stat label="Presupuesto acumulado" value={money(acumulado.presupuesto)} icon={<Wallet size={14} />}
+            color={COLORS.charcoal} sub={`${acumulado.meses} mes(es)`} />
+          <Stat label="Gastado acumulado" value={money(acumulado.gastado)} icon={<DollarSign size={14} />}
+            color={COLORS.orange} sub="Aprobado + bodega" />
+          <Stat label="Comprometido" value={money(acumulado.comprometido)} icon={<Clock size={14} />}
+            color={COLORS.ambar} sub="Sin aprobar aún" />
+          <Stat label="Disponible" value={money(acumulado.disponible)} icon={<TrendingUp size={14} />}
+            color={acumulado.disponible >= 0 ? COLORS.verde : COLORS.rojo} sub="Del período completo" />
+        </div>
+
+        <ResponsiveContainer width="100%" height={150}>
+          <LineChart data={acumulado.serie} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
+            <CartesianGrid stroke={COLORS.line} vertical={false} />
+            <XAxis dataKey="mes" tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 10, fill: COLORS.slate }} axisLine={false} tickLine={false} />
+            <Tooltip formatter={(v) => [money(v), "Acumulado"]} />
+            <Line type="monotone" dataKey="acumulado" stroke={COLORS.orange} strokeWidth={2.5}
+              dot={{ r: 3, fill: COLORS.orange }} isAnimationActive={false} />
+          </LineChart>
+        </ResponsiveContainer>
+        {acumulado.servicios > 0 && (
+          <p className="text-[10px] mt-1" style={cSlate}>
+            Además, {money(acumulado.servicios)} en servicios externos acumulados en el período (fuera del presupuesto de materiales).
+          </p>
+        )}
       </div>
 
       <div className="border rounded-md p-3" style={cardStyle}>
@@ -7158,12 +7236,22 @@ function VistaHistorico({ data, sedes, rol }) {
   const [q, setQ] = useState("");
   const [fSede, setFSede] = useState("todas");
   const [orden, setOrden] = useState("reciente");
+  const [desde, setDesde] = useState("");
+  const [hasta, setHasta] = useState("");
   const sedeIds = sedes.map((s) => s.id);
 
   const todo = useMemo(() => historicoDe(data, sedeIds), [data, sedeIds.join(",")]);
 
+  /* Fecha de origen de cada registro: las correctivas guardan cuándo se
+     reportaron ("fecha"); preventivas y servicios no tienen ese dato, así
+     que se usa su fecha programada, que es su equivalente de origen. */
+  const fechaOrigen = (h) => h.fecha || h.fechaProgramada || "";
+
   const filtrado = todo.filter((h) => {
     if (fSede !== "todas" && h.sedeId !== fSede) return false;
+    const f = fechaOrigen(h);
+    if (desde && (!f || f < desde)) return false;
+    if (hasta && (!f || f > hasta)) return false;
     if (!q.trim()) return true;
     const t = q.trim().toLowerCase();
     return (h.codigo || "").toLowerCase().includes(t) ||
@@ -7172,6 +7260,8 @@ function VistaHistorico({ data, sedes, rol }) {
       usuarioNombre(data.usuarios, h.tecnicoId).toLowerCase().includes(t) ||
       ubicacionTexto(data.sedes, h).toLowerCase().includes(t);
   });
+
+  const hayFiltro = q.trim() || fSede !== "todas" || desde || hasta;
 
   const ordenar = (arr) => [...arr].sort((a, b) => {
     const fa = a.fechaCompletada || "", fb = b.fechaCompletada || "";
@@ -7188,7 +7278,8 @@ function VistaHistorico({ data, sedes, rol }) {
   return (
     <div className="mt-4">
       <p className="text-xs mb-3" style={cSlate}>
-        Todo lo ejecutado y cerrado, agrupado por tipo. Busca por código (OT, SOL, SRV), tarea, activo, técnico o proveedor.
+        Todo lo ejecutado y cerrado, agrupado por tipo. Busca por código (OT, SOL, SRV), tarea, activo, técnico o proveedor,
+        o acota por la fecha en que se creó la actividad.
       </p>
 
       <div className="flex gap-2 mb-3 flex-wrap">
@@ -7212,9 +7303,28 @@ function VistaHistorico({ data, sedes, rol }) {
         </button>
       </div>
 
+      <div className="flex gap-2 mb-2 flex-wrap items-end">
+        <div>
+          <label className="text-[10px] font-semibold uppercase tracking-wide block mb-1" style={cSlate}>Creada desde</label>
+          <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)}
+            className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle} />
+        </div>
+        <div>
+          <label className="text-[10px] font-semibold uppercase tracking-wide block mb-1" style={cSlate}>Hasta</label>
+          <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)}
+            className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle} />
+        </div>
+        {(desde || hasta) && (
+          <button onClick={() => { setDesde(""); setHasta(""); }}
+            className="text-xs font-semibold px-3 py-2 rounded-md border" style={{ borderColor: COLORS.line, color: COLORS.slate }}>
+            Limpiar fechas
+          </button>
+        )}
+      </div>
+
       <div className="grid grid-cols-2 gap-3 mb-3">
         <Stat label="Tareas cerradas" value={filtrado.length} icon={<CheckCircle2 size={14} />} color={COLORS.verde}
-          sub={q.trim() || fSede !== "todas" ? `de ${todo.length} en total` : "Histórico completo"} />
+          sub={hayFiltro ? `de ${todo.length} en total` : "Histórico completo"} />
         <Stat label="Costo acumulado" value={money(costoTotal)} icon={<DollarSign size={14} />} color={COLORS.orange} sub="Materiales, bodega y servicios" />
       </div>
 
@@ -7223,7 +7333,11 @@ function VistaHistorico({ data, sedes, rol }) {
           <GrupoHistorico key={g.tipo} tipo={g.tipo} items={g.items} data={data} abiertoInicial={grupos.length === 1 || i === 0} />
         ))}
         {grupos.length === 0 && (
-          <Empty>{q.trim() ? `Sin resultados para “${q}”.` : "Todavía no hay tareas cerradas."}</Empty>
+          <Empty>
+            {q.trim() ? `Sin resultados para “${q}”.`
+              : (desde || hasta) ? "Sin tareas cerradas creadas en ese rango de fechas."
+              : "Todavía no hay tareas cerradas."}
+          </Empty>
         )}
       </div>
     </div>
@@ -8022,12 +8136,15 @@ function construirReporteHTML(items, data, meta) {
 
   const filas = items.map((a, i) => {
     const t = tiempoActividad(a);
+    const costo = costoActividad(a);
     return `<tr>
       <td class="c">${i + 1}</td>
       <td><b>${esc(a.codigo)}</b><br><span class="mut">${esc(tipoMeta(a.tipo).label)}</span></td>
       <td>${esc(sedeNombre(data.sedes, a.sedeId))}</td>
       <td>${esc(a.tarea)}<br><span class="mut">${esc(ubicacionTexto(data.sedes, a))}</span></td>
+      <td class="c">${esc(a.fechaProgramada || "—")}${a.fechaCompletada ? `<br><span class="mut">fin: ${esc(a.fechaCompletada)}</span>` : ""}</td>
       <td class="c">${esc(t.txt)}<br><span class="mut">${t.real ? "real" : "estimado"}</span></td>
+      <td class="r">${costo > 0 ? money(costo) : "—"}</td>
       <td>${a.tipo === "servicio" ? esc(a.proveedor || "—") : nom(a.tecnicoId)}</td>
       <td class="c">${esc(ESTADOS[a.estado]?.label || a.estado)}</td>
     </tr>`;
@@ -8151,7 +8268,7 @@ tbody tr:nth-child(even){background:#F7F6F3}
 <div class="resumen">
   <h2>1. Resumen de órdenes (${items.length})</h2>
   <table>
-    <thead><tr><th class="c">#</th><th>Orden</th><th>Sede</th><th>Descripción del trabajo</th><th class="c">Tiempo</th><th>Responsable</th><th class="c">Estado</th></tr></thead>
+    <thead><tr><th class="c">#</th><th>Orden</th><th>Sede</th><th>Descripción del trabajo</th><th class="c">Programada</th><th class="c">Tiempo</th><th class="r">Costo</th><th>Responsable</th><th class="c">Estado</th></tr></thead>
     <tbody>${filas || '<tr><td colspan="7" class="c">Sin órdenes seleccionadas</td></tr>'}</tbody>
   </table>
   ${totalCosto > 0 ? `<div class="tot"><span>Costo total del reporte</span><span>${money(totalCosto)}</span></div>` : ""}
@@ -8408,7 +8525,7 @@ function VistaReportes({ data, sedes, user }) {
                 <input type="checkbox" checked={todasMarcadas}
                   onChange={() => setSel(todasMarcadas ? [] : null)} />
               </th>
-              {["Orden", "Sede", "Descripción del trabajo", "Tiempo", "Responsable", "Estado"].map((h) => (
+              {["Orden", "Sede", "Descripción del trabajo", "Programada", "Tiempo", "Costo", "Responsable", "Estado"].map((h) => (
                 <th key={h} className="text-left text-[10px] font-semibold uppercase tracking-wide px-2.5 py-2 whitespace-nowrap" style={{ color: "white" }}>{h}</th>
               ))}
             </tr>
@@ -8417,6 +8534,7 @@ function VistaReportes({ data, sedes, user }) {
             {filtradas.map((a, i) => {
               const marcada = sel === null || sel.includes(a.id);
               const t = tiempoActividad(a);
+              const costo = a.tipo === "servicio" ? costoServicio(a) : costoAprobado(a) + costoConsumos(a);
               return (
                 <tr key={a.id} style={{ background: i % 2 ? COLORS.paper : "white", borderTop: `1px solid ${COLORS.line}`, opacity: marcada ? 1 : .45 }}>
                   <td className="px-2.5 py-2"><input type="checkbox" checked={marcada} onChange={() => alternar(a.id)} /></td>
@@ -8430,7 +8548,14 @@ function VistaReportes({ data, sedes, user }) {
                     <span className="block text-[10px]" style={cSlate}>{ubicacionTexto(data.sedes, a)}</span>
                   </td>
                   <td className="px-2.5 py-2 text-xs whitespace-nowrap" style={cSlate}>
+                    {a.fechaProgramada || "—"}
+                    {a.fechaCompletada && <span className="block text-[10px]" style={{ color: COLORS.verde }}>fin: {a.fechaCompletada}</span>}
+                  </td>
+                  <td className="px-2.5 py-2 text-xs whitespace-nowrap" style={cSlate}>
                     {t.txt}<span className="block text-[10px]">{t.real ? "real" : "estimado"}</span>
+                  </td>
+                  <td className="px-2.5 py-2 text-xs whitespace-nowrap font-semibold" style={costo > 0 ? cOrange : cSlate}>
+                    {costo > 0 ? money(costo) : "—"}
                   </td>
                   <td className="px-2.5 py-2 text-xs" style={cSlate}>
                     {a.tipo === "servicio" ? (a.proveedor || "—") : usuarioNombre(data.usuarios, a.tecnicoId)}
@@ -8445,7 +8570,7 @@ function VistaReportes({ data, sedes, user }) {
               );
             })}
             {filtradas.length === 0 && (
-              <tr><td colSpan={7} className="px-3 py-6 text-sm text-center" style={cSlate}>
+              <tr><td colSpan={9} className="px-3 py-6 text-sm text-center" style={cSlate}>
                 {q.trim() ? `Sin resultados para “${q}”.` : "No hay órdenes en este rango. Prueba otro alcance."}
               </td></tr>
             )}
