@@ -1150,17 +1150,26 @@ function useAcciones(data, persist, usuario) {
       };
       const stock = data.stock.map((x) => (x.id === art.id ? { ...x, cantidad: Math.max(0, x.cantidad - cantidad) } : x));
       const conConsumo = (a) => ({ ...a, consumos: [...(a.consumos || []), consumo] });
-      persist(item.tipo === "preventivo"
-        ? { ...data, stock, ordenes: data.ordenes.map((o) => (o.id === item.id ? conConsumo(o) : o)) }
-        : { ...data, stock, solicitudes: data.solicitudes.map((x) => (x.id === item.id ? conConsumo(x) : x)) });
+      // Los tres tipos pueden consumir bodega; cada uno vive en su colección
+      if (item.tipo === "preventivo") {
+        return persist({ ...data, stock, ordenes: data.ordenes.map((o) => (o.id === item.id ? conConsumo(o) : o)) });
+      }
+      if (item.tipo === "servicio") {
+        return persist({ ...data, stock, servicios: data.servicios.map((x) => (x.id === item.id ? conConsumo(x) : x)) });
+      }
+      return persist({ ...data, stock, solicitudes: data.solicitudes.map((x) => (x.id === item.id ? conConsumo(x) : x)) });
     },
     // Devolver a bodega lo cargado por error
     devolverStock: (item, consumo) => {
       const stock = data.stock.map((x) => (x.id === consumo.stockId ? { ...x, cantidad: x.cantidad + consumo.cantidad } : x));
       const sinConsumo = (a) => ({ ...a, consumos: (a.consumos || []).filter((c) => c.id !== consumo.id) });
-      persist(item.tipo === "preventivo"
-        ? { ...data, stock, ordenes: data.ordenes.map((o) => (o.id === item.id ? sinConsumo(o) : o)) }
-        : { ...data, stock, solicitudes: data.solicitudes.map((x) => (x.id === item.id ? sinConsumo(x) : x)) });
+      if (item.tipo === "preventivo") {
+        return persist({ ...data, stock, ordenes: data.ordenes.map((o) => (o.id === item.id ? sinConsumo(o) : o)) });
+      }
+      if (item.tipo === "servicio") {
+        return persist({ ...data, stock, servicios: data.servicios.map((x) => (x.id === item.id ? sinConsumo(x) : x)) });
+      }
+      return persist({ ...data, stock, solicitudes: data.solicitudes.map((x) => (x.id === item.id ? sinConsumo(x) : x)) });
     },
     /* Al cerrar una actividad con materiales ya aprobados, se descuenta bodega
        (el material nuevo también quedó de alta ahí desde que se agregó, con
@@ -4303,12 +4312,13 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
           )}
           <FotoUploader foto={item.foto} onChange={(foto) => acciones.updateActividad(item, { foto })}
             label="Evidencia del técnico" carpeta={esPrev ? "ordenes" : esServ ? "servicios" : "solicitudes"} />
-          {esPrev && (
-            <ConsumoStock item={item} stockSede={stockSede}
-              onRegistrar={registrarConsumo} onQuitar={quitarConsumo}
-              onAltaArticulo={(nombre, unidad, costo) => acciones.altaArticulo(item.sedeId, nombre, unidad, costo)}
-              readOnly={item.estado === "completada"} />
-          )}
+          {/* Consumo de bodega aplica a los tres tipos: cualquier actividad
+              puede gastar material que ya existe en la bodega de su sede.
+              Antes estaba limitado a preventivas, así que en correctivos y
+              servicios solo aparecía la opción de material nuevo. */}
+          <ConsumoStock item={item} stockSede={stockSede}
+            onRegistrar={registrarConsumo} onQuitar={quitarConsumo}
+            readOnly={item.estado === "completada"} />
 
           {esServ ? (
             <div className="rounded-md p-2.5 flex items-center justify-between gap-2" style={{ background: COLORS.cream }}>
@@ -4320,7 +4330,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
           ) : (
             <MaterialesPanel item={item} rol={rol} onUpdate={(patch) => acciones.updateActividad(item, patch)}
               puedeEnviar={ESTADOS_ABIERTOS.includes(estado)}
-              catalogo={stockSede} onAltaArticulo={(nombre, unidad) => acciones.altaArticulo(item.sedeId, nombre, unidad)} />
+              onAltaArticulo={(nombre, unidad) => acciones.altaArticulo(item.sedeId, nombre, unidad)} />
           )}
 
           <div className="flex items-center justify-between gap-2">
