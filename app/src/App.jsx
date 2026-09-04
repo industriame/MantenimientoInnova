@@ -6111,7 +6111,11 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
     return out;
   }, [data, mes]);
 
-  const actividadesDetalle = detalle ? actividadesDeSedeMes(data, detalle, mes).filter((a) => costoEstimado(a) > 0) : [];
+  // El detalle usa el mismo costo que la barra (aprobado + bodega); con
+  // costoEstimado quedaban fuera las órdenes que solo gastaron bodega.
+  const actividadesDetalle = detalle
+    ? actividadesDeSedeMes(data, detalle, mes).filter((a) => costoAprobado(a) + costoConsumos(a) > 0 || (MAT_COMPROMETIDOS.includes(a.materialesEstado) && costoEstimado(a) > 0))
+    : [];
 
   /* Acumulado del período: suma mes a mes desde el primer mes con actividad
      registrada hasta el mes elegido. No arranca en enero por defecto porque
@@ -6208,14 +6212,18 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
                 <PresupuestoBar p={p} />
                 {detalle === p.sedeId && (
                   <div className="mt-2 pl-2 border-l-2 space-y-1" style={{ borderColor: est.color }}>
-                    {actividadesDetalle.map((a) => (
-                      <div key={a.id} className="flex items-center justify-between text-[11px] gap-2">
-                        <span className="min-w-0 truncate" style={cChar}>{a.codigo} · {a.tarea || a.descripcion}</span>
-                        <span className="shrink-0 font-semibold" style={{ color: a.materialesEstado === "aprobado" ? COLORS.orange : COLORS.slate }}>
-                          {money(costoEstimado(a))}{a.materialesEstado !== "aprobado" ? " (sin aprobar)" : ""}
-                        </span>
-                      </div>
-                    ))}
+                    {actividadesDetalle.map((a) => {
+                      const real = costoAprobado(a) + costoConsumos(a);
+                      const pendiente = MAT_COMPROMETIDOS.includes(a.materialesEstado);
+                      return (
+                        <div key={a.id} className="flex items-center justify-between text-[11px] gap-2">
+                          <span className="min-w-0 truncate" style={cChar}>{a.codigo} · {a.tarea || a.descripcion}</span>
+                          <span className="shrink-0 font-semibold" style={{ color: pendiente ? COLORS.slate : COLORS.orange }}>
+                            {money(pendiente ? costoEstimado(a) : real)}{pendiente ? " (sin aprobar)" : ""}
+                          </span>
+                        </div>
+                      );
+                    })}
                     {actividadesDetalle.length === 0 && <p className="text-[11px]" style={cSlate}>Sin gastos registrados este mes.</p>}
                   </div>
                 )}
