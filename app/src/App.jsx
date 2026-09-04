@@ -691,12 +691,29 @@ function satisfaccion(data, sedeIds) {
 }
 
 /* Serie mensual del costo por estudiante. */
+/* Primer mes con actividad registrada: sirve para no mostrar meses vacíos
+   anteriores al arranque real del servicio (si empezó en agosto, no tiene
+   sentido graficar enero a julio en cero). Devuelve null si no hay nada. */
+function primerMesConDatos(data, sedeIds) {
+  const fechas = [];
+  const dentro = (x) => !sedeIds || sedeIds.includes(x.sedeId);
+  (data.ordenes || []).forEach((o) => { if (dentro(o)) fechas.push(o.fechaCompletada || o.fechaProgramada); });
+  (data.solicitudes || []).forEach((s) => { if (dentro(s)) fechas.push(s.fechaCompletada || s.fecha || s.fechaProgramada); });
+  (data.servicios || []).forEach((s) => { if (dentro(s)) fechas.push(s.fechaCompletada || s.fecha); });
+  const validas = fechas.filter(Boolean).sort();
+  return validas.length ? mesKey(validas[0]) : null;
+}
+
+/* La serie arranca en el primer mes con datos (no antes), y como máximo
+   "meses" atrás desde el mes elegido. */
 function serieCostoEstudiante(data, sedeIds, mesFinal, meses = 6) {
   const [y, m] = mesFinal.split("-").map(Number);
+  const inicio = primerMesConDatos(data, sedeIds);
   const out = [];
   for (let i = meses - 1; i >= 0; i--) {
     const d = new Date(y, m - 1 - i, 1);
     const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    if (inicio && k < inicio) continue;
     const kpi = indicadoresMes(data, sedeIds, k);
     out.push({
       mes: MESES[d.getMonth()].slice(0, 3),
@@ -3653,7 +3670,7 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
   const calificar = (id, patch) =>
     persist((data) => ({ ...data, solicitudes: data.solicitudes.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
 
-  const crearSolicitud = (ubic, form) => {
+  const crearSolicitud = async (ubic, form) => {
     const now = new Date();
     const n = data.solCounter || 1;
     const nueva = {
@@ -3668,9 +3685,16 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
       materiales: [], materialesEstado: "",
       calificacion: 0, comentarioCalif: "",
     };
-    persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
-    setMsg(`Solicitud ${nueva.codigo} enviada.`);
-    setTimeout(() => setMsg(""), 4000);
+    setMsg("Enviando…");
+    /* Se espera la confirmación real de la base antes de decir "enviada".
+       Antes el mensaje salía de inmediato: si el guardado fallaba (señal
+       intermitente en campo), el solicitante creía que había quedado
+       registrada y la solicitud desaparecía al siguiente refresco. */
+    const ok = await persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    setMsg(ok
+      ? `Solicitud ${nueva.codigo} enviada.`
+      : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
+    setTimeout(() => setMsg(""), ok ? 4000 : 8000);
   };
 
   const tabs = [
@@ -4491,7 +4515,7 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
     setTimeout(() => setMsg(""), 4000);
   };
 
-  const crearHallazgo = (form) => {
+  const crearHallazgo = async (form) => {
     const now = new Date();
     const n = data.solCounter || 1;
     const nueva = {
@@ -4504,9 +4528,12 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
       materiales: [], materialesEstado: "", consumos: [], reprogramaciones: [],
       calificacion: 0, comentarioCalif: "",
     };
-    persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
-    setMsg(`Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`);
-    setTimeout(() => setMsg(""), 4000);
+    setMsg("Enviando…");
+    const ok = await persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    setMsg(ok
+      ? `Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`
+      : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
+    setTimeout(() => setMsg(""), ok ? 4000 : 8000);
   };
 
   return (
@@ -5948,7 +5975,7 @@ function AdminCorrectivos({ data, persist, user }) {
   /* Alta directa de un correctivo: útil cuando la novedad llega por teléfono,
      por radio o la detecta el propio supervisor en recorrido. Nace pendiente,
      igual que una solicitud del usuario, para que pase por Programación. */
-  const crearCorrectivo = (form) => {
+  const crearCorrectivo = async (form) => {
     const now = new Date();
     const n = data.solCounter || 1;
     const nueva = {
@@ -5962,9 +5989,12 @@ function AdminCorrectivos({ data, persist, user }) {
       materiales: [], materialesEstado: "",
       consumos: [], reprogramaciones: [], calificacion: 0, comentarioCalif: "",
     };
-    persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
-    setMsg(`Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`);
-    setTimeout(() => setMsg(""), 4000);
+    setMsg("Enviando…");
+    const ok = await persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    setMsg(ok
+      ? `Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`
+      : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
+    setTimeout(() => setMsg(""), ok ? 4000 : 8000);
   };
 
   /* Mismas etapas que preventivos y servicios, para que las tres pestañas se
@@ -6083,13 +6113,20 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
 
   const actividadesDetalle = detalle ? actividadesDeSedeMes(data, detalle, mes).filter((a) => costoEstimado(a) > 0) : [];
 
-  /* Acumulado del año: suma mes a mes desde enero hasta el mes elegido, para
-     ver el consumo total del período y no solo la foto de un mes suelto. */
+  /* Acumulado del período: suma mes a mes desde el primer mes con actividad
+     registrada hasta el mes elegido. No arranca en enero por defecto porque
+     si el servicio empezó en agosto, los meses previos solo sumarían ceros y
+     distorsionarían el porcentaje de presupuesto consumido. */
   const acumulado = useMemo(() => {
     const [y, m] = mes.split("-").map(Number);
+    const inicio = primerMesConDatos(data, null);
+    const [yIni, mIni] = inicio ? inicio.split("-").map(Number) : [y, 1];
+    // Si el mes elegido es anterior al arranque, solo se muestra ese mes
+    const desdeMes = (yIni === y) ? Math.min(mIni, m) : 1;
+
     let presupuesto = 0, gastado = 0, comprometido = 0, servicios = 0;
     const serie = [];
-    for (let i = 1; i <= m; i++) {
+    for (let i = desdeMes; i <= m; i++) {
       const k = `${y}-${String(i).padStart(2, "0")}`;
       const gm = presupuestoGlobalMes(data, k);
       presupuesto += gm.presupuesto;
@@ -6099,7 +6136,8 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
       serie.push({ mes: MESES[i - 1].slice(0, 3), acumulado: Number(gastado.toFixed(2)) });
     }
     return {
-      anio: y, meses: m, presupuesto, gastado, comprometido, servicios, serie,
+      anio: y, desdeMes, meses: m - desdeMes + 1,
+      presupuesto, gastado, comprometido, servicios, serie,
       disponible: presupuesto - gastado - comprometido,
       pct: presupuesto > 0 ? (gastado / presupuesto) * 100 : 0,
     };
@@ -6125,7 +6163,7 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
       <div className="border rounded-md p-3" style={{ ...cardStyle, borderLeft: `3px solid ${COLORS.charcoal}` }}>
         <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
           <p className="text-xs font-semibold uppercase tracking-wide" style={cSlate}>
-            Acumulado {acumulado.anio} · enero a {mesLabel(mes).split(" ")[0].toLowerCase()}
+            Acumulado {acumulado.anio} · {MESES[acumulado.desdeMes - 1].toLowerCase()} a {mesLabel(mes).split(" ")[0].toLowerCase()}
           </p>
           <Chip color={acumulado.pct >= 100 ? COLORS.rojo : acumulado.pct >= 85 ? COLORS.ambar : COLORS.verde}>
             {acumulado.pct.toFixed(0)}% del presupuesto
@@ -8121,7 +8159,7 @@ function construirReporteMonitoreoHTML(titulo, breadcrumb, variablesConDelta, fe
     return valor ?? "—";
   };
 
-  const filas = Object.entries(variablesConDelta).map(([texto, v]) => {
+  const filas = Object.values(variablesConDelta).map((v) => {
     const porFecha = {};
     v.lecturas.forEach((l) => { porFecha[l.fecha] = l; });
     const celdas = fechas.map((f) => {
@@ -8135,7 +8173,7 @@ function construirReporteMonitoreoHTML(titulo, breadcrumb, variablesConDelta, fe
       }
       return `<td class="c">${esc(etiqueta(v.tipo, l.valor))}</td>`;
     }).join("");
-    return `<tr><td><b>${esc(texto)}</b>${v.unidad ? ` <span class="mut">(${esc(v.unidad)})</span>` : ""}</td>${celdas}</tr>`;
+    return `<tr><td class="mut">${esc(v.plan || "—")}</td><td><b>${esc(v.texto)}</b>${v.unidad ? ` <span class="mut">(${esc(v.unidad)})</span>` : ""}</td>${celdas}</tr>`;
   }).join("");
 
   const encabezadoFechas = fechas.map((f) => `<th class="c">${esc(f)}</th>`).join("");
@@ -8165,8 +8203,8 @@ tbody tr:nth-child(even){background:#F7F6F3}
   <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div>
 </div>
 <table>
-  <thead><tr><th>Variable</th>${encabezadoFechas}</tr></thead>
-  <tbody>${filas || `<tr><td colspan="${fechas.length + 1}" class="c">Sin lecturas</td></tr>`}</tbody>
+  <thead><tr><th>Plan</th><th>Variable</th>${encabezadoFechas}</tr></thead>
+  <tbody>${filas || `<tr><td colspan="${fechas.length + 2}" class="c">Sin lecturas</td></tr>`}</tbody>
 </table>
 <div class="pie"><span>IndustriaMe S.A.S. · Reporte de monitoreo</span><span>Generado el ${esc(emitido)}</span></div>
 </body></html>`;
@@ -8785,10 +8823,10 @@ function FilaUsuario({ user, data, onEdit, onDelete }) {
    ========================================================================= */
 function VistaMonitoreo({ data }) {
   const grupos = useMemo(() => {
-    const planIds = new Set((data.planes || []).filter((p) => p.monitoreo).map((p) => p.id));
+    const planes = new Map((data.planes || []).filter((p) => p.monitoreo).map((p) => [p.id, p]));
     const mapa = {};
     (data.ordenes || []).forEach((o) => {
-      if (!o.planId || !planIds.has(o.planId) || !o.sedeId) return;
+      if (!o.planId || !planes.has(o.planId) || !o.sedeId) return;
       const checklist = o.checklist || [];
       if (!checklist.length) return;
       const key = `${o.sedeId}|${o.faseId || ""}|${o.activoId || ""}`;
@@ -8798,7 +8836,14 @@ function VistaMonitoreo({ data }) {
       });
       checklist.forEach((it) => {
         if (it.tipo === "texto") return;
-        const v = g.variables[it.texto] || (g.variables[it.texto] = { tipo: it.tipo, unidad: it.unidad, lecturas: [] });
+        /* La variable se identifica por plan + nombre: dos planes distintos
+           pueden tener un paso con el mismo texto (ej. "Horas de uso") y no
+           deben mezclarse en la misma serie. */
+        const clave = `${o.planId}|${it.texto}`;
+        const v = g.variables[clave] || (g.variables[clave] = {
+          tipo: it.tipo, unidad: it.unidad, texto: it.texto,
+          plan: planes.get(o.planId)?.tarea || "", lecturas: [],
+        });
         v.lecturas.push({ fecha, valor: it.tipo === "numero" ? Number(it.valor) || 0 : it.valor });
       });
     });
@@ -8996,6 +9041,10 @@ function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
               <thead>
                 <tr>
                   <th className="sticky left-0 z-10 bg-white text-left px-2 py-1.5 text-xs font-semibold"
+                    style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, minWidth: 120, ...cChar }}>
+                    Plan
+                  </th>
+                  <th className="text-left px-2 py-1.5 text-xs font-semibold bg-white"
                     style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, minWidth: 130, ...cChar }}>
                     Variable
                   </th>
@@ -9009,14 +9058,18 @@ function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
                 </tr>
               </thead>
               <tbody>
-                {Object.entries(variablesConDelta).map(([texto, v]) => {
+                {Object.entries(variablesConDelta).map(([clave, v]) => {
                   const porFecha = {};
                   v.lecturas.forEach((l) => { porFecha[l.fecha] = l; });
                   return (
-                    <tr key={texto}>
-                      <td className="sticky left-0 z-10 bg-white px-2 py-1.5 text-xs font-semibold"
+                    <tr key={clave}>
+                      <td className="sticky left-0 z-10 bg-white px-2 py-1.5 text-xs"
                         style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, ...cSlate }}>
-                        {texto}{v.unidad ? ` (${v.unidad})` : ""}
+                        {v.plan || "—"}
+                      </td>
+                      <td className="px-2 py-1.5 text-xs font-semibold bg-white"
+                        style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, ...cSlate }}>
+                        {v.texto}{v.unidad ? ` (${v.unidad})` : ""}
                       </td>
                       {fechasVisibles.map((f) => {
                         const l = porFecha[f];
