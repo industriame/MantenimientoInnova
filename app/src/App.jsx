@@ -4022,12 +4022,21 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
     }
     setConfirmarCierre(false);
     setGuardado("guardando");
+    /* El técnico agenda sus pendientes desde Mis actividades: al guardar con
+       fecha, la actividad pasa sola a Programada. El supervisor hace lo mismo
+       dentro del modo corrección, que guarda la fecha por su propia vía. */
+    const agendaTecnico = !corrige && !permitirReasignar && !esServ && item.estado === "pendiente";
+
     /* Red de seguridad: una actividad sin fecha programada no puede quedar
        en Programada / En proceso / En espera — sería un estado imposible que
        la deja invisible (ni en el calendario ni en Sin Programar). */
-    const fProgFinal = corrige ? fProg : (esServ ? item.fecha : item.fechaProgramada);
-    const estadoSeguro = (!fProgFinal && estado !== "completada") ? "pendiente" : estado;
+    const fProgFinal = (corrige || agendaTecnico) ? fProg : (esServ ? item.fecha : item.fechaProgramada);
+    const estadoSeguro = !fProgFinal && estado !== "completada" ? "pendiente"
+      : (agendaTecnico && fProg && estado === "pendiente") ? "programada"
+      : estado;
+
     const patch = { estado: estadoSeguro, observaciones };
+    if (agendaTecnico) patch.fechaProgramada = fProg;
     if (!esPrev) patch.resolucion = resolucion;
     if (permitirReasignar) patch.tecnicoId = tecnicoId;
     if (puedeEditarTiempo) {
@@ -4121,6 +4130,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
     dif(observaciones, item.observaciones) ||
     (!esPrev && dif(resolucion, item.resolucion)) ||
     (permitirReasignar && dif(tecnicoId, item.tecnicoId)) ||
+    (!corrige && !permitirReasignar && !esServ && item.estado === "pendiente" && dif(fProg, item.fechaProgramada)) ||
     (puedeEditarTiempo && (dif(durValor, item.duracionValor) || dif(durUnidad, item.duracionUnidad || "minutos"))) ||
     (corrige && (
       dif(txt, esServ ? item.trabajo : esPrev ? item.tarea : item.descripcion) ||
@@ -4247,8 +4257,9 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             </>
           )}
 
-          {/* El responsable solo se cambia desde aquí (Programación, rol admin) */}
-          {permitirReasignar && !esServ && (
+          {/* El responsable solo se reasigna desde Programación (rol admin);
+              el técnico lo ve de solo lectura para saber a quién le toca. */}
+          {!esServ && (permitirReasignar ? (
             <Field label="Responsable"
               hint={`Técnicos con ${sedeNombre(data.sedes, item.sedeId)} a cargo. Reasignar aquí actualiza a quién le aparece en Mis actividades.`}>
               <select value={tecnicoId} onChange={(e) => setTecnicoId(e.target.value)}
@@ -4258,6 +4269,20 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                   <option key={t.id} value={t.id}>{t.nombre}</option>
                 ))}
               </select>
+            </Field>
+          ) : (
+            <Field label="Responsable">
+              <ReadOnly>{usuarioNombre(data.usuarios, item.tecnicoId)}</ReadOnly>
+            </Field>
+          ))}
+
+          {/* El técnico puede ponerle fecha a sus pendientes desde aquí; al
+              guardar pasa a Programada. Es el mismo efecto que activarla en
+              Programación, sin tener que salir de la actividad. */}
+          {!permitirReasignar && !esServ && item.estado === "pendiente" && (
+            <Field label="Fecha programada" hint="Al guardar con fecha, la actividad pasa a Programada.">
+              <input type="date" value={fProg} onChange={(e) => setFProg(e.target.value)}
+                className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle} />
             </Field>
           )}
 
