@@ -1121,37 +1121,63 @@ function useSystemData() {
   }, []);
 
   // updater: objeto completo O función (prev) => next  — preferir función
+  /* Todo guardado sale de inmediato: si el usuario presionó guardar, el envío
+     no debe quedar esperando en un temporizador — en esa ventana puede cerrar
+     la pantalla o perder señal y el cambio se pierde en silencio. Las
+     escrituras se encolan (writeChainRef) para que dos guardados seguidos no
+     se pisen entre sí. */
   const persist = useCallback(
     (nextOrFn) => {
       const prev = dataRef.current;
       if (!prev) return Promise.resolve(false);
-      const draft =
-        typeof nextOrFn === "function" ? nextOrFn(prev) : nextOrFn;
-      applyLocal(draft);
+      applyLocal(typeof nextOrFn === "function" ? nextOrFn(prev) : nextOrFn);
       escribiendoRef.current = true;
       ultimoEscritoRef.current = Date.now();
-
-      return new Promise((resolve) => {
-        flushWaitersRef.current.push(resolve);
-        clearTimeout(flushTimerRef.current);
-        flushTimerRef.current = setTimeout(() => {
-          const waiters = flushWaitersRef.current;
-          flushWaitersRef.current = [];
-          writeChainRef.current = writeChainRef.current
-            .then(async () => {
-              const ok = await flushToDb();
-              waiters.forEach((w) => w(ok));
-            })
-            .catch(() => {
-              waiters.forEach((w) => w(false));
-            });
-        }, 350);
-      });
+      clearTimeout(flushTimerRef.current);
+      const pendientes = flushWaitersRef.current;
+      flushWaitersRef.current = [];
+      const p = writeChainRef.current
+        .then(async () => {
+          const ok = await flushToDb();
+          pendientes.forEach((w) => w(ok));
+          return ok;
+        })
+        .catch(() => {
+          pendientes.forEach((w) => w(false));
+          return false;
+        });
+      writeChainRef.current = p;
+      return p;
     },
     [flushToDb],
   );
 
-  return { data, persist, loading, ultimaSync, syncError };
+  // persistYa se mantiene como alias: ahora persist ya es inmediato
+  const persistYa = persist;
+
+
+  /* Si el usuario cambia de pestaña, bloquea el celular o cierra la app con
+     un guardado aún en espera, se envía de inmediato en vez de perderlo. */
+  useEffect(() => {
+    const flushYa = () => {
+      if (!flushWaitersRef.current.length) return;
+      clearTimeout(flushTimerRef.current);
+      const waiters = flushWaitersRef.current;
+      flushWaitersRef.current = [];
+      writeChainRef.current = writeChainRef.current
+        .then(async () => { const ok = await flushToDb(); waiters.forEach((w) => w(ok)); })
+        .catch(() => { waiters.forEach((w) => w(false)); });
+    };
+    const alOcultar = () => { if (document.hidden) flushYa(); };
+    document.addEventListener("visibilitychange", alOcultar);
+    window.addEventListener("pagehide", flushYa);
+    return () => {
+      document.removeEventListener("visibilitychange", alOcultar);
+      window.removeEventListener("pagehide", flushYa);
+    };
+  }, [flushToDb]);
+
+  return { data, persist, persistYa, loading, ultimaSync, syncError };
 }
 
 // Acciones de dominio agrupadas: un solo lugar donde se muta el estado
@@ -3291,6 +3317,7 @@ function FormReportarNovedad({
   const [criticidad, setCriticidad] = useState("");
   const [foto, setFoto] = useState("");
   const [solicitanteId, setSolicitanteId] = useState(user.id);
+  const [enviando, setEnviando] = useState(false);
 
   const sede = sedes.find((s) => s.id === sedeId);
   const fase = sede?.fases.find((f) => f.id === faseId);
@@ -3390,11 +3417,22 @@ function FormReportarNovedad({
 
       <FotoUploader foto={foto} onChange={setFoto} label="Foto de la novedad (opcional)" carpeta="solicitudes" />
 
-      <button disabled={!valido}
-        onClick={() => { onSubmit({ sedeId, faseId, activoId, descripcion, criticidad, foto, solicitanteId }); onClose(); }}
+      {/* Se espera la confirmación de guardado antes de cerrar: antes el modal
+          se cerraba de inmediato y, si el envío fallaba, la novedad se perdía
+          sin que el usuario se enterara. */}
+      <button disabled={!valido || enviando}
+        onClick={async () => {
+          setEnviando(true);
+          try {
+            await onSubmit({ sedeId, faseId, activoId, descripcion, criticidad, foto, solicitanteId });
+            onClose();
+          } finally {
+            setEnviando(false);
+          }
+        }}
         className="w-full py-2.5 rounded-md font-semibold text-sm text-white flex items-center justify-center gap-2 disabled:opacity-40"
         style={{ background: COLORS.orange }}>
-        <Send size={14} /> Reportar novedad
+        <Send size={14} /> {enviando ? "Enviando…" : "Reportar novedad"}
       </button>
     </div>
   );
@@ -3639,7 +3677,7 @@ function ModalReportarNovedad({ data, sedes, user, elegirSolicitante, onSubmit, 
   );
 }
 
-function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
+function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync }) {
   const sede = data.sedes.find((s) => s.id === user.sedeIds[0]);
   const misSedes = sedesVisibles(data, user);
   const misSedeIds = misSedes.map((s) => s.id);
@@ -3709,7 +3747,7 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
        Antes el mensaje salía de inmediato: si el guardado fallaba (señal
        intermitente en campo), el solicitante creía que había quedado
        registrada y la solicitud desaparecía al siguiente refresco. */
-    const ok = await persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    const ok = await persistYa((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
     setMsg(ok
       ? `Solicitud ${nueva.codigo} enviada.`
       : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
@@ -4553,7 +4591,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
 }
 
 /* Hallazgo de inspección: el técnico levanta un correctivo en sus sedes. */
-function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
+function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) {
   const acciones = useAcciones(data, persist, user);
   const [tab, setTab] = useState("dashboard");
   const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
@@ -4637,7 +4675,7 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
       calificacion: 0, comentarioCalif: "",
     };
     setMsg("Enviando…");
-    const ok = await persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    const ok = await persistYa((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
     setMsg(ok
       ? `Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`
       : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
@@ -6101,7 +6139,7 @@ function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
   );
 }
 
-function AdminCorrectivos({ data, persist, user }) {
+function AdminCorrectivos({ data, persist, persistYa, user }) {
   const acciones = useAcciones(data, persist, user);
   const [fSede, setFSede] = useState("todas");
   const [nuevo, setNuevo] = useState(false);
@@ -6128,7 +6166,7 @@ function AdminCorrectivos({ data, persist, user }) {
       consumos: [], reprogramaciones: [], calificacion: 0, comentarioCalif: "",
     };
     setMsg("Enviando…");
-    const ok = await persist((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    const ok = await persistYa((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
     setMsg(ok
       ? `Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`
       : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
@@ -6962,7 +7000,7 @@ function TarjetaServicioCliente({ srv, data, onDecidir }) {
 }
 
 /* Agrupa los tres tipos de actividad en un solo apartado. */
-function AdminActividades({ data, persist, user }) {
+function AdminActividades({ data, persist, persistYa, user }) {
   const [sub, setSub] = useState("preventivos");
   const hoy = fmtDate(new Date());
 
@@ -6998,7 +7036,7 @@ function AdminActividades({ data, persist, user }) {
       </div>
 
       {sub === "preventivos" && <AdminPreventivos data={data} persist={persist} user={user} />}
-      {sub === "correctivos" && <AdminCorrectivos data={data} persist={persist} user={user} />}
+      {sub === "correctivos" && <AdminCorrectivos data={data} persist={persist} persistYa={persistYa} user={user} />}
       {sub === "servicios" && <AdminServicios data={data} persist={persist} user={user} />}
       {sub === "historico" && <VistaHistorico data={data} sedes={data.sedes} rol="admin" />}
     </div>
@@ -9263,7 +9301,7 @@ function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
    17. VISTA ADMIN (control total)  y  VISTA SUPERVISOR CLIENTE (solo aprueba)
    ========================================================================= */
 
-function VistaAdmin({ data, persist, user, onLogout, ultimaSync }) {
+function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
   const [tab, setTab] = useState("dashboard");
   const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
 
@@ -9291,7 +9329,7 @@ function VistaAdmin({ data, persist, user, onLogout, ultimaSync }) {
       {tab === "presupuesto" && <VistaPresupuesto data={data} mes={mes} onMesChange={setMes} />}
       {tab === "sedes" && <AdminSedes data={data} persist={persist} />}
       {tab === "programacion" && <AdminProgramacion data={data} persist={persist} user={user} />}
-      {tab === "actividades" && <AdminActividades data={data} persist={persist} user={user} />}
+      {tab === "actividades" && <AdminActividades data={data} persist={persist} persistYa={persistYa} user={user} />}
       {tab === "monitoreo" && <VistaMonitoreo data={data} />}
       {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={data.sedes} editable />}
       {tab === "reportes" && <VistaReportes data={data} sedes={data.sedes} user={user} />}
@@ -9416,15 +9454,15 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
    ========================================================================= */
 
 export default function App() {
-  const { data, persist, loading, ultimaSync, syncError } = useSystemData();
+  const { data, persist, persistYa, loading, ultimaSync, syncError } = useSystemData();
   const [user, setUser] = useState(null);
 
   const vista = () => {
     switch (user.rol) {
-      case "solicitante": return <VistaSolicitante data={data} persist={persist} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
-      case "tecnico": return <VistaTecnico data={data} persist={persist} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
+      case "solicitante": return <VistaSolicitante data={data} persist={persist} persistYa={persistYa} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
+      case "tecnico": return <VistaTecnico data={data} persist={persist} persistYa={persistYa} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
       case "cliente": return <VistaCliente data={data} persist={persist} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
-      default: return <VistaAdmin data={data} persist={persist} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
+      default: return <VistaAdmin data={data} persist={persist} persistYa={persistYa} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
     }
   };
 
