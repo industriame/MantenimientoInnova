@@ -775,6 +775,20 @@ function getPendientes(data) {
         .filter((o) => o.estado === "completada")
         .sort((a, b) => (a.fechaCompletada < b.fechaCompletada ? 1 : -1))[0];
 
+      /* Si ya se ejecutó y su ciclo todavía no vence, no toca aún: aparecerá
+         como pendiente recién cuando se acerque la próxima fecha. Antes, al
+         completar un mensual volvía a la lista de "sin programar" el mismo
+         día, aunque le tocara el mes siguiente. */
+      if (ultima?.fechaCompletada) {
+        const ciclo = FRECUENCIA_DIAS[plan.frecuencia] || 90;
+        const proxima = new Date(`${ultima.fechaCompletada}T00:00:00`);
+        proxima.setDate(proxima.getDate() + ciclo);
+        // Se anticipa medio mes para poder programarla antes de que venza
+        const margen = new Date();
+        margen.setDate(margen.getDate() + 15);
+        if (proxima > margen) return;
+      }
+
       items.push({
         key: `${plan.id}|${ap.sedeId}|${ap.faseId}|${ap.activoId}`,
         tipo: "preventivo",
@@ -818,15 +832,16 @@ function getPendientes(data) {
   return items;
 }
 
-// Actividades asignadas a un técnico (preventivas + correctivas, ya programadas)
+// Actividades asignadas a un técnico (preventivas + correctivas, incluidas
+// las que aún están sin programar: desde que se reportan ya traen técnico)
 function actividadesDeTecnico(data, tecnicoId) {
   const pre = (data.ordenes || [])
     .filter((o) => o.tecnicoId === tecnicoId)
     .map((o) => ({ ...o, tipo: "preventivo" }));
   const cor = (data.solicitudes || [])
-    .filter((s) => s.tecnicoId === tecnicoId && s.estado !== "pendiente")
+    .filter((s) => s.tecnicoId === tecnicoId)
     .map((s) => ({ ...s, tipo: "correctivo", tarea: s.descripcion }));
-  const rank = { en_proceso: 0, programada: 1, completada: 2 };
+  const rank = { en_proceso: 0, programada: 1, pendiente: 2, completada: 3 };
   return [...pre, ...cor].sort(
     (a, b) => (rank[a.estado] ?? 9) - (rank[b.estado] ?? 9) || (a.fechaProgramada || "").localeCompare(b.fechaProgramada || "")
   );
@@ -1194,8 +1209,8 @@ function useAcciones(data, persist, usuario) {
        materialesLiquidados evita que un segundo guardado vuelva a descontar. */
     liquidarMateriales: (item) => {
       const materiales = item.materiales || [];
-      if (item.materialesLiquidados || item.materialesEstado !== "aprobado" || materiales.length === 0) return;
-      persist((data) => {
+      if (item.materialesLiquidados || item.materialesEstado !== "aprobado" || materiales.length === 0) return Promise.resolve(true);
+      return persist((data) => {
         let stock = data.stock;
         const nuevosConsumos = materiales.map((m) => {
           if (m.stockId) {
@@ -3680,7 +3695,11 @@ function VistaSolicitante({ data, persist, user, onLogout, ultimaSync }) {
       descripcion: form.descripcion, criticidad: form.criticidad || "",
       solicitanteId: form.solicitanteId || user.id, fecha: fmtDate(now), hora: fmtHora(now),
       estado: "pendiente",
-      tecnicoId: "", fechaProgramada: "", fechaCompletada: "",
+      /* Se asigna de una vez el técnico de la sede para que la vea en "Mis
+         actividades" desde que se reporta. Sigue sin fecha, así que
+         permanece en "Sin Programar" hasta que se le agende. */
+      tecnicoId: tecnicosDeSede(data.usuarios, sede.id)[0]?.id || "",
+      fechaProgramada: "", fechaCompletada: "",
       observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
       materiales: [], materialesEstado: "",
       calificacion: 0, comentarioCalif: "",
@@ -3993,7 +4012,15 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
     setPresuAp(item.presupuestoAprobado ?? ""); setCalif(item.calificacion || 0);
   }, [item, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const guardar = () => {
+  const [confirmarCierre, setConfirmarCierre] = useState(false);
+
+  const guardar = async () => {
+    // Marcar como completada es irreversible en la práctica: se pide confirmar
+    if (estado === "completada" && item.estado !== "completada" && !confirmarCierre) {
+      setConfirmarCierre(true);
+      return;
+    }
+    setConfirmarCierre(false);
     setGuardado("guardando");
     const patch = { estado, observaciones };
     if (!esPrev) patch.resolucion = resolucion;
@@ -4058,11 +4085,14 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
     }
     /* El supervisor corrige registros de captura, así que sus cambios de datos
        no se anotan en el historial. Los movimientos del técnico sí. */
-    acciones.updateActividad(item, patch, { sinRegistro: corrige });
+    /* Los dos guardados deben ir en orden: si se disparan a la vez, ambos
+       parten del mismo "item" viejo y el segundo pisa al primero — por eso el
+       estado "completada" no quedaba guardado al primer intento. */
+    await acciones.updateActividad(item, patch, { sinRegistro: corrige });
     // Materiales aprobados: se descuentan de bodega y quedan en el histórico
     // de consumo justo al cerrar (liquidarMateriales no hace nada si no aplica).
     if (estado === "completada") {
-      acciones.liquidarMateriales(item);
+      await acciones.liquidarMateriales({ ...item, ...patch });
     }
     setGuardado("ok");
     setTimeout(() => setGuardado(null), 2500);
@@ -4445,6 +4475,30 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
           </div>
         </div>
       )}
+
+      {confirmarCierre && (
+        <Modal title="¿Marcar como completada?" onClose={() => setConfirmarCierre(false)}>
+          <div className="space-y-3">
+            <p className="text-sm" style={cChar}>
+              <strong>{item.codigo}</strong> · {item.tarea}
+            </p>
+            <p className="text-xs" style={cSlate}>
+              Se registrará la fecha y hora de cierre, y los materiales aprobados se descontarán de bodega.
+              La actividad pasará al histórico.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmarCierre(false)}
+                className="flex-1 text-xs font-semibold py-2.5 rounded-md border" style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+                Cancelar
+              </button>
+              <button onClick={guardar}
+                className="flex-1 text-xs font-semibold py-2.5 rounded-md text-white" style={{ background: COLORS.verde }}>
+                Sí, completar
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -4523,7 +4577,10 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
       sedeId: form.sedeId, faseId: form.faseId, activoId: form.activoId,
       descripcion: form.descripcion, criticidad: form.criticidad || "",
       solicitanteId: form.solicitanteId || user.id, fecha: fmtDate(now), hora: fmtHora(now),
-      estado: "pendiente", tecnicoId: "", fechaProgramada: "", fechaCompletada: "",
+      // El técnico de la sede queda asignado desde el reporte; sin fecha aún
+      estado: "pendiente",
+      tecnicoId: tecnicosDeSede(data.usuarios, form.sedeId)[0]?.id || "",
+      fechaProgramada: "", fechaCompletada: "",
       observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
       materiales: [], materialesEstado: "", consumos: [], reprogramaciones: [],
       calificacion: 0, comentarioCalif: "",
@@ -5836,6 +5893,9 @@ function TecnicoCorrectivos({ data, acciones, solicitudes }) {
   const rechazadas = solicitudes.filter((s) => s.materialesEstado === "rechazado");
   const idsEnFlujoCostos = new Set([...enCosteo, ...enAprobacion, ...rechazadas].map((s) => s.id));
 
+  // Reportadas en sus sedes, aún sin fecha asignada
+  const sinProgramar = [...solicitudes].filter((s) => s.estado === "pendiente")
+    .sort((a, b) => (CRITICIDAD[b.criticidad]?.nivel || 0) - (CRITICIDAD[a.criticidad]?.nivel || 0));
   const programadas = [...solicitudes].filter((s) => s.estado === "programada")
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
   const enEjecucion = [...solicitudes].filter((s) => ["en_proceso", "espera"].includes(s.estado) && !idsEnFlujoCostos.has(s.id))
@@ -5847,6 +5907,11 @@ function TecnicoCorrectivos({ data, acciones, solicitudes }) {
 
   return (
     <div className="space-y-3">
+      <SeccionPlegable titulo="Sin Programar" count={sinProgramar.length} color={COLORS.slate} defaultOpen
+        nota="Reportadas en tus sedes, aún sin fecha. Se programan desde Programación.">
+        {sinProgramar.map(tarjeta)}
+        {sinProgramar.length === 0 && <Empty>Nada esperando programación.</Empty>}
+      </SeccionPlegable>
       <SeccionPlegable titulo="Programadas" count={programadas.length} color={COLORS.ambar} defaultOpen>
         {programadas.map(tarjeta)}
         {programadas.length === 0 && <Empty>Sin correctivos programados.</Empty>}
@@ -5931,10 +5996,15 @@ function TecnicoServicios({ data, servicios }) {
 function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
   const acciones = useAcciones(data, persist, user);
   const [sub, setSub] = useState("preventivos");
+  const [fSede, setFSede] = useState("todas");
 
-  const misOrdenes = data.ordenes.filter((o) => o.tecnicoId === user.id);
-  const misSolicitudes = data.solicitudes.filter((s) => s.tecnicoId === user.id);
-  const misServicios = (data.servicios || []).filter((s) => misSedeIds.includes(s.sedeId));
+  // Sedes asignadas al técnico, para poder acotar la vista a una sola
+  const misSedes = (data.sedes || []).filter((s) => misSedeIds.includes(s.id));
+  const enSede = (x) => fSede === "todas" || x.sedeId === fSede;
+
+  const misOrdenes = data.ordenes.filter((o) => o.tecnicoId === user.id && enSede(o));
+  const misSolicitudes = data.solicitudes.filter((s) => s.tecnicoId === user.id && enSede(s));
+  const misServicios = (data.servicios || []).filter((s) => misSedeIds.includes(s.sedeId) && enSede(s));
 
   const subs = [
     { id: "preventivos", label: "Preventivos", icon: <ClipboardList size={14} />, n: misOrdenes.filter((o) => o.estado !== "completada").length },
@@ -5958,6 +6028,14 @@ function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
           </button>
         ))}
       </div>
+
+      {misSedes.length > 1 && (
+        <select value={fSede} onChange={(e) => setFSede(e.target.value)}
+          className="w-full border rounded-md px-2 py-2 text-sm bg-white mb-3" style={inputStyle}>
+          <option value="todas">Todas mis sedes</option>
+          {misSedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+        </select>
+      )}
 
       {sub === "preventivos" && <TecnicoPreventivos data={data} acciones={acciones} ordenes={misOrdenes} />}
       {sub === "correctivos" && <TecnicoCorrectivos data={data} acciones={acciones} solicitudes={misSolicitudes} />}
@@ -5984,7 +6062,10 @@ function AdminCorrectivos({ data, persist, user }) {
       descripcion: form.descripcion, criticidad: form.criticidad || "",
       solicitanteId: form.solicitanteId || user.id,
       fecha: fmtDate(now), hora: fmtHora(now),
-      estado: "pendiente", tecnicoId: "", fechaProgramada: "", fechaCompletada: "",
+      // El técnico de la sede queda asignado desde el reporte; sin fecha aún
+      estado: "pendiente",
+      tecnicoId: tecnicosDeSede(data.usuarios, form.sedeId)[0]?.id || "",
+      fechaProgramada: "", fechaCompletada: "",
       observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
       materiales: [], materialesEstado: "",
       consumos: [], reprogramaciones: [], calificacion: 0, comentarioCalif: "",
