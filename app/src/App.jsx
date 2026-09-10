@@ -66,7 +66,7 @@ const bLine = { borderColor: COLORS.line };
 const cardStyle = { borderColor: COLORS.line, background: "white" };
 
 const ESTADOS = {
-  pendiente: { label: "Pendiente", color: COLORS.slate },
+  pendiente: { label: "Sin Programar", color: COLORS.slate },
   por_aprobar: { label: "En aprobación", color: "#7B5EA7" },
   aprobada: { label: "Aprobada", color: "#3B6EA5" },
   rechazada: { label: "Rechazada", color: COLORS.rojo },
@@ -4022,7 +4022,12 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
     }
     setConfirmarCierre(false);
     setGuardado("guardando");
-    const patch = { estado, observaciones };
+    /* Red de seguridad: una actividad sin fecha programada no puede quedar
+       en Programada / En proceso / En espera — sería un estado imposible que
+       la deja invisible (ni en el calendario ni en Sin Programar). */
+    const fProgFinal = corrige ? fProg : (esServ ? item.fecha : item.fechaProgramada);
+    const estadoSeguro = (!fProgFinal && estado !== "completada") ? "pendiente" : estado;
+    const patch = { estado: estadoSeguro, observaciones };
     if (!esPrev) patch.resolucion = resolucion;
     if (permitirReasignar) patch.tecnicoId = tecnicoId;
     if (puedeEditarTiempo) {
@@ -4203,8 +4208,19 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                     </div>
                   </Field>
                 )}
-                <Field label="Fecha programada">
-                  <input type="date" value={fProg} onChange={(e) => setFProg(e.target.value)}
+                <Field label="Fecha programada"
+                  hint="Al poner fecha, la actividad pasa a Programada; si la borras, vuelve a Sin Programar.">
+                  <input type="date" value={fProg}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setFProg(v);
+                      /* El estado sigue a la fecha: sin fecha no puede estar
+                         programada, y al asignarla no tiene sentido dejarla
+                         como Sin Programar. Solo se ajusta si el estado aún
+                         no avanzó más allá (en proceso, espera, completada). */
+                      if (!v) setEstado("pendiente");
+                      else if (estado === "pendiente") setEstado("programada");
+                    }}
                     className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
                 </Field>
               </div>
@@ -4359,9 +4375,17 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               onChange={(items) => acciones.updateActividad(item, { checklist: items })} />
           )}
 
-          <Field label="Estado">
+          <Field label="Estado"
+            hint={!fProg ? "Sin fecha programada solo puede estar en Sin Programar. Asigna una fecha arriba para poder avanzarla." : undefined}>
             <select value={estado} onChange={(e) => setEstado(e.target.value)} className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
-              {ESTADOS_EJECUCION.map((e) => <option key={e} value={e}>{ESTADOS[e].label}</option>)}
+              {/* "Sin Programar" aparece en la lista: antes no estaba, así que
+                  una actividad pendiente mostraba "Programada" por defecto y se
+                  guardaba con ese estado aunque no tuviera fecha. Los estados
+                  que exigen fecha se deshabilitan mientras no la haya. */}
+              <option value="pendiente">{ESTADOS.pendiente.label}</option>
+              {ESTADOS_EJECUCION.map((e) => (
+                <option key={e} value={e} disabled={!fProg}>{ESTADOS[e].label}</option>
+              ))}
             </select>
           </Field>
 
