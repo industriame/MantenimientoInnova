@@ -4542,11 +4542,13 @@ function VistaTecnico({ data, persist, user, onLogout, ultimaSync }) {
 
   // El técnico adelanta una actividad pendiente y queda asignada a él
   const activarActividad = (item, tecnicoId, fecha, duracionValor, duracionUnidad) => {
+    // Red de seguridad: sin fecha se asigna el técnico pero sigue pendiente
+    const estadoNuevo = fecha ? "programada" : "pendiente";
     if (item.tipo === "correctivo") {
       persist((data) => ({
         ...data,
         solicitudes: data.solicitudes.map((x) =>
-          x.id === item.solicitudId ? { ...x, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: "programada" } : x),
+          x.id === item.solicitudId ? { ...x, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: estadoNuevo } : x),
       }));
     } else {
       const n = data.otCounter || 1;
@@ -5371,12 +5373,16 @@ function FormActivar({ item, data, onConfirm, onClose, soloTecnico }) {
         </Field>
       </div>
 
-      <button disabled={!tecnicoId}
+      {/* Sin fecha no se puede programar: una actividad "programada" sin
+          fecha queda en un estado imposible (no aparece en el calendario ni
+          en Sin Programar). Antes solo se validaba el técnico. */}
+      <button disabled={!tecnicoId || !fecha}
         onClick={() => { onConfirm({ tecnicoId, fecha, duracionValor: Number(durValor) || 0, duracionUnidad: durUnidad }); onClose(); }}
         className="w-full py-2.5 rounded-md font-semibold text-sm text-white disabled:opacity-40"
         style={{ background: esPrev ? COLORS.orange : COLORS.charcoal }}>
         {soloTecnico ? "Programar" : esPrev ? "Crear orden de trabajo" : "Programar atención"}
       </button>
+      {!fecha && <p className="text-[10px] text-center" style={{ color: COLORS.rojo }}>Indica la fecha para poder programar.</p>}
     </div>
   );
 }
@@ -5684,11 +5690,13 @@ function AdminProgramacion({ data, persist, user }) {
 
   const confirmar = ({ tecnicoId, fecha, duracionValor, duracionUnidad }) => {
     const item = activar;
+    // Red de seguridad: sin fecha se asigna el técnico pero sigue pendiente
+    const estadoNuevo = fecha ? "programada" : "pendiente";
     if (item.tipo === "correctivo") {
       persist((data) => ({
         ...data,
         solicitudes: data.solicitudes.map((s) =>
-          s.id === item.solicitudId ? { ...s, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: "programada" } : s),
+          s.id === item.solicitudId ? { ...s, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: estadoNuevo } : s),
       }));
     } else {
       const n = data.otCounter || 1;
