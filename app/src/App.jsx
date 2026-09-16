@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, ReferenceLine, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend
+  Tooltip, ResponsiveContainer, Legend
 } from "recharts";
 
 /* ============================================================================
@@ -32,7 +32,16 @@ const FEE_SERVICIO_SEDE = 450;          // USD/mes — nuestro honorario por sed
 const GAUGE_MAX_DIAS = 15;
 const colorMTBF = (v) => (v === null ? COLORS.slate : v >= 7 ? COLORS.verde : v >= 3 ? COLORS.ambar : COLORS.rojo);
 const colorCumpl = (p) => (p === null ? COLORS.slate : p >= 80 ? COLORS.verde : p >= 50 ? COLORS.ambar : COLORS.rojo);
-const colorMTTR = (v) => (v === null ? COLORS.slate : v <= 3 ? COLORS.verde : v <= 7 ? COLORS.ambar : COLORS.rojo);
+
+/* Tiempo de respuesta comprometido por criticidad (días). Una novedad crítica
+   y una baja no se miden con la misma vara: sin esto, el indicador global
+   queda arrastrado por las de baja criticidad, que legítimamente esperan
+   materiales o planificación. */
+const META_MTTR = { critico: 1, alta: 2, media: 5, baja: 10 };
+const META_MTTR_GLOBAL = 3;
+// Verde dentro de meta · ámbar hasta 1.5x · rojo por encima
+const colorVsMeta = (v, meta) =>
+  v === null || v === undefined ? COLORS.slate : v <= meta ? COLORS.verde : v <= meta * 1.5 ? COLORS.ambar : COLORS.rojo;
 
 const COLORS = {
   charcoal: "#35383C",
@@ -608,9 +617,30 @@ function indicadoresMes(data, sedeIds, mes) {
 
   // MTTR con precisión de horas: usa fecha+hora de apertura y de cierre
   const cerrados = correctivos.filter((s) => s.estado === "completada" && s.fechaCompletada && s.fecha);
+  const diasDe = (s) => Math.max(0, horasEntre(s.fecha, s.hora, s.fechaCompletada, s.horaCompletada) / 24);
   const mttr = cerrados.length > 0
-    ? cerrados.reduce((acc, s) => acc + Math.max(0, horasEntre(s.fecha, s.hora, s.fechaCompletada, s.horaCompletada) / 24), 0) / cerrados.length
+    ? cerrados.reduce((acc, s) => acc + diasDe(s), 0) / cerrados.length
     : null;
+
+  /* Desglose por criticidad: cada nivel se compara contra su propia meta.
+     Sin esto, las novedades de baja criticidad (que esperan materiales o
+     planificación) arrastran el promedio y el servicio se ve peor de lo
+     que realmente responde en lo urgente. */
+  const porCriticidad = CRITICIDAD_IDS.map((id) => {
+    const delNivel = correctivos.filter((s) => (s.criticidad || "media") === id);
+    const cerradosNivel = delNivel.filter((s) => s.estado === "completada" && s.fechaCompletada && s.fecha);
+    return {
+      id,
+      label: CRITICIDAD[id].label,
+      meta: META_MTTR[id],
+      fallas: delNivel.length,
+      cerrados: cerradosNivel.length,
+      mttr: cerradosNivel.length > 0
+        ? cerradosNivel.reduce((acc, s) => acc + diasDe(s), 0) / cerradosNivel.length
+        : null,
+      mtbf: delNivel.length > 0 ? diasTranscurridos / delNivel.length : null,
+    };
+  });
 
   /* Costos del mes.
      Costo por estudiante = fee de servicio + materiales + servicios externos.
@@ -636,6 +666,7 @@ function indicadoresMes(data, sedeIds, mes) {
 
   return {
     mes, nFallas, diasTranscurridos, diasDelMes, mtbf, mttr, cerrados: cerrados.length,
+    porCriticidad,
     costoFee, costoPreventivo, costoCorrectivo, costoMateriales, costoServicios,
     costoTotal, estudiantes, costoPorEstudiante,
   };
@@ -720,6 +751,23 @@ function serieCostoEstudiante(data, sedeIds, mesFinal, meses = 6) {
       mesKey: k,
       costo: kpi.costoPorEstudiante !== null ? Number(kpi.costoPorEstudiante.toFixed(3)) : 0,
     });
+  }
+  return out;
+}
+
+/* Serie mensual de MTBF y MTTR para el minigráfico de evolución. Arranca en
+   el primer mes con datos: los meses previos al inicio del servicio no se
+   dibujan en cero, distorsionarían la tendencia. */
+function serieConfiabilidad(data, sedeIds, mesFinal, meses = 6) {
+  const [y, m] = mesFinal.split("-").map(Number);
+  const inicio = primerMesConDatos(data, sedeIds);
+  const out = [];
+  for (let i = meses - 1; i >= 0; i--) {
+    const d = new Date(y, m - 1 - i, 1);
+    const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    if (inicio && k < inicio) continue;
+    const kpi = indicadoresMes(data, sedeIds, k);
+    out.push({ mes: MESES[d.getMonth()].slice(0, 3), mesKey: k, mtbf: kpi.mtbf, mttr: kpi.mttr });
   }
   return out;
 }
@@ -1518,39 +1566,114 @@ function Stat({ label, value, icon, color, sub }) {
 
 /* Medidor semicircular: muestra un KPI en días contra un máximo de referencia.
    El arco relleno es proporcional al valor; el número va en el centro. */
-function GaugeDonut({ valor, max, color, titulo, unidad = "d", detalle, invertido }) {
-  const v = valor === null || valor === undefined ? 0 : Math.max(0, Math.min(valor, max));
-  const datos = [{ v }, { v: Math.max(0.0001, max - v) }];
+/* Tarjeta de confiabilidad: número global + evolución mensual + desglose por
+   criticidad. Sustituye al medidor semicircular, que usaba una escala fija de
+   0-15 días sin relación con ninguna meta y no permitía ver tendencia. */
+function SparklineKPI({ serie, campo, meta, invertido }) {
+  const puntos = serie.filter((p) => p[campo] !== null && p[campo] !== undefined);
+  if (puntos.length < 2) {
+    return (
+      <p className="text-[10px] self-end pb-2" style={cSlate}>
+        {puntos.length === 1 ? "La tendencia aparece con el segundo mes." : "Sin histórico todavía."}
+      </p>
+    );
+  }
+  const W = 260, H = 62, padX = 10, baseY = 44, topY = 8;
+  const valores = puntos.map((p) => p[campo]);
+  const max = Math.max(...valores, meta) * 1.15;
+  const x = (i) => padX + (i * (W - padX * 2)) / Math.max(1, puntos.length - 1);
+  const y = (v) => baseY - (Math.min(v, max) / max) * (baseY - topY);
+  const linea = puntos.map((p, i) => `${x(i)},${y(p[campo])}`).join(" ");
+  const ultimo = puntos[puntos.length - 1];
+  const colorUlt = invertido ? colorVsMeta(ultimo[campo], meta)
+    : (ultimo[campo] >= meta ? COLORS.verde : COLORS.ambar);
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 62 }} role="img"
+      aria-label="Evolución mensual del indicador">
+      <line x1="0" y1={y(meta)} x2={W} y2={y(meta)} stroke={COLORS.verde} strokeWidth="1" strokeDasharray="3 3" opacity="0.6" />
+      <text x={W - 2} y={y(meta) - 3} textAnchor="end" style={{ fontSize: 9, fill: COLORS.slate }}>meta {meta} d</text>
+      <polyline points={linea} fill="none" stroke={COLORS.orange} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={x(puntos.length - 1)} cy={y(ultimo[campo])} r="3.5" fill={colorUlt} />
+      {puntos.map((p, i) => (
+        <text key={p.mesKey} x={x(i)} y={H - 4} textAnchor="middle" style={{ fontSize: 9, fill: COLORS.slate }}>{p.mes}</text>
+      ))}
+    </svg>
+  );
+}
+
+function TarjetaConfiabilidad({ titulo, valor, unidad = "días", meta, invertido, detalle, serie, campo, desglose, notaDesglose }) {
   const hayDato = valor !== null && valor !== undefined;
+  const color = invertido ? colorVsMeta(valor, meta) : colorMTBF(valor);
+  // Variación contra el mes anterior de la misma serie
+  const conDato = (serie || []).filter((p) => p[campo] !== null && p[campo] !== undefined);
+  const previo = conDato.length >= 2 ? conDato[conDato.length - 2][campo] : null;
+  const delta = hayDato && previo !== null ? valor - previo : null;
+  // En MTTR bajar es mejorar; en MTBF es al revés
+  const mejora = delta === null ? null : (invertido ? delta < 0 : delta > 0);
 
   return (
     <div className="border rounded-md p-3" style={cardStyle}>
-      <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={cSlate}>{titulo}</p>
-      <div className="relative" style={{ height: 110 }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie data={datos} dataKey="v" startAngle={180} endAngle={0}
-              innerRadius="62%" outerRadius="95%" cy="88%" stroke="none" isAnimationActive={false}>
-              <Cell fill={hayDato ? color : COLORS.line} />
-              <Cell fill={COLORS.line} />
-            </Pie>
-          </PieChart>
-        </ResponsiveContainer>
-        <div className="absolute inset-x-0 flex flex-col items-center" style={{ bottom: 4 }}>
-                    <span className="text-2xl font-bold leading-none" style={{ color: hayDato ? COLORS.charcoal : COLORS.slate, fontFamily: "'Barlow Condensed', sans-serif" }}>
-            {hayDato ? `${valor > max ? "+" : ""}${valor.toFixed(1)}` : "—"}
-          </span>
-          <span className="text-[10px]" style={cSlate}>{hayDato ? unidad : "sin datos"}</span>
+      <div className="flex items-baseline justify-between gap-2 mb-2">
+        <p className="text-xs font-semibold uppercase tracking-wide" style={cSlate}>{titulo}</p>
+        {detalle && <span className="text-[10px] shrink-0" style={cSlate}>{detalle}</span>}
+      </div>
+
+      <div className="flex items-end gap-3 mb-3">
+        <div className="shrink-0">
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-3xl font-bold leading-none"
+              style={{ color: hayDato ? COLORS.charcoal : COLORS.slate, fontFamily: "'Barlow Condensed', sans-serif" }}>
+              {hayDato ? valor.toFixed(1) : "—"}
+            </span>
+            <span className="text-xs" style={cSlate}>{hayDato ? unidad : "sin datos"}</span>
+          </div>
+          {delta !== null && Math.abs(delta) >= 0.05 ? (
+            <span className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded mt-1.5"
+              style={{ background: `${mejora ? COLORS.verde : COLORS.rojo}15`, color: mejora ? COLORS.verde : COLORS.rojo }}>
+              {delta < 0 ? "↓" : "↑"} {Math.abs(delta).toFixed(1)} vs mes anterior
+            </span>
+          ) : hayDato && (
+            <span className="inline-block text-[10px] px-2 py-0.5 rounded mt-1.5"
+              style={{ background: `${color}15`, color }}>
+              {invertido ? (valor <= meta ? "dentro de meta" : "sobre la meta") : `meta ${meta} d`}
+            </span>
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <SparklineKPI serie={serie || []} campo={campo} meta={meta} invertido={invertido} />
         </div>
       </div>
-      <div className="flex items-center justify-between text-[9px] -mt-1" style={cSlate}>
-        <span>0</span><span>{max} {unidad} máx.</span>
-      </div>
-      {detalle && <p className="text-[10px] mt-1 text-center" style={cSlate}>{detalle}</p>}
-      {invertido && <p className="text-[9px] text-center" style={cSlate}>menor es mejor</p>}
+
+      {desglose && (
+        <div className="border-t pt-2" style={bLine}>
+          <p className="text-[10px] mb-1.5" style={cSlate}>{notaDesglose}</p>
+          <div className="space-y-1.5">
+            {desglose.map((d) => {
+              const v = invertido ? d.mttr : d.mtbf;
+              const c = invertido ? colorVsMeta(v, d.meta) : colorMTBF(v);
+              const pct = v === null ? 0 : Math.min(100, (v / d.meta) * 100);
+              return (
+                <div key={d.id} className="flex items-center gap-2">
+                  <span className="text-[11px] w-12 shrink-0" style={cChar}>{d.label}</span>
+                  <div className="flex-1 h-1.5 rounded-sm overflow-hidden min-w-0" style={{ background: COLORS.line }}>
+                    <div style={{ width: `${pct}%`, height: "100%", background: v === null ? COLORS.line : c }} />
+                  </div>
+                  <span className="text-[11px] font-semibold w-11 text-right shrink-0" style={{ color: v === null ? COLORS.slate : c }}>
+                    {v === null ? "—" : `${v.toFixed(1)} d`}
+                  </span>
+                  {invertido && <span className="text-[9px] w-12 shrink-0" style={cSlate}>meta {d.meta} d</span>}
+                  <span className="text-[9px] w-5 text-right shrink-0" style={cSlate}>{invertido ? d.cerrados : d.fallas}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
 
 function SectionTitle({ children, count, action }) {
   return (
@@ -2966,6 +3089,7 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
   const alcance = sedeFiltro ? [sedeFiltro] : sedeIds;
   const kpi = useMemo(() => indicadoresMes(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
   const serieCosto = useMemo(() => serieCostoEstudiante(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
+  const serieKPI = useMemo(() => serieConfiabilidad(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
   const avanceGlobal = useMemo(() => avancePlan(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
   const sat = useMemo(() => satisfaccion(data, alcance), [data, sedeFiltro, sedeIds.join(",")]);
   const avancePorSede = useMemo(
@@ -3105,12 +3229,14 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
 
       {/* Indicadores de confiabilidad */}
       <div className={`grid grid-cols-1 sm:grid-cols-2 ${mostrarSatisfaccion ? "lg:grid-cols-3" : ""} gap-3`}>
-        <GaugeDonut
-          titulo="MTBF · entre fallas" valor={kpi.mtbf} max={GAUGE_MAX_DIAS} color={colorMTBF(kpi.mtbf)}
-          detalle={kpi.nFallas > 0 ? `${kpi.diasTranscurridos} días ÷ ${kpi.nFallas} correctivos` : "Sin correctivos este mes"} />
-        <GaugeDonut
-          titulo="MTTR · de reparación" valor={kpi.mttr} max={GAUGE_MAX_DIAS} color={colorMTTR(kpi.mttr)} invertido
-          detalle={kpi.cerrados > 0 ? `${duracionTexto(kpi.mttr)} · promedio de ${kpi.cerrados} cierre(s)` : "Sin correctivos cerrados"} />
+        <TarjetaConfiabilidad
+          titulo="MTBF · entre fallas" valor={kpi.mtbf} meta={7} campo="mtbf" serie={serieKPI}
+          detalle={kpi.nFallas > 0 ? `${kpi.diasTranscurridos} d ÷ ${kpi.nFallas} correctivos` : "Sin correctivos"}
+          desglose={kpi.porCriticidad} notaDesglose="Días entre fallas, por criticidad · nº de casos" />
+        <TarjetaConfiabilidad
+          titulo="MTTR · tiempo de respuesta" valor={kpi.mttr} meta={META_MTTR_GLOBAL} invertido campo="mttr" serie={serieKPI}
+          detalle={kpi.cerrados > 0 ? `${kpi.cerrados} cierre(s)` : "Sin cierres"}
+          desglose={kpi.porCriticidad} notaDesglose="Barra llena = meta alcanzada · nº de cierres" />
         {mostrarSatisfaccion && <TarjetaSatisfaccion sat={sat} />}
       </div>
 
@@ -7923,15 +8049,38 @@ function bloqueResumenUnificado(data, sedes, mes) {
 function bloqueIndicadores(kpi, sat, { compacto } = {}) {
   const cel = (t, v, s, c) =>
     `<div class="kpi"><span class="k-lbl">${_esc(t)}</span><b style="color:${c}">${_esc(v)}</b>${s ? `<span class="k-sub">${_esc(s)}</span>` : ""}</div>`;
+
+  /* Desglose de MTTR por criticidad: el promedio global se ve arrastrado por
+     las novedades de baja criticidad, que esperan materiales o planificación.
+     Cada nivel se compara contra su propio tiempo comprometido. */
+  const filasCrit = (kpi.porCriticidad || [])
+    .filter((d) => d.cerrados > 0)
+    .map((d) => {
+      const c = colorVsMeta(d.mttr, d.meta);
+      return `<tr>
+        <td>${_esc(d.label)}</td>
+        <td class="c"><b style="color:${c}">${d.mttr.toFixed(1)} d</b></td>
+        <td class="c mut">meta ${d.meta} d</td>
+        <td class="c mut">${d.cerrados}</td>
+      </tr>`;
+    }).join("");
+
+  const tablaCrit = (!compacto && filasCrit)
+    ? `<table class="mini" style="margin-top:6px">
+        <thead><tr><th>Criticidad</th><th class="c">MTTR</th><th class="c">Meta</th><th class="c">Cierres</th></tr></thead>
+        <tbody>${filasCrit}</tbody>
+      </table>`
+    : "";
+
   return `<div class="kpis${compacto ? " mini" : ""}">
     ${cel("MTBF", kpi.mtbf !== null ? `${kpi.mtbf.toFixed(1)} d` : "—",
         kpi.nFallas > 0 ? `${kpi.diasTranscurridos} d ÷ ${kpi.nFallas} correctivos` : "sin correctivos", colorMTBF(kpi.mtbf))}
     ${cel("MTTR", kpi.mttr !== null ? duracionTexto(kpi.mttr) : "—",
-        kpi.cerrados > 0 ? `promedio de ${kpi.cerrados} cierre(s)` : "sin cierres", colorMTTR(kpi.mttr))}
+        kpi.cerrados > 0 ? `promedio de ${kpi.cerrados} cierre(s)` : "sin cierres", colorVsMeta(kpi.mttr, META_MTTR_GLOBAL))}
     ${cel("Satisfacción", sat.promedio !== null ? `${sat.promedio.toFixed(1)} / 5` : "—",
         sat.total > 0 ? `${sat.total} de ${sat.cerradas} calificadas` : "sin calificaciones",
         sat.promedio === null ? "#8D939B" : sat.promedio >= 4.5 ? "#2E7D5B" : sat.promedio >= 3.5 ? "#D9A441" : "#C1442D")}
-  </div>`;
+  </div>${tablaCrit}`;
 }
 
 function filaCumplimiento(a, nombre) {
@@ -8130,7 +8279,7 @@ ${bloqueIndicadores(kpi, sat)}
   <div class="graf"><h4>Confiabilidad</h4>
     <div style="display:flex;gap:6px">
       <div style="flex:1;text-align:center"><span class="mut">MTBF</span>${svgMedidor(kpi.mtbf, GAUGE_MAX_DIAS, colorMTBF(kpi.mtbf))}</div>
-      <div style="flex:1;text-align:center"><span class="mut">MTTR</span>${svgMedidor(kpi.mttr, GAUGE_MAX_DIAS, colorMTTR(kpi.mttr))}</div>
+      <div style="flex:1;text-align:center"><span class="mut">MTTR</span>${svgMedidor(kpi.mttr, GAUGE_MAX_DIAS, colorVsMeta(kpi.mttr, META_MTTR_GLOBAL))}</div>
     </div></div>
 </div>
 
