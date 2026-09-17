@@ -3090,6 +3090,12 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
   const kpi = useMemo(() => indicadoresMes(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
   const serieCosto = useMemo(() => serieCostoEstudiante(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
   const serieKPI = useMemo(() => serieConfiabilidad(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
+  // Sede desplegada en la tarjeta de presupuesto, con sus órdenes del mes
+  const [detallePres, setDetallePres] = useState(null);
+  const actividadesPres = detallePres
+    ? actividadesDeSedeMes(data, detallePres, mes)
+        .filter((a) => costoAprobado(a) + costoConsumos(a) > 0 || (MAT_COMPROMETIDOS.includes(a.materialesEstado) && costoEstimado(a) > 0))
+    : [];
   const avanceGlobal = useMemo(() => avancePlan(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
   const sat = useMemo(() => satisfaccion(data, alcance), [data, sedeFiltro, sedeIds.join(",")]);
   const avancePorSede = useMemo(
@@ -3288,10 +3294,35 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
             <span className="text-2xl font-bold" style={{ color: COLORS.charcoal, fontFamily: "'Barlow Condensed', sans-serif" }}>{money(gastoMes)}</span>
             <span className="text-xs" style={cSlate}>de {money(presupuestoMes)} en materiales</span>
           </div>
+          {/* Mismo comportamiento que la vista Presupuesto: al tocar una sede
+              se despliegan las órdenes con su gasto del mes. */}
           <div className="space-y-2.5">
-            {presupuestos.filter((p) => !sedeFiltro || p.sedeId === sedeFiltro).map((p) => (
-              <PresupuestoBar key={p.sedeId} p={p} />
-            ))}
+            {presupuestos.filter((p) => !sedeFiltro || p.sedeId === sedeFiltro).map((p) => {
+              const abierta = detallePres === p.sedeId;
+              const est = ESTADO_PRESUPUESTO[p.estado];
+              return (
+                <button key={p.sedeId} onClick={() => setDetallePres(abierta ? null : p.sedeId)} className="w-full text-left">
+                  <PresupuestoBar p={p} />
+                  {abierta && (
+                    <div className="mt-2 pl-2 border-l-2 space-y-1" style={{ borderColor: est.color }}>
+                      {actividadesPres.map((a) => {
+                        const real = costoAprobado(a) + costoConsumos(a);
+                        const pendiente = MAT_COMPROMETIDOS.includes(a.materialesEstado);
+                        return (
+                          <div key={a.id} className="flex items-center justify-between text-[11px] gap-2">
+                            <span className="min-w-0 truncate" style={cChar}>{a.codigo} · {a.tarea || a.descripcion}</span>
+                            <span className="shrink-0 font-semibold" style={{ color: pendiente ? COLORS.slate : COLORS.orange }}>
+                              {money(pendiente ? costoEstimado(a) : real)}{pendiente ? " (sin aprobar)" : ""}
+                            </span>
+                          </div>
+                        );
+                      })}
+                      {actividadesPres.length === 0 && <p className="text-[11px]" style={cSlate}>Sin gastos registrados este mes.</p>}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
