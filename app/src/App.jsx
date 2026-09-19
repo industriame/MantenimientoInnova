@@ -138,6 +138,10 @@ const MAT_ESTADO = {
 
 const FRECUENCIAS = ["Mensual", "Trimestral", "Semestral", "Anual"];
 const FRECUENCIA_DIAS = { Mensual: 30, Trimestral: 90, Semestral: 180, Anual: 365 };
+/* Para el plan anual se avanza por meses, no por días: así las ocurrencias
+   caen siempre en el mismo día del mes y el cronograma queda alineado al
+   calendario, que es como el cliente lo lee. */
+const FRECUENCIA_MESES = { Mensual: 1, Trimestral: 3, Semestral: 6, Anual: 12 };
 const DURACION_UNIDADES = [["minutos", "min"], ["horas", "horas"], ["dias", "días"]];
 
 /* --- Pasos del procedimiento ------------------------------------------------
@@ -773,6 +777,75 @@ function serieConfiabilidad(data, sedeIds, mesFinal, meses = 6) {
     out.push({ mes: MESES[d.getMonth()].slice(0, 3), mesKey: k, mtbf: kpi.mtbf, mttr: kpi.mttr });
   }
   return out;
+}
+
+
+/* ============================================================================
+   PLAN ANUAL DE MANTENIMIENTO PREVENTIVO
+   Proyección visual a 5 años de cada plan sobre cada ubicación donde aplica.
+   No genera órdenes ni altera la programación: solo muestra cuándo tocaría
+   cada mantenimiento y marca lo ya ejecutado, para demostrar la gestión del
+   plan ante el cliente.
+   ========================================================================= */
+
+/* Fecha de arranque de una aplicación: su fecha inicial, si no la del plan,
+   y como último recurso el inicio del servicio. */
+function inicioAplicacion(plan, ap, inicioServicio) {
+  return ap.fechaInicial || plan.createdAt || inicioServicio || fmtDate(new Date());
+}
+
+/* Meses (0-11) del año pedido en los que toca mantenimiento, según la
+   frecuencia del plan, contando desde su fecha de arranque. */
+function mesesProyectados(plan, ap, anio, inicioServicio) {
+  const base = inicioAplicacion(plan, ap, inicioServicio);
+  const paso = FRECUENCIA_MESES[plan.frecuencia] || 3;
+  const d0 = new Date(`${base}T00:00:00`);
+  if (isNaN(d0)) return [];
+  const meses = new Set();
+  // Se recorre desde el arranque; 5 años cubren de sobra cualquier consulta
+  for (let i = 0; i < (60 / paso) + 12; i++) {
+    const d = new Date(d0.getFullYear(), d0.getMonth() + i * paso, 1);
+    if (d.getFullYear() > anio) break;
+    if (d.getFullYear() === anio) meses.add(d.getMonth());
+  }
+  return [...meses].sort((a, b) => a - b);
+}
+
+/* Cronograma completo: una fila por plan+ubicación, con sus meses proyectados
+   y los meses en que realmente se ejecutó (orden completada). */
+function cronogramaAnual(data, anio, sedeIds) {
+  const inicioServicio = primerMesConDatos(data, null);
+  const inicio = inicioServicio ? `${inicioServicio}-01` : null;
+  const filas = [];
+
+  (data.planes || []).forEach((plan) => {
+    (plan.aplicaciones || []).forEach((ap) => {
+      if (sedeIds && !sedeIds.includes(ap.sedeId)) return;
+      const proyectados = mesesProyectados(plan, ap, anio, inicio);
+      if (!proyectados.length) return;
+
+      // Ejecutado: órdenes de ese plan y ubicación cerradas dentro del año
+      const ejecutados = new Set();
+      (data.ordenes || []).forEach((o) => {
+        if (o.planId !== plan.id || o.sedeId !== ap.sedeId) return;
+        if ((o.faseId || "") !== (ap.faseId || "") || (o.activoId || "") !== (ap.activoId || "")) return;
+        if (o.estado !== "completada") return;
+        const f = o.fechaCompletada || o.fechaProgramada;
+        if (f && Number(f.slice(0, 4)) === anio) ejecutados.add(Number(f.slice(5, 7)) - 1);
+      });
+
+      filas.push({
+        key: `${plan.id}|${ap.sedeId}|${ap.faseId || ""}|${ap.activoId || ""}`,
+        planId: plan.id, tarea: plan.tarea, categoria: plan.categoria, frecuencia: plan.frecuencia,
+        sedeId: ap.sedeId, ubicacion: ubicacionTexto(data.sedes, ap),
+        inicio: inicioAplicacion(plan, ap, inicio),
+        proyectados, ejecutados,
+      });
+    });
+  });
+
+  return filas.sort((a, b) =>
+    a.ubicacion.localeCompare(b.ubicacion) || a.tarea.localeCompare(b.tarea));
 }
 
 const ESTADO_PRESUPUESTO = {
@@ -4794,6 +4867,7 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
     { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
     { id: "programacion", label: `Programación (${activables})`, icon: <CalendarDays size={14} /> },
     { id: "mias", label: `Mis actividades (${activas.length})`, icon: <Wrench size={14} /> },
+    { id: "planual", label: "Plan anual", icon: <CalendarDays size={14} /> },
     { id: "monitoreo", label: "Monitoreo", icon: <BarChart3 size={14} /> },
     { id: "bodega", label: "Bodega", icon: <Layers size={14} /> },
     { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
@@ -4884,6 +4958,7 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
       {tab === "sedes" && (
         <AdminSedes data={{ ...data, sedes: misSedes }} persist={persist} editable={false} />
       )}
+      {tab === "planual" && <VistaPlanAnual data={data} sedes={misSedes} />}
       {tab === "monitoreo" && <VistaMonitoreo data={{ ...data, sedes: misSedes }} />}
       {tab === "reportes" && <VistaReportes data={data} sedes={misSedes} user={user} />}
       {tab === "historico" && <VistaHistorico data={data} sedes={misSedes} rol="tecnico" />}
@@ -5412,6 +5487,8 @@ function FormPlan({ data, initial, onSave, onClose, onAddCategoria }) {
   const submit = () => {
     onSave({
       id: initial?.id || uid("plan"),
+      // Sirve de arranque del plan anual cuando una aplicación no trae fecha inicial
+      createdAt: initial?.createdAt || fmtDate(new Date()),
       tarea: tarea.trim(), procedimientoPasos: pasos.filter((p) => p.texto.trim()), categoria, frecuencia,
       duracionValor: Number(durVal) || 0, duracionUnidad: durUni, monitoreo,
       aplicaciones: rows.filter((r) => r.sedeId).map((r) => ({
@@ -7420,6 +7497,219 @@ function AdminConfiguracion({ data, persist, setPlanModal }) {
 
 /* Bodega por sede, en formato de tabla.
    Admin edita; el técnico solo consulta y no ve costos. */
+
+/* ============================================================================
+   VISTA · PLAN ANUAL DE MANTENIMIENTO PREVENTIVO
+   ========================================================================= */
+function VistaPlanAnual({ data, sedes }) {
+  const hoyAnio = new Date().getFullYear();
+  const [anio, setAnio] = useState(hoyAnio);
+  const [fSede, setFSede] = useState("todas");
+  const [generando, setGenerando] = useState(false);
+  const [progreso, setProgreso] = useState("");
+
+  const sedeIds = sedes.map((s) => s.id);
+  const filas = useMemo(
+    () => cronogramaAnual(data, anio, fSede === "todas" ? sedeIds : [fSede]),
+    [data, anio, fSede, sedeIds.join(",")]
+  );
+
+  // Cinco años proyectados desde el inicio del servicio (o desde este año)
+  const inicioServicio = primerMesConDatos(data, null);
+  const anioBase = inicioServicio ? Number(inicioServicio.slice(0, 4)) : hoyAnio;
+  const anios = Array.from({ length: 5 }, (_, i) => anioBase + i);
+
+  const totalProy = filas.reduce((s, f) => s + f.proyectados.length, 0);
+  const totalEjec = filas.reduce((s, f) => s + f.proyectados.filter((m) => f.ejecutados.has(m)).length, 0);
+
+  const hacerPDF = async () => {
+    setGenerando(true); setProgreso("Preparando…");
+    try {
+      const nombreSede = fSede === "todas" ? "todas las sedes" : sedeNombre(data.sedes, fSede);
+      const blob = await generarPDF(construirPlanAnualHTML(filas, anio, nombreSede), { onProgreso: setProgreso });
+      const nombre = `plan-anual-preventivo-${anio}.pdf`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = nombre;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("[pdf plan anual]", e);
+    } finally { setGenerando(false); setProgreso(""); }
+  };
+
+  return (
+    <div className="mt-4 space-y-3">
+      <p className="text-xs" style={cSlate}>
+        Proyección del plan preventivo a cinco años. Es una vista de planificación: no genera órdenes ni altera
+        la programación mensual. Los meses ya ejecutados se marcan en verde a medida que se cierran las órdenes.
+      </p>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <select value={anio} onChange={(e) => setAnio(Number(e.target.value))}
+          className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
+          {anios.map((a) => <option key={a} value={a}>{a}</option>)}
+        </select>
+        {sedes.length > 1 && (
+          <select value={fSede} onChange={(e) => setFSede(e.target.value)}
+            className="border rounded-md px-2 py-2 text-sm bg-white flex-1 min-w-0" style={inputStyle}>
+            <option value="todas">Todas las sedes</option>
+            {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+          </select>
+        )}
+        <button onClick={hacerPDF} disabled={generando || !filas.length}
+          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white disabled:opacity-50 shrink-0"
+          style={{ background: COLORS.charcoal }}>
+          <Download size={13} /> {generando ? (progreso || "Generando…") : "PDF del año"}
+        </button>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        <Stat label="Tareas programadas" value={totalProy} icon={<CalendarDays size={14} />} color={COLORS.orange} sub={`en ${anio}`} />
+        <Stat label="Ya ejecutadas" value={totalEjec} icon={<CheckCircle2 size={14} />} color={COLORS.verde} sub="cerradas" />
+        <Stat label="Cumplimiento" value={totalProy ? `${Math.round((totalEjec / totalProy) * 100)}%` : "—"}
+          icon={<BarChart3 size={14} />} color={colorCumpl(totalProy ? (totalEjec / totalProy) * 100 : null)} sub="del año" />
+      </div>
+
+      {filas.length ? (
+        <div className="border rounded-md" style={{ borderColor: COLORS.line, maxHeight: "60vh", overflow: "auto" }}>
+          <table style={{ borderCollapse: "separate", borderSpacing: 0, width: "max-content", minWidth: "100%" }}>
+            <thead>
+              <tr>
+                <th className="sticky left-0 top-0 z-30 bg-white text-left px-2 py-1.5"
+                  style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, width: 200, minWidth: 200, fontSize: 10, ...cChar }}>
+                  Tarea y ubicación
+                </th>
+                {MESES.map((m) => (
+                  <th key={m} className="sticky top-0 z-20 bg-white px-1 py-1.5"
+                    style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, minWidth: 34, fontSize: 9, color: COLORS.slate }}>
+                    {m.slice(0, 3)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filas.map((f) => (
+                <tr key={f.key}>
+                  <td className="sticky left-0 z-10 bg-white px-2 py-1"
+                    style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, width: 200, minWidth: 200 }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.charcoal }}>{f.tarea}</div>
+                    <div style={{ fontSize: 9, color: COLORS.slate }}>{f.ubicacion} · {f.frecuencia}</div>
+                  </td>
+                  {MESES.map((m, i) => {
+                    const toca = f.proyectados.includes(i);
+                    const hecho = f.ejecutados.has(i);
+                    return (
+                      <td key={m} className="text-center"
+                        style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, padding: 2 }}>
+                        {toca && (
+                          <span title={hecho ? "Ejecutado" : "Programado"}
+                            style={{
+                              display: "inline-block", width: 14, height: 14, borderRadius: 3, fontSize: 9,
+                              lineHeight: "14px", color: "white",
+                              background: hecho ? COLORS.verde : COLORS.orange,
+                            }}>
+                            {hecho ? "✓" : ""}
+                          </span>
+                        )}
+                        {!toca && hecho && (
+                          <span title="Ejecutado fuera de lo proyectado"
+                            style={{ display: "inline-block", width: 14, height: 14, borderRadius: 3, fontSize: 9, lineHeight: "14px", color: "white", background: COLORS.ambar }}>✓</span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <Empty>No hay planes preventivos con aplicaciones para este año.</Empty>
+      )}
+
+      <div className="flex items-center gap-3 flex-wrap">
+        {[["Programado", COLORS.orange], ["Ejecutado", COLORS.verde], ["Fuera de plan", COLORS.ambar]].map(([l, c]) => (
+          <span key={l} className="flex items-center gap-1 text-[10px]" style={cSlate}>
+            <span className="w-2.5 h-2.5 rounded-sm" style={{ background: c }} />{l}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* PDF del cronograma del año consultado. */
+function construirPlanAnualHTML(filas, anio, nombreSede) {
+  const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
+  const totalProy = filas.reduce((s, f) => s + f.proyectados.length, 0);
+  const totalEjec = filas.reduce((s, f) => s + f.proyectados.filter((m) => f.ejecutados.has(m)).length, 0);
+  const pct = totalProy ? Math.round((totalEjec / totalProy) * 100) : 0;
+
+  const cuerpo = filas.map((f) => {
+    const celdas = MESES.map((m, i) => {
+      const toca = f.proyectados.includes(i);
+      const hecho = f.ejecutados.has(i);
+      if (hecho) return `<td class="c ok">✓</td>`;
+      if (toca) return `<td class="c prog">●</td>`;
+      return `<td class="c"></td>`;
+    }).join("");
+    return `<tr>
+      <td><b>${esc(f.tarea)}</b><br><span class="mut">${esc(f.ubicacion)} · ${esc(f.frecuencia)}</span></td>
+      ${celdas}
+    </tr>`;
+  }).join("");
+
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Plan anual preventivo ${anio}</title>
+<style>
+@page { size: A4 landscape; margin: 10mm; }
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:8pt;line-height:1.35}
+.hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #35383C;padding-bottom:7px;margin-bottom:9px}
+.hdr h1{font-size:13pt;text-transform:uppercase;letter-spacing:.02em}
+.hdr .sub{font-size:8pt;color:#787D85;margin-top:2px}
+.marca{text-align:right;font-size:7.5pt;color:#787D85}
+.marca b{display:block;font-size:11pt;color:#ED5B23;letter-spacing:.06em}
+.marca img{max-height:34px;margin-bottom:3px}
+.res{display:flex;gap:10px;margin-bottom:9px}
+.res div{border:1px solid #D8D4CB;border-radius:2px;padding:6px 10px;flex:1}
+.res span{display:block;font-size:6.8pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B}
+.res b{font-size:14pt}
+table{width:100%;border-collapse:collapse;font-size:7.5pt}
+th,td{padding:3px 4px;border:1px solid #E3E0D8}
+thead th{background:#35383C;color:#fff;font-size:6.8pt;text-transform:uppercase;text-align:center}
+thead th:first-child{text-align:left;width:190px}
+.c{text-align:center}
+.ok{background:#E8F3ED;color:#2E7D5B;font-weight:700}
+.prog{background:#FDEEE7;color:#ED5B23;font-weight:700}
+.mut{color:#8D939B;font-size:6.8pt}
+.ley{margin-top:8px;font-size:7pt;color:#8D939B}
+.pie{margin-top:10px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.8pt;color:#8D939B;display:flex;justify-content:space-between}
+</style></head><body>
+<div class="hdr">
+  <div><h1>Plan anual de mantenimiento preventivo</h1>
+    <p class="sub">${anio} · ${esc(nombreSede)}</p></div>
+  <div class="marca"><img src="${LOGO_ISE}" alt="IndustriaMe"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div>
+</div>
+
+<div class="res">
+  <div><span>Tareas programadas</span><b>${totalProy}</b></div>
+  <div><span>Ejecutadas</span><b style="color:#2E7D5B">${totalEjec}</b></div>
+  <div><span>Cumplimiento del año</span><b style="color:#ED5B23">${pct}%</b></div>
+</div>
+
+<table>
+  <thead><tr><th>Tarea y ubicación</th>${MESES.map((m) => `<th>${m.slice(0, 3)}</th>`).join("")}</tr></thead>
+  <tbody>${cuerpo || `<tr><td colspan="13" class="c">Sin planes preventivos para este año.</td></tr>`}</tbody>
+</table>
+
+<p class="ley">● programado · ✓ ejecutado. Proyección calculada desde la fecha inicial de cada plan según su frecuencia; es una referencia de planificación y no reemplaza la programación mensual.</p>
+<div class="pie"><span>IndustriaMe S.A.S. · Plan anual preventivo ${anio}</span><span>Generado el ${esc(emitido)}</span></div>
+</body></html>`;
+}
+
 function VistaBodega({ data, persist, sedes, editable }) {
   const [sedeId, setSedeId] = useState(sedes[0]?.id || "");
   const [nuevo, setNuevo] = useState(null);
@@ -8215,6 +8505,8 @@ function construirReporteMensualHTML(data, mes) {
     ], { w: 470, h: 140 });
 
   const parrafoHTML = resumen.parrafo.map((seg) => (seg.b ? `<b>${_esc(seg.t)}</b>` : _esc(seg.t))).join("");
+  // El pie se repite en cada página: al cortar por secciones, cada hoja es independiente
+  const pie = `<div class="pie"><span>IndustriaMe S.A.S. · Reporte de gestión ${_esc(mesLabel(mes))}</span><span>Generado el ${_esc(fmtDate(new Date()))} ${_esc(fmtHora(new Date()))}</span></div>`;
 
   /* --- Desglose por sede: cada una en su propia página --- */
   const seccionesSede = sedes.map((s) => {
@@ -8237,7 +8529,7 @@ function construirReporteMensualHTML(data, mes) {
         <td class="r">${costoActividad(x) > 0 ? money(costoActividad(x)) : "—"}</td>
       </tr>`).join("");
 
-    return `<section class="sede">
+    return `<section class="sede pagina">
       <div class="sede-h">
         <div><h2>${_esc(s.nombre)}</h2>
           <p class="mut">${s.estudiantes || 0} estudiantes${s.constructor ? ` · ${_esc(s.constructor)}` : ""}</p></div>
@@ -8267,6 +8559,7 @@ function construirReporteMensualHTML(data, mes) {
 
       <h4 style="margin-top:10px">Materiales y consumo de bodega</h4>
       ${resumenMaterialesHTML(acts)}
+      ${pie}
     </section>`;
   }).join("");
 
@@ -8317,6 +8610,7 @@ table{width:100%;border-collapse:collapse;font-size:7.5pt}
 .pie{margin-top:12px;padding-top:6px;border-top:1px solid #D8D4CB;font-size:7pt;color:#8D939B;display:flex;justify-content:space-between}
 </style></head><body>
 
+<section class="pagina">
 <div class="hdr">
   <div><h1>Reporte de gestión mensual</h1>
     <p class="sub">${_esc(mesLabel(mes))} · ${sedes.length} sede(s) · ${kpi.estudiantes} estudiantes</p></div>
@@ -8356,10 +8650,10 @@ table{width:100%;border-collapse:collapse;font-size:7.5pt}
 
 <h3>2. Desglose por sede</h3>
 <p class="mut">Cada sede se presenta en su propia página con su resumen, indicadores, cumplimiento, presupuesto, actividades y materiales del mes.</p>
+${pie}
+</section>
 
 ${seccionesSede}
-
-<div class="pie"><span>IndustriaMe S.A.S. · Reporte de gestión ${_esc(mesLabel(mes))}</span><span>Generado el ${_esc(fmtDate(new Date()))} ${_esc(fmtHora(new Date()))}</span></div>
 </body></html>`;
 }
 
@@ -8474,35 +8768,43 @@ async function generarPDF(html, { onProgreso } = {}) {
     await new Promise((r) => setTimeout(r, 120));
 
     onProgreso?.("Dibujando las páginas…");
-    const lienzo = await html2canvas(contenedor, {
-      scale: 2, useCORS: true, backgroundColor: "#ffffff", logging: false,
-    });
 
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
     const anchoPag = pdf.internal.pageSize.getWidth();
     const altoPag = pdf.internal.pageSize.getHeight();
     const margen = 8;
     const anchoUtil = anchoPag - margen * 2;
-    const altoTotal = (lienzo.height * anchoUtil) / lienzo.width;
+    let pagina = 0;
 
-    // Se recorta el lienzo en trozos del alto de una página
-    const altoTrozoPx = Math.floor((altoPag - margen * 2) * (lienzo.width / anchoUtil));
-    let y = 0, pagina = 0;
+    /* Coloca un lienzo en el PDF, partiéndolo si excede el alto de una hoja.
+       html2canvas ignora los saltos de página del CSS, así que se respetan
+       capturando cada sección por separado en vez de una sola imagen larga. */
+    const colocar = (lienzo) => {
+      const altoTrozoPx = Math.floor((altoPag - margen * 2) * (lienzo.width / anchoUtil));
+      let y = 0;
+      while (y < lienzo.height) {
+        const alto = Math.min(altoTrozoPx, lienzo.height - y);
+        const trozo = document.createElement("canvas");
+        trozo.width = lienzo.width;
+        trozo.height = alto;
+        trozo.getContext("2d").drawImage(lienzo, 0, y, lienzo.width, alto, 0, 0, lienzo.width, alto);
+        if (pagina > 0) pdf.addPage();
+        pdf.addImage(trozo.toDataURL("image/jpeg", 0.88), "JPEG",
+          margen, margen, anchoUtil, (alto * anchoUtil) / lienzo.width);
+        y += alto;
+        pagina++;
+        onProgreso?.(`Página ${pagina}…`);
+      }
+    };
 
-    while (y < lienzo.height) {
-      const alto = Math.min(altoTrozoPx, lienzo.height - y);
-      const trozo = document.createElement("canvas");
-      trozo.width = lienzo.width;
-      trozo.height = alto;
-      trozo.getContext("2d").drawImage(lienzo, 0, y, lienzo.width, alto, 0, 0, lienzo.width, alto);
-
-      if (pagina > 0) pdf.addPage();
-      pdf.addImage(trozo.toDataURL("image/jpeg", 0.88), "JPEG",
-        margen, margen, anchoUtil, (alto * anchoUtil) / lienzo.width);
-
-      y += alto;
-      pagina++;
-      onProgreso?.(`Página ${pagina}…`);
+    // Si el documento marca secciones, cada una empieza en su propia hoja
+    const secciones = [...contenedor.querySelectorAll(".pagina")];
+    if (secciones.length) {
+      for (const sec of secciones) {
+        colocar(await html2canvas(sec, { scale: 2, useCORS: true, backgroundColor: "#ffffff", logging: false }));
+      }
+    } else {
+      colocar(await html2canvas(contenedor, { scale: 2, useCORS: true, backgroundColor: "#ffffff", logging: false }));
     }
 
     return pdf.output("blob");
@@ -9583,6 +9885,7 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
     { id: "sedes", label: "Sedes", icon: <Building2 size={14} /> },
     { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
     { id: "actividades", label: "Actividades", icon: <ClipboardList size={14} /> },
+    { id: "planual", label: "Plan anual", icon: <CalendarDays size={14} /> },
     { id: "monitoreo", label: "Monitoreo", icon: <BarChart3 size={14} /> },
     { id: "bodega", label: "Bodega", icon: <Layers size={14} /> },
     { id: "presupuesto", label: "Presupuesto", icon: <Wallet size={14} /> },
@@ -9603,6 +9906,7 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
       {tab === "sedes" && <AdminSedes data={data} persist={persist} />}
       {tab === "programacion" && <AdminProgramacion data={data} persist={persist} user={user} />}
       {tab === "actividades" && <AdminActividades data={data} persist={persist} persistYa={persistYa} user={user} />}
+      {tab === "planual" && <VistaPlanAnual data={data} sedes={data.sedes} />}
       {tab === "monitoreo" && <VistaMonitoreo data={data} />}
       {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={data.sedes} editable />}
       {tab === "reportes" && <VistaReportes data={data} sedes={data.sedes} user={user} />}
@@ -9638,6 +9942,7 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
     { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
+    { id: "planual", label: "Plan anual", icon: <CalendarDays size={14} /> },
     { id: "aprobaciones", label: `Aprobaciones (${bandeja})`, icon: <CheckCircle2 size={14} /> },
     { id: "presupuesto", label: "Presupuesto", icon: <Wallet size={14} /> },
     { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
@@ -9661,6 +9966,8 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
         <PanelProgramacion data={data} sedes={data.sedes} pendientes={pendientesCliente}
           nota="Vista de solo lectura: aquí puedes consultar toda la programación, pero no puedes activar ni editar nada." />
       )}
+
+      {tab === "planual" && <VistaPlanAnual data={data} sedes={data.sedes} />}
 
       {tab === "aprobaciones" && (
         <div className="mt-4 space-y-5">
