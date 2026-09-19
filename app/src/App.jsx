@@ -28,8 +28,7 @@ import {
 
 const PRESUPUESTO_MENSUAL_SEDE = 100;   // USD/mes por sede — solo materiales
 const FEE_SERVICIO_SEDE = 450;          // USD/mes — nuestro honorario por sede
-// Escala de los medidores (días). MTBF: más alto es mejor. MTTR: más bajo es mejor.
-const GAUGE_MAX_DIAS = 15;
+// MTBF: más alto es mejor. MTTR: más bajo es mejor.
 const colorMTBF = (v) => (v === null ? COLORS.slate : v >= 7 ? COLORS.verde : v >= 3 ? COLORS.ambar : COLORS.rojo);
 const colorCumpl = (p) => (p === null ? COLORS.slate : p >= 80 ? COLORS.verde : p >= 50 ? COLORS.ambar : COLORS.rojo);
 
@@ -8023,26 +8022,6 @@ function svgBarras(labels, series, { w = 500, h = 150, fmt = (v) => v } = {}) {
 }
 
 /* Medidor semicircular para MTBF / MTTR */
-function svgMedidor(valor, max, color, unidad = "d") {
-  const w = 150, h = 88, cx = w / 2, cy = 74, r = 52, gr = 13;
-  const frac = valor === null ? 0 : Math.max(0, Math.min(valor / max, 1));
-  const arco = (desde, hasta, col) => {
-    const a1 = Math.PI - desde * Math.PI, a2 = Math.PI - hasta * Math.PI;
-    const p = (a) => [cx + r * Math.cos(a), cy - r * Math.sin(a)];
-    const [x1, y1] = p(a1), [x2, y2] = p(a2);
-    return `<path d="M ${x1} ${y1} A ${r} ${r} 0 0 1 ${x2} ${y2}" stroke="${col}" stroke-width="${gr}" fill="none" stroke-linecap="butt"/>`;
-  };
-  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}">
-    ${arco(0, 1, "#E3E0D8")}
-    ${frac > 0 ? arco(0, frac, color) : ""}
-    <text x="${cx}" y="${cy - 6}" text-anchor="middle" font-size="21" font-weight="bold" fill="${valor === null ? "#8D939B" : color}">
-      ${valor === null ? "—" : valor.toFixed(1)}</text>
-    <text x="${cx}" y="${cy + 6}" text-anchor="middle" font-size="7.5" fill="#8D939B">${valor === null ? "sin datos" : _esc(unidad)}</text>
-    <text x="${cx - r}" y="${cy + 12}" text-anchor="middle" font-size="6.5" fill="#8D939B">0</text>
-    <text x="${cx + r}" y="${cy + 12}" text-anchor="middle" font-size="6.5" fill="#8D939B">${max}</text>
-  </svg>`;
-}
-
 /* Línea de evolución (costo por estudiante) */
 function svgLinea(puntos, { w = 500, h = 150, color = "#ED5B23", fmt = (v) => v } = {}) {
   const pad = { t: 14, r: 12, b: 24, l: 40 };
@@ -8099,41 +8078,68 @@ function bloqueResumenUnificado(data, sedes, mes) {
   </div>`;
 }
 
-function bloqueIndicadores(kpi, sat, { compacto } = {}) {
-  const cel = (t, v, s, c) =>
-    `<div class="kpi"><span class="k-lbl">${_esc(t)}</span><b style="color:${c}">${_esc(v)}</b>${s ? `<span class="k-sub">${_esc(s)}</span>` : ""}</div>`;
+/* Tabla de confiabilidad: criticidad en filas, MTBF y MTTR en columnas.
+   Reemplaza a los medidores semicirculares, que ocupaban media página y no
+   permitían comparar entre niveles de criticidad. */
+function tablaIndicadoresCriticidad(kpi) {
+  const num = (v, suf = " d") => (v === null || v === undefined ? "—" : v.toFixed(1) + suf);
+  const filas = (kpi.porCriticidad || [])
+    .filter((d) => d.fallas > 0)
+    .map((d) => `<tr>
+      <td>${_esc(d.label)}</td>
+      <td class="c">${num(d.mtbf)}</td>
+      <td class="c">${num(d.mttr)}</td>
+    </tr>`).join("");
+  return `<table class="mini">
+    <thead><tr><th>Criticidad</th><th class="c">MTBF</th><th class="c">MTTR</th></tr></thead>
+    <tbody>
+      ${filas || '<tr><td colspan="3" class="c mut">Sin correctivos este mes.</td></tr>'}
+      <tr class="tot-r"><td>Global</td><td class="c">${num(kpi.mtbf)}</td><td class="c">${num(kpi.mttr)}</td></tr>
+    </tbody>
+  </table>`;
+}
 
-  /* Desglose de MTTR por criticidad: el promedio global se ve arrastrado por
-     las novedades de baja criticidad, que esperan materiales o planificación.
-     Cada nivel se compara contra su propio tiempo comprometido. */
-  const filasCrit = (kpi.porCriticidad || [])
-    .filter((d) => d.cerrados > 0)
-    .map((d) => {
-      const c = colorVsMeta(d.mttr, d.meta);
-      return `<tr>
-        <td>${_esc(d.label)}</td>
-        <td class="c"><b style="color:${c}">${d.mttr.toFixed(1)} d</b></td>
-        <td class="c mut">meta ${d.meta} d</td>
-        <td class="c mut">${d.cerrados}</td>
-      </tr>`;
-    }).join("");
+/* Resumen de lo consumido en el mes: junta el material comprado ya aprobado
+   con lo retirado de bodega, agrupado por artículo. Sirve para cuadrar el
+   gasto de materiales del mes contra lo que realmente salió. */
+function resumenMaterialesHTML(acts) {
+  const mapa = {};
+  const sumar = (nombre, unidad, cant, costo, origen) => {
+    const k = `${nombre}|${unidad}`;
+    const m = mapa[k] || (mapa[k] = { nombre, unidad, cant: 0, costo: 0, origenes: new Set() });
+    m.cant += Number(cant) || 0;
+    m.costo += (Number(cant) || 0) * (Number(costo) || 0);
+    m.origenes.add(origen);
+  };
 
-  const tablaCrit = (!compacto && filasCrit)
-    ? `<table class="mini" style="margin-top:6px">
-        <thead><tr><th>Criticidad</th><th class="c">MTTR</th><th class="c">Meta</th><th class="c">Cierres</th></tr></thead>
-        <tbody>${filasCrit}</tbody>
-      </table>`
-    : "";
+  acts.forEach((a) => {
+    // Lo retirado de bodega siempre cuenta: ya salió físicamente
+    (a.consumos || []).forEach((c) => sumar(c.nombre, c.unidad || "u", c.cantidad, c.costoUnitario, "Bodega"));
+    /* El material comprado solo cuenta si está aprobado y aún no se liquidó;
+       una vez liquidado ya figura arriba como consumo y se duplicaría. */
+    if (a.materialesEstado === "aprobado" && !a.materialesLiquidados) {
+      (a.materiales || []).forEach((m) => sumar(m.nombre, m.unidad || "u", m.cantidad, m.costoUnitario, "Compra"));
+    }
+  });
 
-  return `<div class="kpis${compacto ? " mini" : ""}">
-    ${cel("MTBF", kpi.mtbf !== null ? `${kpi.mtbf.toFixed(1)} d` : "—",
-        kpi.nFallas > 0 ? `${kpi.diasTranscurridos} d ÷ ${kpi.nFallas} correctivos` : "sin correctivos", colorMTBF(kpi.mtbf))}
-    ${cel("MTTR", kpi.mttr !== null ? duracionTexto(kpi.mttr) : "—",
-        kpi.cerrados > 0 ? `promedio de ${kpi.cerrados} cierre(s)` : "sin cierres", colorVsMeta(kpi.mttr, META_MTTR_GLOBAL))}
-    ${cel("Satisfacción", sat.promedio !== null ? `${sat.promedio.toFixed(1)} / 5` : "—",
-        sat.total > 0 ? `${sat.total} de ${sat.cerradas} calificadas` : "sin calificaciones",
-        sat.promedio === null ? "#8D939B" : sat.promedio >= 4.5 ? "#2E7D5B" : sat.promedio >= 3.5 ? "#D9A441" : "#C1442D")}
-  </div>${tablaCrit}`;
+  const filas = Object.values(mapa)
+    .sort((x, y) => y.costo - x.costo)
+    .map((m) => `<tr>
+      <td>${_esc(m.nombre)}</td>
+      <td class="c">${Number(m.cant.toFixed(2))} ${_esc(m.unidad)}</td>
+      <td class="c mut">${[...m.origenes].join(" + ")}</td>
+      <td class="r">${money(m.costo)}</td>
+    </tr>`).join("");
+
+  const total = Object.values(mapa).reduce((s, m) => s + m.costo, 0);
+  if (!filas) return '<p class="mut">Sin materiales ni consumos registrados este mes.</p>';
+
+  return `<table class="mini">
+    <thead><tr><th>Material</th><th class="c">Cantidad</th><th class="c">Origen</th><th class="r">Costo</th></tr></thead>
+    <tbody>${filas}
+      <tr class="tot-r"><td colspan="3">Total materiales y bodega</td><td class="r">${money(total)}</td></tr>
+    </tbody>
+  </table>`;
 }
 
 function filaCumplimiento(a, nombre) {
@@ -8182,17 +8188,15 @@ function construirReporteMensualHTML(data, mes) {
   const sedes = data.sedes;
   const ids = sedes.map((s) => s.id);
   const kpi = indicadoresMes(data, ids, mes);
-  const sat = satisfaccion(data, ids);
   const glob = presupuestoGlobalMes(data, mes);
   const avanceG = avancePlan(data, ids, mes);
   const serie = serieCostoEstudiante(data, ids, mes).map((p) => ({ label: p.mes, v: p.costo }));
+  const resumen = data.resumenesMes?.[mes] || generarResumenUnificado(data, sedes, mes);
 
-  // Conteo de actividades del mes
-  const delMes = (arr, campo) => arr.filter((x) => mesKey(x[campo] || "") === mes);
+  // Actividades del mes, de los tres tipos
   const ordMes = data.ordenes.filter((o) => mesContable(o) === mes);
   const solMes = data.solicitudes.filter((s) => mesContable(s) === mes);
   const srvMes = (data.servicios || []).filter((s) => mesKey(s.fecha) === mes);
-  const cerradas = [...ordMes, ...solMes, ...srvMes].filter((x) => x.estado === "completada").length;
   const totalAct = ordMes.length + solMes.length + srvMes.length;
 
   const porSede = sedes.map((s) => ({
@@ -8208,14 +8212,16 @@ function construirReporteMensualHTML(data, mes) {
       { nombre: "Preventivos", color: "#ED5B23", valores: porSede.map((p) => p.prev) },
       { nombre: "Correctivos", color: "#35383C", valores: porSede.map((p) => p.corr) },
       { nombre: "Servicios", color: "#3B6EA5", valores: porSede.map((p) => p.serv) },
-    ], { w: 500, h: 155 });
+    ], { w: 470, h: 140 });
 
-  /* --- Desglose por sede --- */
+  const parrafoHTML = resumen.parrafo.map((seg) => (seg.b ? `<b>${_esc(seg.t)}</b>` : _esc(seg.t))).join("");
+
+  /* --- Desglose por sede: cada una en su propia página --- */
   const seccionesSede = sedes.map((s) => {
     const k = indicadoresMes(data, [s.id], mes);
-    const st = satisfaccion(data, [s.id]);
     const p = { ...presupuestoSedeMes(data, s.id, mes), nombre: s.nombre };
     const a = avancePlan(data, [s.id], mes);
+    const nota = resumen.vinetas.find((v) => v.nombre === s.nombre);
     const acts = [
       ...data.ordenes.filter((o) => o.sedeId === s.id && mesContable(o) === mes).map((o) => ({ ...o, tipo: "preventivo" })),
       ...data.solicitudes.filter((x) => x.sedeId === s.id && mesContable(x) === mes).map((x) => ({ ...x, tipo: "correctivo", tarea: x.descripcion })),
@@ -8226,6 +8232,7 @@ function construirReporteMensualHTML(data, mes) {
         <td><b>${_esc(x.codigo)}</b></td>
         <td>${_esc(tipoMeta(x.tipo).label)}</td>
         <td>${_esc(x.tarea)}</td>
+        <td class="c">${_esc(x.fechaCompletada || x.fechaProgramada || x.fecha || "—")}</td>
         <td class="c">${_esc(ESTADOS[x.estado]?.label || x.estado)}</td>
         <td class="r">${costoActividad(x) > 0 ? money(costoActividad(x)) : "—"}</td>
       </tr>`).join("");
@@ -8237,103 +8244,97 @@ function construirReporteMensualHTML(data, mes) {
         <div class="sede-tot"><span>Costo del mes</span><b>${money(k.costoTotal)}</b></div>
       </div>
 
-      ${bloqueIndicadores(k, st, { compacto: true })}
+      <div class="resumen-sede">
+        <p>Durante ${_esc(mesLabel(mes))} se registraron <b>${k.nFallas}</b> correctivo(s), de los cuales
+        <b>${k.cerrados}</b> quedaron cerrados${a.total ? `, con un cumplimiento del plan preventivo del <b>${a.cumplimiento === null ? "—" : a.cumplimiento.toFixed(0) + "%"}</b>` : ""}.
+        El costo del mes fue de <b>${money(k.costoTotal)}</b>${k.costoPorEstudiante !== null ? ` (${money(k.costoPorEstudiante)} por estudiante)` : ""}.
+        ${nota ? _esc(nota.texto.charAt(0).toUpperCase() + nota.texto.slice(1)) + "." : ""}</p>
+      </div>
 
-      <div class="cols2">
+      <h4>Indicadores de confiabilidad</h4>
+      ${tablaIndicadoresCriticidad(k)}
+
+      <div class="cols3">
         <div><h4>Cumplimiento del plan</h4>${a.total ? filaCumplimiento(a, s.nombre) : '<p class="mut">Sin plan asignado.</p>'}</div>
         <div><h4>Presupuesto de materiales</h4>${filaPresupuesto(p)}</div>
+        <div><h4>Composición del costo</h4>${tablaCostos(k)}</div>
       </div>
 
-      <div class="cols2">
-        <div><h4>Composición del costo</h4>${tablaCostos(k)}</div>
-        <div><h4>Actividades del mes (${acts.length})</h4>
-          ${filas ? `<table class="mini act"><thead><tr><th>Código</th><th>Tipo</th><th>Trabajo</th><th class="c">Estado</th><th class="r">Costo</th></tr></thead><tbody>${filas}</tbody></table>`
-            : '<p class="mut">Sin actividades registradas este mes.</p>'}</div>
-      </div>
+      <h4>Actividades del mes (${acts.length})</h4>
+      ${filas
+        ? `<table class="mini act"><thead><tr><th>Código</th><th>Tipo</th><th>Trabajo</th><th class="c">Fecha</th><th class="c">Estado</th><th class="r">Costo</th></tr></thead><tbody>${filas}</tbody></table>`
+        : '<p class="mut">Sin actividades registradas este mes.</p>'}
+
+      <h4 style="margin-top:10px">Materiales y consumo de bodega</h4>
+      ${resumenMaterialesHTML(acts)}
     </section>`;
   }).join("");
 
   return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
 <title>Reporte de gestión · ${_esc(mesLabel(mes))}</title>
 <style>
-@page { size: A4; margin: 13mm 11mm; }
+@page { size: A4; margin: 12mm 11mm; }
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:9pt;line-height:1.42}
-.hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #35383C;padding-bottom:8px;margin-bottom:12px}
-.hdr h1{font-size:16pt;text-transform:uppercase;letter-spacing:.02em}
-.hdr .sub{font-size:9pt;color:#787D85;margin-top:2px}
-.marca{text-align:right;font-size:8pt;color:#787D85}
-.marca b{display:block;font-size:12pt;color:#ED5B23;letter-spacing:.06em}
-.marca img{max-height:34px;margin-bottom:3px}
+body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:8.5pt;line-height:1.38}
+.hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #35383C;padding-bottom:7px;margin-bottom:10px}
+.hdr h1{font-size:15pt;text-transform:uppercase;letter-spacing:.02em}
+.hdr .sub{font-size:8.5pt;color:#787D85;margin-top:2px}
+.marca{text-align:right;font-size:7.5pt;color:#787D85}
+.marca b{display:block;font-size:11pt;color:#ED5B23;letter-spacing:.06em}
+.marca img{max-height:38px;margin-bottom:3px}
 h2{font-size:12pt;text-transform:uppercase;letter-spacing:.03em}
-h3{font-size:10pt;text-transform:uppercase;letter-spacing:.05em;margin:16px 0 7px;padding-bottom:3px;border-bottom:1px solid #D8D4CB}
-h4{font-size:8pt;text-transform:uppercase;letter-spacing:.05em;color:#787D85;margin-bottom:5px}
+h3{font-size:9.5pt;text-transform:uppercase;letter-spacing:.05em;margin:12px 0 6px;padding-bottom:3px;border-bottom:1px solid #D8D4CB}
+h4{font-size:7.5pt;text-transform:uppercase;letter-spacing:.05em;color:#787D85;margin-bottom:4px}
 .mut{color:#8D939B;font-size:7.5pt}
 .r{text-align:right}.c{text-align:center}
-.res{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
-.res div{border:1px solid #D8D4CB;border-radius:2px;padding:7px 9px}
+.res{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:10px}
+.res div{border:1px solid #D8D4CB;border-radius:2px;padding:7px 10px}
 .res span{display:block;font-size:7pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B}
-.res b{font-size:16pt;line-height:1.1}
-.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
-.kpis.mini .kpi{padding:5px 8px}
-.kpi{border:1px solid #D8D4CB;border-radius:2px;padding:7px 9px}
-.k-lbl{display:block;font-size:7pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B}
-.kpi b{font-size:13pt;display:block;line-height:1.25}
-.k-sub{font-size:6.8pt;color:#8D939B}
-.cols2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:10px}
-.cump{margin-bottom:8px}
-.cump-h{display:flex;justify-content:space-between;font-size:8pt;margin-bottom:2px}
+.res b{font-size:17pt;line-height:1.1}
+.cols2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:9px}
+.cols3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:9px}
+.cump{margin-bottom:7px}
+.cump-h{display:flex;justify-content:space-between;font-size:7.5pt;margin-bottom:2px}
 .cump-h span{font-weight:600}
-.cump-d{font-size:6.8pt;color:#8D939B;display:block;margin-top:2px}
+.cump-d{font-size:6.5pt;color:#8D939B;display:block;margin-top:2px}
 .stack{display:flex;width:100%;border-radius:2px;overflow:hidden;background:#E3E0D8}
 .stack span{display:block;height:100%}
-table{width:100%;border-collapse:collapse;font-size:8pt}
-.mini td,.mini th{padding:3px 5px;border-bottom:1px solid #EFEDE8}
-.mini th{background:#F2F0EB;text-align:left;font-size:7pt;text-transform:uppercase;letter-spacing:.04em;color:#787D85}
-.act td{font-size:7.5pt}
+table{width:100%;border-collapse:collapse;font-size:7.5pt}
+.mini td,.mini th{padding:2.5px 5px;border-bottom:1px solid #EFEDE8}
+.mini th{background:#F2F0EB;text-align:left;font-size:6.8pt;text-transform:uppercase;letter-spacing:.04em;color:#787D85}
+.act td{font-size:7pt}
 .tot-r td{font-weight:bold;border-top:1px solid #D8D4CB;background:#F7F6F3}
 .pt{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:5px}
-.graf{border:1px solid #D8D4CB;border-radius:2px;padding:8px;margin-bottom:10px}
+.graf{border:1px solid #D8D4CB;border-radius:2px;padding:7px}
 .sede{page-break-before:always;break-before:page}
-.resumen-txt{border:1px solid #D8D4CB;border-left:3px solid #ED5B23;border-radius:2px;padding:10px 12px;margin-bottom:14px;background:#FBFAF7}
-.resumen-txt h4{margin-bottom:5px}
-.resumen-txt p{font-size:8.6pt;line-height:1.55;text-align:justify;margin-bottom:6px}
-.resumen-txt ul{list-style:none;padding:0}
-.resumen-txt li{font-size:8.3pt;line-height:1.5;padding-left:11px;position:relative;margin-bottom:2px}
-.resumen-txt li::before{content:"";position:absolute;left:0;top:6px;width:5px;height:5px;border-radius:50%;background:#ED5B23}
-.sede-h{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #ED5B23;padding-bottom:5px;margin-bottom:10px}
+.resumen p{font-size:8.4pt;line-height:1.5;text-align:justify;margin-bottom:9px}
+.resumen-sede{border-left:3px solid #ED5B23;padding:2px 0 2px 9px;margin-bottom:9px}
+.resumen-sede p{font-size:8pt;line-height:1.45;text-align:justify}
+.sede-h{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #ED5B23;padding-bottom:5px;margin-bottom:8px}
 .sede-tot{text-align:right}
 .sede-tot span{display:block;font-size:7pt;text-transform:uppercase;color:#8D939B;letter-spacing:.05em}
 .sede-tot b{font-size:14pt;color:#ED5B23}
-.pie{margin-top:14px;padding-top:6px;border-top:1px solid #D8D4CB;font-size:7pt;color:#8D939B;display:flex;justify-content:space-between}
+.pie{margin-top:12px;padding-top:6px;border-top:1px solid #D8D4CB;font-size:7pt;color:#8D939B;display:flex;justify-content:space-between}
 </style></head><body>
 
 <div class="hdr">
   <div><h1>Reporte de gestión mensual</h1>
     <p class="sub">${_esc(mesLabel(mes))} · ${sedes.length} sede(s) · ${kpi.estudiantes} estudiantes</p></div>
-  <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${_esc(fmtDate(new Date()))}</div>
+  <div class="marca"><img src="${LOGO_ISE}" alt="IndustriaMe"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${_esc(fmtDate(new Date()))}</div>
 </div>
-
-${bloqueResumenUnificado(data, sedes, mes)}
 
 <h3>1. Consolidado general</h3>
 
+<div class="resumen"><p>${parrafoHTML}</p></div>
+
 <div class="res">
-  <div><span>Actividades</span><b>${totalAct}</b><span class="mut">${cerradas} completadas</span></div>
-  <div><span>Correctivos</span><b>${solMes.length}</b><span class="mut">${kpi.nFallas} reportados</span></div>
-  <div><span>Costo total</span><b style="color:#ED5B23;font-size:13pt">${money(kpi.costoTotal)}</b><span class="mut">${money(kpi.costoPorEstudiante || 0)} / estudiante</span></div>
-  <div><span>Presupuesto materiales</span><b style="font-size:13pt">${money(glob.gastado)}</b><span class="mut">de ${money(glob.presupuesto)}</span></div>
+  <div><span>Actividades del mes</span><b>${totalAct}</b><span class="mut">${ordMes.length} preventivas · ${solMes.length} correctivas · ${srvMes.length} servicios</span></div>
+  <div><span>Gasto total de materiales</span><b style="color:#ED5B23">${money(glob.gastado)}</b><span class="mut">de ${money(glob.presupuesto)} presupuestados</span></div>
 </div>
 
-${bloqueIndicadores(kpi, sat)}
-
 <div class="cols2">
+  <div><h4>Indicadores de confiabilidad</h4>${tablaIndicadoresCriticidad(kpi)}</div>
   <div class="graf"><h4>Actividades por sede</h4>${graficaActividades}</div>
-  <div class="graf"><h4>Confiabilidad</h4>
-    <div style="display:flex;gap:6px">
-      <div style="flex:1;text-align:center"><span class="mut">MTBF</span>${svgMedidor(kpi.mtbf, GAUGE_MAX_DIAS, colorMTBF(kpi.mtbf))}</div>
-      <div style="flex:1;text-align:center"><span class="mut">MTTR</span>${svgMedidor(kpi.mttr, GAUGE_MAX_DIAS, colorVsMeta(kpi.mttr, META_MTTR_GLOBAL))}</div>
-    </div></div>
 </div>
 
 <div class="cols2">
@@ -8349,12 +8350,12 @@ ${bloqueIndicadores(kpi, sat)}
 
 <div class="cols2">
   <div><h4>Composición del costo</h4>${tablaCostos(kpi)}</div>
-  <div class="graf"><h4>Costo por estudiante · últimos 6 meses</h4>
-    ${svgLinea(serie, { w: 480, h: 140, fmt: (v) => "$" + Number(v).toFixed(2) })}</div>
+  <div class="graf"><h4>Costo por estudiante · últimos meses</h4>
+    ${svgLinea(serie, { w: 460, h: 125, fmt: (v) => "$" + Number(v).toFixed(2) })}</div>
 </div>
 
 <h3>2. Desglose por sede</h3>
-<p class="mut">Cada sede se presenta en su propia página con sus indicadores, cumplimiento, presupuesto y actividades del mes.</p>
+<p class="mut">Cada sede se presenta en su propia página con su resumen, indicadores, cumplimiento, presupuesto, actividades y materiales del mes.</p>
 
 ${seccionesSede}
 
@@ -8439,7 +8440,8 @@ function checklistHTML(items) {
 /* Documento HTML autónomo en A4 listo para imprimir o guardar como PDF. */
 /* El logo se referencia por su URL final, la que Vite genera al compilar.
    Dentro de las plantillas HTML no se puede usar el import directamente. */
-const LOGO_REPORTE = logoCliente;
+const LOGO_REPORTE = logoCliente;   // logo del cliente (Innova Schools)
+const LOGO_ISE = logoISE;           // logo propio, encabeza el reporte de gestión
 
 /* ============================================================================
    GENERACIÓN DE PDF
