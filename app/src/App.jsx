@@ -539,7 +539,11 @@ const presupuestoDeSede = (data, sedeId) => {
 };
 
 function actividadesDeSedeMes(data, sedeId, mes) {
-  const todas = [...(data.ordenes || []), ...(data.solicitudes || [])];
+  // Se marca el tipo para que el popup de detalle sepa qué está mostrando
+  const todas = [
+    ...(data.ordenes || []).map((o) => ({ ...o, tipo: "preventivo" })),
+    ...(data.solicitudes || []).map((s) => ({ ...s, tipo: "correctivo", tarea: s.tarea || s.descripcion })),
+  ];
   return todas.filter((a) => a.sedeId === sedeId && mesContable(a) === mes);
 }
 
@@ -3301,8 +3305,12 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
               const abierta = detallePres === p.sedeId;
               const est = ESTADO_PRESUPUESTO[p.estado];
               return (
-                <button key={p.sedeId} onClick={() => setDetallePres(abierta ? null : p.sedeId)} className="w-full text-left">
-                  <PresupuestoBar p={p} />
+                <div key={p.sedeId}>
+                  {/* El clic vive en la barra, no en el contenedor: dentro del
+                      detalle hay botones y no pueden anidarse en otro botón. */}
+                  <button onClick={() => setDetallePres(abierta ? null : p.sedeId)} className="w-full text-left">
+                    <PresupuestoBar p={p} />
+                  </button>
                   {abierta && (
                     <div className="mt-2 pl-2 border-l-2 space-y-1" style={{ borderColor: est.color }}>
                       {actividadesPres.map((a) => {
@@ -3311,8 +3319,11 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
                         return (
                           <div key={a.id} className="flex items-center justify-between text-[11px] gap-2">
                             <span className="min-w-0 truncate" style={cChar}>{a.codigo} · {a.tarea || a.descripcion}</span>
-                            <span className="shrink-0 font-semibold" style={{ color: pendiente ? COLORS.slate : COLORS.orange }}>
-                              {money(pendiente ? costoEstimado(a) : real)}{pendiente ? " (sin aprobar)" : ""}
+                            <span className="flex items-center gap-1.5 shrink-0">
+                              <span className="font-semibold" style={{ color: pendiente ? COLORS.slate : COLORS.orange }}>
+                                {money(pendiente ? costoEstimado(a) : real)}{pendiente ? " (sin aprobar)" : ""}
+                              </span>
+                              <BotonDetalle item={a} size={12} />
                             </span>
                           </div>
                         );
@@ -3320,7 +3331,7 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
                       {actividadesPres.length === 0 && <p className="text-[11px]" style={cSlate}>Sin gastos registrados este mes.</p>}
                     </div>
                   )}
-                </button>
+                </div>
               );
             })}
           </div>
@@ -6547,8 +6558,10 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
           {g.porSede.map((p) => {
             const est = ESTADO_PRESUPUESTO[p.estado];
             return (
-              <button key={p.sedeId} onClick={() => setDetalle(detalle === p.sedeId ? null : p.sedeId)} className="w-full text-left">
-                <PresupuestoBar p={p} />
+              <div key={p.sedeId}>
+                <button onClick={() => setDetalle(detalle === p.sedeId ? null : p.sedeId)} className="w-full text-left">
+                  <PresupuestoBar p={p} />
+                </button>
                 {detalle === p.sedeId && (
                   <div className="mt-2 pl-2 border-l-2 space-y-1" style={{ borderColor: est.color }}>
                     {actividadesDetalle.map((a) => {
@@ -6557,8 +6570,11 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
                       return (
                         <div key={a.id} className="flex items-center justify-between text-[11px] gap-2">
                           <span className="min-w-0 truncate" style={cChar}>{a.codigo} · {a.tarea || a.descripcion}</span>
-                          <span className="shrink-0 font-semibold" style={{ color: pendiente ? COLORS.slate : COLORS.orange }}>
-                            {money(pendiente ? costoEstimado(a) : real)}{pendiente ? " (sin aprobar)" : ""}
+                          <span className="flex items-center gap-1.5 shrink-0">
+                            <span className="font-semibold" style={{ color: pendiente ? COLORS.slate : COLORS.orange }}>
+                              {money(pendiente ? costoEstimado(a) : real)}{pendiente ? " (sin aprobar)" : ""}
+                            </span>
+                            <BotonDetalle item={a} size={12} />
                           </span>
                         </div>
                       );
@@ -6566,7 +6582,7 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
                     {actividadesDetalle.length === 0 && <p className="text-[11px]" style={cSlate}>Sin gastos registrados este mes.</p>}
                   </div>
                 )}
-              </button>
+              </div>
             );
           })}
         </div>
@@ -8519,7 +8535,7 @@ async function compartirPDF(blob, nombre) {
 /* Reporte de monitoreo: misma tabla que el popup (variables por plan, meses
    agrupados o desplegados según lo que el usuario dejó abierto en pantalla),
    en formato compacto para que quepa todo en el ancho de la hoja. */
-function construirReporteMonitoreoHTML(titulo, breadcrumb, porPlan, columnas, celda, etiquetaCorta) {
+function construirReporteMonitoreoHTML(titulo, breadcrumb, porPlan, columnas, celda, etiquetaCorta, nombreCorto) {
   const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
   const nCols = columnas.length + 1;
@@ -8538,7 +8554,7 @@ function construirReporteMonitoreoHTML(titulo, breadcrumb, porPlan, columnas, ce
         const et = etiquetaCorta(v.tipo, d.valor);
         return `<td class="c" style="color:${et.color};font-weight:700">${esc(et.txt)}</td>`;
       }).join("");
-      return `<tr><td class="v">${esc(v.texto)}${v.unidad ? ` <span class="mut">(${esc(v.unidad)})</span>` : ""}</td>${celdas}</tr>`;
+      return `<tr><td class="v" title="${esc(v.texto)}">${esc(nombreCorto(v.texto))}${v.unidad ? ` <span class="mut">(${esc(v.unidad)})</span>` : ""}</td>${celdas}</tr>`;
     }).join("");
     return cab + filas;
   }).join("");
@@ -8573,7 +8589,7 @@ td.grp{background:#F2EFE9;font-weight:700;font-size:7pt;padding:3px}
   <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div>
 </div>
 <table>
-  <thead><tr><th style="width:120px">Variable</th>${cabFechas}</tr></thead>
+  <thead><tr><th style="width:92px">Variable</th>${cabFechas}</tr></thead>
   <tbody>${cuerpo || `<tr><td colspan="${nCols}" class="c">Sin lecturas</td></tr>`}</tbody>
 </table>
 <p class="mut" style="margin-top:6px">En variables numéricas, el número pequeño es la diferencia con la lectura anterior; en un mes agrupado, el consumo de ese mes.</p>
@@ -9392,6 +9408,15 @@ function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
     return { valor: ultima.valor, delta: base === null ? null : ultima.valor - base };
   };
 
+  /* Muchas variables se escriben como "Etiqueta: descripción larga". En la
+     tabla basta la etiqueta — el texto completo queda en el tooltip. Las que
+     no siguen ese patrón se recortan a dos líneas. */
+  const nombreCorto = (texto) => {
+    const t = String(texto || "");
+    const i = t.indexOf(":");
+    return i > 2 && i <= 32 ? t.slice(0, i) : t;
+  };
+
   const etiquetaCorta = (tipo, valor) => {
     if (tipo === "estado") return { txt: valor === "bueno" ? "Bueno" : valor === "alarma" ? "Alarma" : valor === "malo" ? "Malo" : "—", color: ESTADO_PASO[valor]?.color || COLORS.slate };
     if (tipo === "validacion") return { txt: valor === "si" ? "Sí" : valor === "no" ? "No" : "—", color: VALIDACION[valor]?.color || COLORS.slate };
@@ -9406,7 +9431,7 @@ function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
   const hacerPDF = async () => {
     setGenerando(true); setAvisoPDF(""); setProgreso("Preparando…");
     try {
-      const html = construirReporteMonitoreoHTML(titulo, breadcrumb, porPlan, columnas, celda, etiquetaCorta);
+      const html = construirReporteMonitoreoHTML(titulo, breadcrumb, porPlan, columnas, celda, etiquetaCorta, nombreCorto);
       const blob = await generarPDF(html, { onProgreso: setProgreso });
       const slug = `${titulo}`.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
       const nombre = `monitoreo-${slug || "reporte"}-${fmtDate(new Date())}.pdf`;
@@ -9461,7 +9486,7 @@ function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
               <thead>
                 <tr>
                   <th className="sticky left-0 top-0 z-30 bg-white text-left px-2 py-1"
-                    style={{ borderBottom: bd, borderRight: bd, minWidth: 150, fontSize: 10, ...cChar }}>
+                    style={{ borderBottom: bd, borderRight: bd, width: 130, minWidth: 130, maxWidth: 130, fontSize: 10, ...cChar }}>
                     Variable
                   </th>
                   {columnas.map((c) => (
@@ -9490,8 +9515,14 @@ function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
                       {!cerrado && vars.map((v) => (
                         <tr key={v.clave}>
                           <td className="sticky left-0 z-10 bg-white px-2 py-1"
-                            style={{ borderBottom: bd, borderRight: bd, fontSize: 10, ...cSlate }}>
-                            {v.texto}{v.unidad ? ` (${v.unidad})` : ""}
+                            title={v.texto}
+                            style={{
+                              borderBottom: bd, borderRight: bd, fontSize: 10, ...cSlate,
+                              width: 130, minWidth: 130, maxWidth: 130,
+                              display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+                              overflow: "hidden", lineHeight: 1.25,
+                            }}>
+                            {nombreCorto(v.texto)}{v.unidad ? ` (${v.unidad})` : ""}
                           </td>
                           {columnas.map((c) => {
                             const d = celda(v, c);
