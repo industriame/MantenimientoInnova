@@ -1088,24 +1088,29 @@ function isEmptyState(raw) {
   );
 }
 
-/* Compara dos listas por id y devuelve solo lo que cambió: qué insertar o
-   actualizar (upsert) y qué ids ya no están (para borrarlos explícitamente).
-   Es la base de la escritura selectiva: nunca se manda a la base algo que
-   ya está igual a como se guardó la última vez. */
+/* Compara dos listas por id y devuelve solo lo que se insertó o cambió.
+   Ya NO deduce borrados: antes, todo lo que estaba en la base pero no en la
+   pantalla se daba por eliminado. Si la pantalla quedaba desactualizada (una
+   consulta que llegaba tarde), se borraban registros que nadie eliminó —
+   así se perdieron solicitudes recién creadas. */
 function diffPorId(anterior, actual) {
   const antMap = new Map((anterior || []).map((x) => [x.id, x]));
-  const actMap = new Map((actual || []).map((x) => [x.id, x]));
   const upsert = [];
-  for (const [id, item] of actMap) {
-    const prev = antMap.get(id);
+  for (const item of actual || []) {
+    const prev = antMap.get(item.id);
     if (!prev || JSON.stringify(prev) !== JSON.stringify(item)) upsert.push(item);
   }
-  const del = [];
-  for (const id of antMap.keys()) {
-    if (!actMap.has(id)) del.push(id);
-  }
-  return { upsert, delete: del };
+  return { upsert };
 }
+
+/* Registro de lo que el usuario eliminó a propósito, con el botón de eliminar
+   o el reinicio. Es lo ÚNICO que se borra de la base: si algo falta en la
+   pantalla por cualquier otra razón, se ignora. Se vacía cuando el borrado
+   queda confirmado en la base; si el guardado falla, se reintenta. */
+const BORRADOS = { ordenes: new Set(), solicitudes: new Set(), servicios: new Set() };
+const marcarBorrado = (coleccion, ids) => {
+  [].concat(ids).filter(Boolean).forEach((id) => BORRADOS[coleccion].add(id));
+};
 
 function useSystemData() {
   const [data, setData] = useState(null);
@@ -1139,16 +1144,27 @@ function useSystemData() {
     const dOrd = diffPorId(base.ordenes, toSave.ordenes);
     const dSol = diffPorId(base.solicitudes, toSave.solicitudes);
     const dSrv = diffPorId(base.servicios, toSave.servicios);
+    // Solo se borra lo que el usuario eliminó a propósito (ver BORRADOS)
+    const enviados = {
+      ordenes: [...BORRADOS.ordenes],
+      solicitudes: [...BORRADOS.solicitudes],
+      servicios: [...BORRADOS.servicios],
+    };
     const payload = {
       ...toSave,
-      ordenesUpsert: dOrd.upsert, ordenesDelete: dOrd.delete,
-      solicitudesUpsert: dSol.upsert, solicitudesDelete: dSol.delete,
-      serviciosUpsert: dSrv.upsert, serviciosDelete: dSrv.delete,
+      ordenesUpsert: dOrd.upsert, ordenesDelete: enviados.ordenes,
+      solicitudesUpsert: dSol.upsert, solicitudesDelete: enviados.solicitudes,
+      serviciosUpsert: dSrv.upsert, serviciosDelete: enviados.servicios,
     };
     delete payload.ordenes;
     delete payload.solicitudes;
     delete payload.servicios;
-    return payload;
+    return { payload, enviados };
+  };
+
+  // Borrados ya confirmados en la base: salen del registro
+  const confirmarBorrados = (enviados) => {
+    Object.entries(enviados).forEach(([col, ids]) => ids.forEach((id) => BORRADOS[col].delete(id)));
   };
 
   const flushToDb = useCallback(async () => {
@@ -1156,7 +1172,9 @@ function useSystemData() {
     if (!toSave) return false;
     escribiendoRef.current = true;
     try {
-      const saved = normalizeData(await saveAppStateV2(construirPayloadDiff(toSave)));
+      const envio = construirPayloadDiff(toSave);
+      const saved = normalizeData(await saveAppStateV2(envio.payload));
+      confirmarBorrados(envio.enviados);
       servidorRef.current = saved;
       /* ¿Se editó algo MIENTRAS se guardaba? Se compara la referencia del
          objeto, no su texto: normalizeData reordena claves y rellena campos,
@@ -1171,7 +1189,9 @@ function useSystemData() {
       } else {
         // Sí hubo cambios nuevos: se reenvían, ahora sí con diff contra "saved"
         const toSave2 = dataRef.current;
-        const again = normalizeData(await saveAppStateV2(construirPayloadDiff(toSave2)));
+        const envio2 = construirPayloadDiff(toSave2);
+        const again = normalizeData(await saveAppStateV2(envio2.payload));
+        confirmarBorrados(envio2.enviados);
         servidorRef.current = again;
         dataRef.current = again;
         snapshotRef.current = JSON.stringify(again);
@@ -1225,8 +1245,15 @@ function useSystemData() {
       if (escribiendoRef.current || document.hidden) return;
       if (flushWaitersRef.current.length) return;
       if (Date.now() - (ultimoEscritoRef.current || 0) < GRACIA_SYNC_MS) return;
+      // Marca del último guardado al salir la consulta, para detectar si
+      // hubo otro mientras la respuesta viajaba
+      const marca = ultimoEscritoRef.current;
       try {
         const remote = normalizeData(await loadAppState());
+        /* Si mientras la consulta viajaba hubo un guardado, esta foto se tomó
+           ANTES de él y ya está vieja: se descarta. Aceptarla hacía desaparecer
+           de la pantalla lo recién creado (y, antes de BORRADOS, lo borraba). */
+        if (escribiendoRef.current || ultimoEscritoRef.current !== marca) return;
         if (isEmptyState(remote)) return;
         servidorRef.current = remote;
         const json = JSON.stringify(remote);
@@ -1387,8 +1414,16 @@ function useAcciones(data, persist, usuario) {
     /* Eliminar una actividad por completo. Pensado para depurar durante las
        pruebas: en operación normal las órdenes se cierran, no se borran. */
     eliminarActividad: (item) => {
-      if (item.tipo === "preventivo") return persist((d) => ({ ...d, ordenes: d.ordenes.filter((o) => o.id !== item.id) }));
-      if (item.tipo === "servicio") return persist((d) => ({ ...d, servicios: d.servicios.filter((x) => x.id !== item.id) }));
+      // Se registra como borrado a propósito: es lo único que la base elimina
+      if (item.tipo === "preventivo") {
+        marcarBorrado("ordenes", item.id);
+        return persist((d) => ({ ...d, ordenes: d.ordenes.filter((o) => o.id !== item.id) }));
+      }
+      if (item.tipo === "servicio") {
+        marcarBorrado("servicios", item.id);
+        return persist((d) => ({ ...d, servicios: d.servicios.filter((x) => x.id !== item.id) }));
+      }
+      marcarBorrado("solicitudes", item.id);
       return persist((d) => ({ ...d, solicitudes: d.solicitudes.filter((x) => x.id !== item.id) }));
     },
     updateActividad: (item, patch, opciones = {}) => {
@@ -6897,7 +6932,10 @@ function AdminServicios({ data, persist, user }) {
             {srv.estado !== "completada" && (
               <button onClick={() => setModal({ srv })} title="Editar la ficha del servicio"><Pencil size={13} color={COLORS.slate} /></button>
             )}
-            <DeleteBtn onConfirm={() => persist((data) => ({ ...data, servicios: servicios.filter((x) => x.id !== srv.id) }))} />
+            <DeleteBtn onConfirm={() => {
+              marcarBorrado("servicios", srv.id);
+              persist((data) => ({ ...data, servicios: servicios.filter((x) => x.id !== srv.id) }));
+            }} />
           </div>
         </div>
       </div>
@@ -7340,6 +7378,10 @@ function AdminReinicio({ data, persist }) {
     const d = { ...data };
 
     if (efectivo.actividades) {
+      // El reinicio también es un borrado a propósito: se registran todos
+      marcarBorrado("ordenes", data.ordenes.map((o) => o.id));
+      marcarBorrado("solicitudes", data.solicitudes.map((x) => x.id));
+      marcarBorrado("servicios", (data.servicios || []).map((x) => x.id));
       d.ordenes = []; d.solicitudes = []; d.servicios = [];
       d.otCounter = 1; d.solCounter = 1; d.srvCounter = 1;
     }
