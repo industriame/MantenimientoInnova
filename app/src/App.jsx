@@ -126,7 +126,9 @@ const CRITICIDAD = {
 };
 const CRITICIDAD_IDS = ["critico", "alta", "media", "baja"];
 
-// --- Flujo de materiales / costos ---
+/* --- Materiales comprados: flujo retirado ---
+   Ya no se crean ni se aprueban materiales nuevos; estas etiquetas quedan solo
+   para mostrar, como consulta, los registros que se hicieron con ese flujo. */
 const MAT_ESTADO = {
   borrador: { label: "En elaboración", color: COLORS.slate },
   pendiente_costeo: { label: "En presupuesto", color: COLORS.ambar },
@@ -2085,11 +2087,11 @@ function DetalleActividad({ item, data, onClose }) {
         </div>
       )}
 
-      {/* Materiales comprados */}
+      {/* Materiales comprados (registro anterior, solo consulta) */}
       {(item.materiales || []).length > 0 && (
         <div>
           <div className="flex items-center justify-between mb-1">
-            <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Materiales</p>
+            <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Materiales comprados · registro anterior</p>
             {matInfo && <Chip color={matInfo.color}>{matInfo.label}</Chip>}
           </div>
           <div className="space-y-1">
@@ -2100,6 +2102,9 @@ function DetalleActividad({ item, data, onClose }) {
               </div>
             ))}
           </div>
+          {item.materialesLiquidados && (
+            <p className="text-[10px] mt-1" style={cSlate}>Solo consulta: su costo ya está incluido en el consumo de bodega.</p>
+          )}
         </div>
       )}
 
@@ -7730,7 +7735,7 @@ function RegistroHistorico({ h, data }) {
           {(h.materiales || []).length > 0 && (
             <div>
               <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>
-                Materiales {h.materialesEstado === "aprobado" ? "(aprobados)" : `(${MAT_ESTADO[h.materialesEstado]?.label || "sin aprobar"})`}
+                Materiales comprados · registro anterior {h.materialesEstado === "aprobado" ? "(aprobados)" : `(${MAT_ESTADO[h.materialesEstado]?.label || "sin aprobar"})`}
               </p>
               {h.materiales.map((m) => (
                 <div key={m.id} className="flex items-center justify-between text-xs">
@@ -7738,6 +7743,9 @@ function RegistroHistorico({ h, data }) {
                   <span className="font-semibold" style={cOrange}>{money(m.cantidad * m.costoUnitario)}</span>
                 </div>
               ))}
+              {h.materialesLiquidados && (
+                <p className="text-[10px] mt-0.5" style={cSlate}>Solo consulta: su costo ya está incluido en el consumo de bodega.</p>
+              )}
             </div>
           )}
 
@@ -8538,7 +8546,7 @@ function construirReporteHTML(items, data, meta) {
       ${a.observaciones ? `<div class="blk"><h4>Observaciones</h4><p>${esc(a.observaciones)}</p></div>` : ""}
       ${a.resolucion ? `<div class="blk"><h4>Resolución</h4><p>${esc(a.resolucion)}</p></div>` : ""}
       ${consumos ? `<div class="blk"><h4>Consumo de bodega</h4><table class="mini"><tbody>${consumos}</tbody></table></div>` : ""}
-      ${materiales ? `<div class="blk"><h4>Materiales</h4><table class="mini"><tbody>${materiales}</tbody></table></div>` : ""}
+      ${materiales ? `<div class="blk"><h4>Materiales comprados (registro anterior)</h4><table class="mini"><tbody>${materiales}</tbody></table>${a.materialesLiquidados ? '<p class="mut">Solo consulta: su costo ya está incluido en el consumo de bodega.</p>' : ""}</div>` : ""}
 
       <div class="firma">
         <div><span></span><p>Ejecutado por</p></div>
