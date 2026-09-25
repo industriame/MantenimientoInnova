@@ -126,7 +126,9 @@ const CRITICIDAD = {
 };
 const CRITICIDAD_IDS = ["critico", "alta", "media", "baja"];
 
-// --- Flujo de materiales / costos ---
+/* --- Materiales comprados: flujo retirado ---
+   Ya no se crean ni se aprueban materiales nuevos; estas etiquetas quedan solo
+   para mostrar, como consulta, los registros que se hicieron con ese flujo. */
 const MAT_ESTADO = {
   borrador: { label: "En elaboración", color: COLORS.slate },
   pendiente_costeo: { label: "En presupuesto", color: COLORS.ambar },
@@ -347,7 +349,7 @@ function seedData() {
 
   // Órdenes preventivas: algunas completadas (dan historial + costo), una en curso
   const ordenes = [];
-  const mkOT = (n, plan, ap, estado, fecha, tecnicoId, mats, matEstado) => ({
+  const mkOT = (n, plan, ap, estado, fecha, tecnicoId) => ({
     id: uid("ot"),
     codigo: `OT-${String(n).padStart(4, "0")}`,
     planId: plan.id, tarea: plan.tarea, checklist: checklistDesdePasos(plan.procedimientoPasos),
@@ -357,30 +359,28 @@ function seedData() {
     tecnicoId, fechaProgramada: fecha,
     fechaCompletada: estado === "completada" ? fecha : "",
     estado, observaciones: "", foto: "",
-    materiales: mats || [], materialesEstado: matEstado || "",
+    materiales: [], materialesEstado: "",
     consumos: [], createdAt: fecha,
   });
 
-  const ot1 = mkOT(1, planes[0], planes[0].aplicaciones[0], "completada", dias(-25), cristian.id, [], "");
+  const ot1 = mkOT(1, planes[0], planes[0].aplicaciones[0], "completada", dias(-25), cristian.id);
   ot1.consumos = [{ id: uid("con"), stockId: "", nombre: "Foco LED 18W", unidad: "u", cantidad: 4, costoUnitario: 4.5, fecha: dias(-25) }];
   ordenes.push(ot1);
-  ordenes.push(mkOT(2, planes[1], planes[1].aplicaciones[0], "completada", dias(-18), cristian.id, [], ""));
-  ordenes.push(mkOT(3, planes[2], planes[2].aplicaciones[0], "en_proceso", dias(0), cristian.id,
-    [{ id: uid("mat"), nombre: "Empaque de grifería", cantidad: 6, unidad: "u", costoUnitario: 1.2 }], "pendiente_aprobacion"));
-  ordenes.push(mkOT(4, planes[3], planes[3].aplicaciones[1], "programada", dias(4), juan.id, [], ""));
+  ordenes.push(mkOT(2, planes[1], planes[1].aplicaciones[0], "completada", dias(-18), cristian.id));
+  ordenes.push(mkOT(3, planes[2], planes[2].aplicaciones[0], "en_proceso", dias(0), cristian.id));
+  ordenes.push(mkOT(4, planes[3], planes[3].aplicaciones[1], "programada", dias(4), juan.id));
 
   // Solicitudes correctivas
   const solDefs = [
     { act: 0, sol: patricia.id, desc: "Foco quemado en el aula, afecta visibilidad en la tarde.", crit: "media", estado: "pendiente", d: -1 },
-    { act: 1, sol: patricia.id, desc: "Grifo del comedor gotea constantemente.", crit: "alta", estado: "en_proceso", d: -4, prog: 0, tec: cristian.id,
-      mats: [{ id: uid("mat"), nombre: "Llave de paso 1/2\"", cantidad: 1, unidad: "u", costoUnitario: 12 }], matEstado: "pendiente_aprobacion" },
+    { act: 1, sol: patricia.id, desc: "Grifo del comedor gotea constantemente.", crit: "alta", estado: "en_proceso", d: -4, prog: 0, tec: cristian.id },
     { act: 2, sol: patricia.id, desc: "Puerta de baño con bisagra suelta.", crit: "baja", estado: "completada", d: -12, cierre: 3, calif: 5, tec: cristian.id,
-      mats: [{ id: uid("mat"), nombre: "Bisagra 3\"", cantidad: 2, unidad: "u", costoUnitario: 3.25 }], matEstado: "aprobado" },
+      cons: [{ nombre: "Bisagra 3\"", cantidad: 2, unidad: "u", costoUnitario: 3.25 }] },
     { act: 5, sol: andrea.id, desc: "Tomacorriente sin funcionar en sala de cómputo.", crit: "critico", estado: "pendiente", d: 0 },
     { act: 6, sol: andrea.id, desc: "Mancha de humedad en el techo.", crit: "media", estado: "programada", d: -6, prog: 0, tec: cristian.id },
     { act: 4, sol: patricia.id, desc: "Malla de la cancha con rotura.", crit: "", estado: "pendiente", d: -9 },
     { act: 3, sol: andrea.id, desc: "Cerradura del aula no cierra bien.", crit: "media", estado: "completada", d: -3, cierre: 3, prog: -1, tec: cristian.id,
-      mats: [{ id: uid("mat"), nombre: "Cerradura pomo", cantidad: 1, unidad: "u", costoUnitario: 14 }], matEstado: "aprobado" },
+      cons: [{ nombre: "Cerradura pomo", cantidad: 1, unidad: "u", costoUnitario: 14 }] },
   ];
 
   const solicitudes = solDefs.map((s, i) => {
@@ -397,7 +397,8 @@ function seedData() {
       fechaCompletada: s.estado === "completada" ? dias(s.d + (s.cierre ?? 2)) : "",
       horaCompletada: s.estado === "completada" ? (s.horaCierre || "15:30") : "",
       observaciones: "", foto: "", resolucion: s.estado === "completada" ? "Se ajustó y lubricó la bisagra." : "",
-      materiales: s.mats || [], materialesEstado: s.matEstado || "",
+      materiales: [], materialesEstado: "",
+      consumos: (s.cons || []).map((c) => ({ ...c, id: uid("con"), stockId: "", fecha: dias(s.d + (s.cierre ?? 2)) })),
       calificacion: s.calif || 0, comentarioCalif: "",
     };
   });
@@ -512,29 +513,18 @@ const sedesVisibles = (data, user) =>
     ? data.sedes
     : data.sedes.filter((s) => (user.sedeIds || []).includes(s.id));
 
-// --- Costos: el costo SIEMPRE es la suma de materiales aprobados ---
-function costoAprobado(item) {
-  // Una vez liquidado (al completar la actividad), ese costo ya quedó
-  // registrado en "consumos" — si se sigue sumando aquí también, se cuenta
-  // dos veces la misma compra.
-  if (!item || item.materialesEstado !== "aprobado" || item.materialesLiquidados) return 0;
-  return (item.materiales || []).reduce((s, m) => s + (Number(m.cantidad) || 0) * (Number(m.costoUnitario) || 0), 0);
-}
+// --- Costos de actividad: lo consumido de bodega ---
 /* Consumo de stock: se carga al presupuesto de inmediato, sin aprobación,
    porque el material ya estaba comprado y en bodega. */
 function costoConsumos(item) {
   return (item?.consumos || []).reduce((s, c) => s + (Number(c.cantidad) || 0) * (Number(c.costoUnitario) || 0), 0);
 }
 
-function costoEstimado(item) {
-  return (item?.materiales || []).reduce((s, m) => s + (Number(m.cantidad) || 0) * (Number(m.costoUnitario) || 0), 0);
-}
 // Mes contable de una actividad: cuando se completó, si no cuando está programada
 const mesContable = (item) => mesKey(item.fechaCompletada || item.fechaProgramada || item.fecha);
 
-/* --- PRESUPUESTO: gastado = aprobado; comprometido = en costeo/aprobación/
-   espera; proyección = extrapolación por avance del mes. Servicios aparte. --- */
-const MAT_COMPROMETIDOS = ["pendiente_costeo", "pendiente_aprobacion", "en_espera"];
+/* --- PRESUPUESTO: gastado = consumo de bodega; proyección = extrapolación
+   por avance del mes. Servicios aparte. --- */
 
 const presupuestoDeSede = (data, sedeId) => {
   const s = (data.sedes || []).find((x) => x.id === sedeId);
@@ -558,18 +548,14 @@ const serviciosDeSedeMes = (data, sedeId, mes) =>
 
 function presupuestoSedeMes(data, sedeId, mes) {
   const acts = actividadesDeSedeMes(data, sedeId, mes);
-  const gastado = acts.reduce((s, a) => s + costoAprobado(a) + costoConsumos(a), 0);
-  const comprometido = acts
-    .filter((a) => MAT_COMPROMETIDOS.includes(a.materialesEstado))
-    .reduce((s, a) => s + costoEstimado(a), 0);
+  const gastado = acts.reduce((s, a) => s + costoConsumos(a), 0);
 
   const servicios = serviciosDeSedeMes(data, sedeId, mes);
   const costoServicios = servicios.reduce((s, x) => s + costoServicio(x), 0);
 
   const presupuesto = presupuestoDeSede(data, sedeId);
-  const disponible = presupuesto - gastado - comprometido;
+  const disponible = presupuesto - gastado;
   const pct = presupuesto > 0 ? (gastado / presupuesto) * 100 : 0;
-  const pctConComprometido = presupuesto > 0 ? ((gastado + comprometido) / presupuesto) * 100 : 0;
 
   // Proyección: solo tiene sentido para el mes en curso
   const hoy = new Date();
@@ -579,13 +565,13 @@ function presupuestoSedeMes(data, sedeId, mes) {
   const proyeccion = avanceMes > 0 ? gastado / avanceMes : gastado;
 
   let estado = "ok";
-  if (gastado + comprometido > presupuesto) estado = "excedido";
-  else if (pctConComprometido >= 80 || (esMesActual && proyeccion > presupuesto)) estado = "riesgo";
+  if (gastado > presupuesto) estado = "excedido";
+  else if (pct >= 80 || (esMesActual && proyeccion > presupuesto)) estado = "riesgo";
 
   return {
-    sedeId, mes, presupuesto, gastado, comprometido, disponible,
+    sedeId, mes, presupuesto, gastado, disponible,
     costoServicios, servicios: servicios.length,
-    pct, pctConComprometido, proyeccion, esMesActual, avanceMes, estado,
+    pct, proyeccion, esMesActual, avanceMes, estado,
     actividades: acts.length,
   };
 }
@@ -595,11 +581,10 @@ function presupuestoGlobalMes(data, mes) {
   const suma = (k) => porSede.reduce((acc, p) => acc + p[k], 0);
   const presupuesto = suma("presupuesto");
   const gastado = suma("gastado");
-  const comprometido = suma("comprometido");
   return {
-    mes, porSede, presupuesto, gastado, comprometido,
+    mes, porSede, presupuesto, gastado,
     costoServicios: suma("costoServicios"),
-    disponible: presupuesto - gastado - comprometido,
+    disponible: presupuesto - gastado,
     pct: presupuesto > 0 ? (gastado / presupuesto) * 100 : 0,
     excedidas: porSede.filter((p) => p.estado === "excedido").length,
     enRiesgo: porSede.filter((p) => p.estado === "riesgo").length,
@@ -657,10 +642,10 @@ function indicadoresMes(data, sedeIds, mes) {
   sedeIds.forEach((id) => {
     const sede = (data.sedes || []).find((s) => s.id === id);
     (data.ordenes || []).forEach((o) => {
-      if (o.sedeId === id && mesContable(o) === mes) costoPreventivo += costoAprobado(o) + costoConsumos(o);
+      if (o.sedeId === id && mesContable(o) === mes) costoPreventivo += costoConsumos(o);
     });
     (data.solicitudes || []).forEach((x) => {
-      if (x.sedeId === id && mesContable(x) === mes) costoCorrectivo += costoAprobado(x) + costoConsumos(x);
+      if (x.sedeId === id && mesContable(x) === mes) costoCorrectivo += costoConsumos(x);
     });
     costoServicios += serviciosDeSedeMes(data, id, mes).reduce((a, x) => a + costoServicio(x), 0);
     costoFee += Number(sede?.feeServicio) || 0;
@@ -969,13 +954,6 @@ function actividadesDeTecnico(data, tecnicoId) {
   return [...pre, ...cor].sort(
     (a, b) => (rank[a.estado] ?? 9) - (rank[b.estado] ?? 9) || (a.fechaProgramada || "").localeCompare(b.fechaProgramada || "")
   );
-}
-
-// Todas las actividades con materiales en algún punto del flujo de costos
-function itemsConMateriales(data, estadosFiltro) {
-  const pre = (data.ordenes || []).map((o) => ({ ...o, tipo: "preventivo" }));
-  const cor = (data.solicitudes || []).map((s) => ({ ...s, tipo: "correctivo", tarea: s.descripcion }));
-  return [...pre, ...cor].filter((i) => estadosFiltro.includes(i.materialesEstado));
 }
 
 /* ============================================================================
@@ -1340,17 +1318,6 @@ function useAcciones(data, persist, usuario) {
       persist((data) => ({ ...data, ordenes: data.ordenes.map((o) => (o.id === id ? { ...o, ...patch } : o)) })),
     updateSolicitud: (id, patch) =>
       persist((data) => ({ ...data, solicitudes: data.solicitudes.map((s) => (s.id === id ? { ...s, ...patch } : s)) })),
-    /* Alta de un material nuevo en el catálogo de la sede, con existencia cero.
-       Devuelve el artículo para que quien lo pidió lo use de inmediato. */
-    altaArticulo: (sedeId, nombre, unidad, costo = 0) => {
-      const existente = (data.stock || []).find(
-        (x) => x.sedeId === sedeId && x.nombre.trim().toLowerCase() === nombre.trim().toLowerCase()
-      );
-      if (existente) return existente;
-      const art = { id: uid("stk"), sedeId, nombre, unidad, cantidad: 0, costoUnitario: Number(costo) || 0, minimo: 0 };
-      persist((data) => ({ ...data, stock: [...(data.stock || []), art] }));
-      return art;
-    },
     // Consumir stock: descuenta bodega y registra el consumo en la actividad
     consumirStock: (item, art, cantidad) => {
       const consumo = {
@@ -1380,37 +1347,6 @@ function useAcciones(data, persist, usuario) {
       }
       return persist({ ...data, stock, solicitudes: data.solicitudes.map((x) => (x.id === item.id ? sinConsumo(x) : x)) });
     },
-    /* Al cerrar una actividad con materiales ya aprobados, se descuenta bodega
-       (el material nuevo también quedó de alta ahí desde que se agregó, con
-       stockId propio) y se deja el registro en el histórico de consumo.
-       materialesLiquidados evita que un segundo guardado vuelva a descontar. */
-    liquidarMateriales: (item) => {
-      const materiales = item.materiales || [];
-      if (item.materialesLiquidados || item.materialesEstado !== "aprobado" || materiales.length === 0) return Promise.resolve(true);
-      return persist((data) => {
-        let stock = data.stock;
-        const nuevosConsumos = materiales.map((m) => {
-          if (m.stockId) {
-            stock = stock.map((x) =>
-              x.id === m.stockId ? { ...x, cantidad: Math.max(0, x.cantidad - (Number(m.cantidad) || 0)) } : x
-            );
-          }
-          return {
-            id: uid("con"), materialId: m.id, stockId: m.stockId || null,
-            nombre: m.nombre, unidad: m.unidad, cantidad: m.cantidad,
-            costoUnitario: m.costoUnitario, fecha: fmtDate(new Date()),
-          };
-        });
-        const conLiquidacion = (a) => ({
-          ...a,
-          consumos: [...(a.consumos || []), ...nuevosConsumos],
-          materialesLiquidados: true,
-        });
-        return item.tipo === "preventivo"
-          ? { ...data, stock, ordenes: data.ordenes.map((o) => (o.id === item.id ? conLiquidacion(o) : o)) }
-          : { ...data, stock, solicitudes: data.solicitudes.map((x) => (x.id === item.id ? conLiquidacion(x) : x)) };
-      });
-    },
     /* Eliminar una actividad por completo. Pensado para depurar durante las
        pruebas: en operación normal las órdenes se cierran, no se borran. */
     eliminarActividad: (item) => {
@@ -1427,30 +1363,12 @@ function useAcciones(data, persist, usuario) {
       return persist((d) => ({ ...d, solicitudes: d.solicitudes.filter((x) => x.id !== item.id) }));
     },
     updateActividad: (item, patch, opciones = {}) => {
-      /* Al entrar en "en presupuesto" o "pendiente de aprobación" (incluye
-         un rechazo, que se queda en espera hasta corregirse), el estado real
-         pasa a "espera" automáticamente, guardando el estado anterior para
-         restaurarlo — pero SOLO cuando se aprueba. Un rechazo no libera la
-         actividad: sigue en espera hasta que se corrija y se vuelva a
-         aprobar. Si ya estaba en espera (ej. yendo de costeo a aprobación,
-         o corrigiendo tras un rechazo), no se pisa el estado ya guardado. */
-      let conEspera = patch;
-      if (patch.materialesEstado !== undefined) {
-        const entraEnEspera = ["pendiente_costeo", "pendiente_aprobacion", "en_espera", "rechazado"].includes(patch.materialesEstado);
-        const seLibera = patch.materialesEstado === "aprobado";
-        if (entraEnEspera && item.estado !== "espera") {
-          conEspera = { ...patch, estado: "espera", estadoPrevioEspera: item.estado };
-        } else if (seLibera && item.estado === "espera") {
-          conEspera = { ...patch, estado: item.estadoPrevioEspera || "programada", estadoPrevioEspera: "" };
-        }
-      }
-
       /* Cada guardado deja rastro: se comparan los campos seguidos y se anexan
          al log de la actividad. Queda oculto en la tarjeta y se consulta desde
          el historial, para no ensuciar la vista de trabajo. */
       // Las correcciones administrativas no se registran: son ajustes de
       // captura durante las pruebas, no movimientos reales de la orden
-      const movimientos = opciones.sinRegistro ? [] : diffCambios(item, conEspera, data.usuarios);
+      const movimientos = opciones.sinRegistro ? [] : diffCambios(item, patch, data.usuarios);
       const sello = `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
       const nuevoLog = movimientos.length
         ? [...(item.log || []), ...movimientos.map((m) => ({
@@ -1458,7 +1376,7 @@ function useAcciones(data, persist, usuario) {
             usuarioId: usuario?.id || "", sello,
           }))]
         : null;
-      const conLog = nuevoLog ? { ...conEspera, log: nuevoLog } : conEspera;
+      const conLog = nuevoLog ? { ...patch, log: nuevoLog } : patch;
 
       if (item.tipo === "preventivo") {
         return persist((data) => ({ ...data, ordenes: data.ordenes.map((o) => (o.id === item.id ? { ...o, ...conLog } : o)) }));
@@ -1991,196 +1909,6 @@ function FotoUploader({ foto, onChange, readOnly, label = "Foto", carpeta = "gen
   );
 }
 
-/* Materiales según rol: técnico lista · admin costea · cliente decide.
-   Solo para materiales NUEVOS (que no existen en bodega) — esos sí necesitan
-   que alguien les ponga precio y los apruebe. Lo que ya existe en bodega se
-   registra por "Consumo de bodega", que descuenta al momento y nunca pasa
-   por aprobación. */
-function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, onAltaArticulo }) {
-  const [agregando, setAgregando] = useState(false);
-  const [nuevoNombre, setNuevoNombre] = useState("");
-  const [nuevaUnidad, setNuevaUnidad] = useState("u");
-  const materiales = item.materiales || [];
-  const estado = item.materialesEstado || "";
-  const puedeListar = (rol === "tecnico" || rol === "admin") && (estado === "" || estado === "borrador");
-  /* El admin costea mientras el cliente no haya decidido. Antes solo podía
-     hacerlo en "pendiente_costeo", así que un precio mal digitado quedaba
-     congelado en cuanto se enviaba a aprobación y no había forma de corregirlo. */
-  const puedeCostear = rol === "admin" && (estado === "pendiente_costeo" || estado === "pendiente_aprobacion" || estado === "en_espera");
-  const yaEnviado = rol === "admin" && (estado === "pendiente_aprobacion" || estado === "en_espera");
-  const puedeAprobar = (rol === "cliente" || rol === "admin") && (estado === "pendiente_aprobacion" || estado === "en_espera");
-  const total = costoEstimado(item);
-  const info = MAT_ESTADO[estado];
-
-  if (materiales.length === 0 && !puedeListar) return null;
-
-  const set = (id, patch) => onUpdate({ materiales: materiales.map((m) => (m.id === id ? { ...m, ...patch } : m)) });
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-1.5 gap-2">
-        <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Recursos / materiales</p>
-        {info && <Chip color={info.color}>{info.label}</Chip>}
-      </div>
-
-      <div className="space-y-1.5">
-        {materiales.map((m) => (
-          <div key={m.id} className="border rounded-md p-2" style={bLine}>
-            {puedeListar ? (
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs min-w-0" style={cChar}>
-                  {m.nombre}
-                  {m.enBodega > 0
-                    ? <span style={cSlate}> · {m.enBodega} {m.unidad} en bodega</span>
-                    : <span style={cSlate}> · sin stock</span>}
-                </span>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <CampoVivo type="number" min="0" value={m.cantidad} onCommit={(v) => set(m.id, { cantidad: v })}
-                    className="w-16 border rounded px-2 py-1 text-xs text-right outline-none" style={inputStyle} />
-                  <span className="text-[10px] w-10" style={cSlate}>{m.unidad}</span>
-                  <button onClick={() => onUpdate({ materiales: materiales.filter((x) => x.id !== m.id) })} className="shrink-0 px-1">
-                    <Trash2 size={13} color={COLORS.slate} />
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center justify-between text-xs gap-2">
-                <span className="min-w-0 truncate" style={cChar}>
-                  {m.nombre || "—"}{puedeCostear ? "" : ` · ${m.cantidad} ${m.unidad}`}
-                </span>
-                {puedeCostear ? (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <CampoVivo type="number" min="0" value={m.cantidad} onCommit={(v) => set(m.id, { cantidad: v })}
-                      title="Cantidad"
-                      className="w-14 border rounded px-1.5 py-1 text-xs text-right outline-none" style={{ borderColor: COLORS.orange }} />
-                    <CampoVivo value={m.unidad} onCommit={(v) => set(m.id, { unidad: v })} placeholder="Unid."
-                      title="La unidad puede cambiar según el proveedor"
-                      className="w-14 border rounded px-1.5 py-1 text-xs outline-none" style={{ borderColor: COLORS.orange }} />
-                    <span className="text-[10px]" style={cSlate}>$/u</span>
-                    <CampoVivo type="number" min="0" step="0.01" value={m.costoUnitario} onCommit={(v) => set(m.id, { costoUnitario: v })}
-                      className="w-16 border rounded px-1.5 py-1 text-xs outline-none" style={{ borderColor: COLORS.orange }} />
-                  </div>
-                ) : Number(m.costoUnitario) > 0 ? (
-                  <span className="font-semibold shrink-0" style={cOrange}>
-                    {money((Number(m.cantidad) || 0) * (Number(m.costoUnitario) || 0))}
-                  </span>
-                ) : null}
-              </div>
-            )}
-          </div>
-        ))}
-        {materiales.length === 0 && puedeListar && <Empty>Sin materiales agregados.</Empty>}
-      </div>
-
-      {puedeListar && (
-        agregando ? (
-          <div className="border rounded-md p-2 mt-2" style={{ borderColor: COLORS.orange }}>
-            <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={cSlate}>Material nuevo (compra)</p>
-            <div className="flex gap-1.5">
-              <input value={nuevoNombre} onChange={(e) => setNuevoNombre(e.target.value)}
-                placeholder="Nombre del material"
-                className="flex-1 min-w-0 border rounded px-2 py-1.5 text-xs outline-none" style={inputStyle} />
-              <input value={nuevaUnidad} onChange={(e) => setNuevaUnidad(e.target.value)}
-                placeholder="u" title="Unidad"
-                className="w-14 border rounded px-2 py-1.5 text-xs outline-none" style={inputStyle} />
-              <button disabled={!nuevoNombre.trim()}
-                onClick={() => {
-                  const art = onAltaArticulo
-                    ? onAltaArticulo(nuevoNombre.trim(), nuevaUnidad.trim() || "u")
-                    : { id: uid("stk"), nombre: nuevoNombre.trim(), unidad: nuevaUnidad.trim() || "u", cantidad: 0, costoUnitario: 0 };
-                  onUpdate({
-                    materiales: [...materiales, {
-                      id: uid("mat"), stockId: art.id, nombre: art.nombre, unidad: art.unidad,
-                      cantidad: 1, costoUnitario: 0, enBodega: 0,
-                    }],
-                    materialesEstado: "borrador",
-                  });
-                  setNuevoNombre(""); setNuevaUnidad("u"); setAgregando(false);
-                }}
-                className="text-xs font-semibold px-2.5 py-1.5 rounded-md text-white shrink-0 disabled:opacity-40"
-                style={{ background: COLORS.orange }}>
-                Crear
-              </button>
-            </div>
-            <p className="text-[10px] mt-1.5" style={cSlate}>
-              Si ya existe en bodega, regístralo en "Consumo de bodega" — ahí no necesita presupuesto ni aprobación.
-              Usa esto solo para lo que hay que comprar nuevo.
-            </p>
-            <button onClick={() => setAgregando(false)} className="text-[11px] font-semibold mt-2" style={cSlate}>Cancelar</button>
-          </div>
-        ) : (
-          <button onClick={() => setAgregando(true)}
-            className="flex items-center gap-1 text-[11px] font-semibold mt-1.5" style={cOrange}>
-            <Plus size={11} /> Agregar material nuevo
-          </button>
-        )
-      )}
-
-      {puedeListar && materiales.length > 0 && (
-        puedeEnviar ? (
-          <button onClick={() => onUpdate({ materialesEstado: "pendiente_costeo" })}
-            className="w-full mt-2 text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.charcoal }}>
-            Enviar a presupuesto
-          </button>
-        ) : (
-          <p className="text-[10px] mt-2" style={cSlate}>
-            Activa la actividad (programada o en proceso) para enviar los materiales a presupuesto.
-          </p>
-        )
-      )}
-
-      {(estado === "pendiente_aprobacion" || estado === "en_espera" || estado === "aprobado" || estado === "rechazado" || puedeCostear) && (
-        <div className="flex items-center justify-between mt-2 pt-2 border-t" style={bLine}>
-          <span className="text-xs font-bold" style={cChar}>Total</span>
-          <span className="text-sm font-bold" style={cOrange}>{money(total)}</span>
-        </div>
-      )}
-
-      {puedeCostear && !yaEnviado && (
-        <button onClick={() => onUpdate({ materialesEstado: "pendiente_aprobacion" })}
-          className="w-full mt-2 text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.orange }}>
-          Enviar a aprobación del cliente
-        </button>
-      )}
-
-      {yaEnviado && (
-        <div className="mt-2 rounded-md p-2.5" style={{ background: `${COLORS.ambar}12` }}>
-          <p className="text-[11px]" style={cChar}>
-            Ya está con el cliente. Puedes corregir cantidades y precios aquí mismo;
-            el cambio se refleja de inmediato en lo que él ve.
-          </p>
-          <button onClick={() => onUpdate({ materialesEstado: "pendiente_costeo" })}
-            className="w-full mt-2 text-xs font-semibold py-2 rounded-md border"
-            style={{ borderColor: COLORS.ambar, color: COLORS.ambar, background: "white" }}>
-            Retirar de aprobación y volver a presupuesto
-          </button>
-        </div>
-      )}
-
-      {rol === "admin" && (estado === "aprobado" || estado === "rechazado") && (
-        <button onClick={() => onUpdate({ materialesEstado: "pendiente_costeo" })}
-          className="w-full mt-2 text-[11px] font-semibold py-2 rounded-md border"
-          style={{ borderColor: COLORS.line, color: COLORS.slate, background: "white" }}
-          title="Reabre el costeo si hay que corregir un valor ya decidido">
-          Reabrir para corregir
-        </button>
-      )}
-
-      {puedeAprobar && (
-        <div className="grid grid-cols-3 gap-2 mt-2">
-          <button onClick={() => onUpdate({ materialesEstado: "aprobado" })} className="text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.verde }}>Aprobar</button>
-          <button onClick={() => onUpdate({ materialesEstado: "en_espera" })}
-            className="text-xs font-semibold py-2 rounded-md text-white disabled:opacity-40"
-            disabled={estado === "en_espera"}
-            title="Queda en tu bandeja de pendientes para decidir más tarde"
-            style={{ background: MAT_ESTADO.en_espera.color }}>En espera</button>
-          <button onClick={() => onUpdate({ materialesEstado: "rechazado" })} className="text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.rojo }}>Rechazar</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /* Satisfacción del servicio: promedio de estrellas y su distribución. */
 function TarjetaSatisfaccion({ sat }) {
   const color = sat.promedio === null ? COLORS.slate
@@ -2273,9 +2001,8 @@ function DetalleActividad({ item, data, onClose }) {
   const sinActivar = !item.codigo;
   const sem = sinActivar ? semaforoDe(item) : null;
   const t = tiempoActividad(item);
-  const costoMat = costoAprobado(item);
   const costoCon = costoConsumos(item);
-  const costo = esServ ? costoServicio(item) : costoMat + costoCon;
+  const costo = esServ ? costoServicio(item) : costoCon;
   const matInfo = MAT_ESTADO[item.materialesEstado];
 
   return (
@@ -2360,11 +2087,11 @@ function DetalleActividad({ item, data, onClose }) {
         </div>
       )}
 
-      {/* Materiales comprados */}
+      {/* Materiales comprados (registro anterior, solo consulta) */}
       {(item.materiales || []).length > 0 && (
         <div>
           <div className="flex items-center justify-between mb-1">
-            <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Materiales</p>
+            <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Materiales comprados · registro anterior</p>
             {matInfo && <Chip color={matInfo.color}>{matInfo.label}</Chip>}
           </div>
           <div className="space-y-1">
@@ -2375,6 +2102,9 @@ function DetalleActividad({ item, data, onClose }) {
               </div>
             ))}
           </div>
+          {item.materialesLiquidados && (
+            <p className="text-[10px] mt-1" style={cSlate}>Solo consulta: su costo ya está incluido en el consumo de bodega.</p>
+          )}
         </div>
       )}
 
@@ -2922,7 +2652,7 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
           </p>
           {stockSede.length === 0 && (
             <p className="text-[10px] mt-1.5" style={cSlate}>
-              No hay artículos en bodega para esta sede. Si es material nuevo por comprar, agrégalo en "Recursos / materiales".
+              No hay artículos en bodega para esta sede. Dalos de alta en Bodega para poder registrarlos aquí.
             </p>
           )}
         </>
@@ -2936,7 +2666,6 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
 function PresupuestoBar({ p, compact }) {
   const est = ESTADO_PRESUPUESTO[p.estado];
   const wGast = Math.min(100, p.pct);
-  const wComp = Math.min(100 - wGast, (p.comprometido / p.presupuesto) * 100);
   return (
     <div>
       <div className="flex items-center justify-between gap-2 mb-1">
@@ -2945,13 +2674,11 @@ function PresupuestoBar({ p, compact }) {
       </div>
       <div className="h-2 rounded-full overflow-hidden flex" style={{ background: COLORS.line }}>
         <div style={{ width: `${wGast}%`, background: est.color }} />
-        <div style={{ width: `${Math.max(0, wComp)}%`, background: `${est.color}55` }} />
       </div>
       {!compact && (
         <div className="flex items-center justify-between mt-1 gap-2 flex-wrap">
           <span className="text-[10px]" style={{ color: est.color }}>{est.label}</span>
           <span className="text-[10px]" style={cSlate}>
-            {p.comprometido > 0 ? `${money(p.comprometido)} comprometido · ` : ""}
             {p.esMesActual ? `proyección ${money(p.proyeccion)}` : `${money(Math.max(0, p.disponible))} disponible`}
           </span>
         </div>
@@ -3205,7 +2932,7 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
   const [detallePres, setDetallePres] = useState(null);
   const actividadesPres = detallePres
     ? actividadesDeSedeMes(data, detallePres, mes)
-        .filter((a) => costoAprobado(a) + costoConsumos(a) > 0 || (MAT_COMPROMETIDOS.includes(a.materialesEstado) && costoEstimado(a) > 0))
+        .filter((a) => costoConsumos(a) > 0)
     : [];
   const avanceGlobal = useMemo(() => avancePlan(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
   const sat = useMemo(() => satisfaccion(data, alcance), [data, sedeFiltro, sedeIds.join(",")]);
@@ -3421,14 +3148,13 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
                   {abierta && (
                     <div className="mt-2 pl-2 border-l-2 space-y-1" style={{ borderColor: est.color }}>
                       {actividadesPres.map((a) => {
-                        const real = costoAprobado(a) + costoConsumos(a);
-                        const pendiente = MAT_COMPROMETIDOS.includes(a.materialesEstado);
+                        const real = costoConsumos(a);
                         return (
                           <div key={a.id} className="flex items-center justify-between text-[11px] gap-2">
                             <span className="min-w-0 truncate" style={cChar}>{a.codigo} · {a.tarea || a.descripcion}</span>
                             <span className="flex items-center gap-1.5 shrink-0">
-                              <span className="font-semibold" style={{ color: pendiente ? COLORS.slate : COLORS.orange }}>
-                                {money(pendiente ? costoEstimado(a) : real)}{pendiente ? " (sin aprobar)" : ""}
+                              <span className="font-semibold" style={cOrange}>
+                                {money(real)}
                               </span>
                               <BotonDetalle item={a} size={12} />
                             </span>
@@ -4416,11 +4142,6 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
        parten del mismo "item" viejo y el segundo pisa al primero — por eso el
        estado "completada" no quedaba guardado al primer intento. */
     await acciones.updateActividad(item, patch, { sinRegistro: corrige });
-    // Materiales aprobados: se descuentan de bodega y quedan en el histórico
-    // de consumo justo al cerrar (liquidarMateriales no hace nada si no aplica).
-    if (estado === "completada") {
-      await acciones.liquidarMateriales({ ...item, ...patch });
-    }
     setGuardado("ok");
     setTimeout(() => setGuardado(null), 2500);
   };
@@ -4764,17 +4485,13 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             onRegistrar={registrarConsumo} onQuitar={quitarConsumo}
             readOnly={item.estado === "completada"} />
 
-          {esServ ? (
+          {esServ && (
             <div className="rounded-md p-2.5 flex items-center justify-between gap-2" style={{ background: COLORS.cream }}>
               <span className="text-xs min-w-0" style={cChar}>{item.proveedor || "Sin proveedor"}</span>
               {rol !== "tecnico" && (
                 <span className="text-sm font-bold shrink-0" style={cOrange}>{money(costoServicio(item))}</span>
               )}
             </div>
-          ) : (
-            <MaterialesPanel item={item} rol={rol} onUpdate={(patch) => acciones.updateActividad(item, patch)}
-              puedeEnviar={ESTADOS_ABIERTOS.includes(estado)}
-              onAltaArticulo={(nombre, unidad) => acciones.altaArticulo(item.sedeId, nombre, unidad)} />
           )}
 
           <div className="flex items-center justify-between gap-2">
@@ -6120,116 +5837,17 @@ function AdminProgramacion({ data, persist, user }) {
    14. ADMIN · Correctivos y control de costos
    ========================================================================= */
 
-/* Contexto para decidir: cuánto queda en la sede de la actividad y en el
-   conjunto. Sin esto, aprobar un costo es una decisión a ciegas. */
-function ContextoPresupuesto({ item, data }) {
-  const mes = mesContable(item) || mesKey(fmtDate(new Date()));
-  const sede = presupuestoSedeMes(data, item.sedeId, mes);
-  const global = presupuestoGlobalMes(data, mes);
-  const costo = costoEstimado(item);
-
-  const disponibleSede = sede.disponible;
-  const disponibleGlobal = global.disponible ?? (global.presupuesto - global.gastado - global.comprometido);
-  const alcanzaSede = costo <= disponibleSede;
-  const alcanzaGlobal = costo <= disponibleGlobal;
-
-  const fila = (etiqueta, disponible, alcanza) => (
-    <div className="flex items-center justify-between gap-2">
-      <span className="text-[11px]" style={cSlate}>{etiqueta}</span>
-      <span className="text-[11px] font-bold" style={{ color: alcanza ? COLORS.verde : COLORS.rojo }}>
-        {money(Math.max(0, disponible))}
-        {!alcanza && <span className="font-normal"> · no alcanza</span>}
-      </span>
-    </div>
-  );
-
-  return (
-    <div className="rounded-md p-2.5 space-y-1" style={{ background: COLORS.paper }}>
-      <div className="flex items-center justify-between gap-2 pb-1 mb-1 border-b" style={bLine}>
-        <span className="text-[11px] font-semibold" style={cChar}>Este costo</span>
-        <span className="text-xs font-bold" style={cOrange}>{money(costo)}</span>
-      </div>
-      {fila(`Disponible en ${sedeNombre(data.sedes, item.sedeId)}`, disponibleSede, alcanzaSede)}
-      {fila("Disponible en todas las sedes", disponibleGlobal, alcanzaGlobal)}
-      <p className="text-[10px] pt-1" style={cSlate}>
-        {alcanzaSede
-          ? `Al aprobarlo quedarían ${money(disponibleSede - costo)} en la sede.`
-          : `Excede el presupuesto de la sede en ${money(costo - disponibleSede)}.`}
-        {" "}Cifras del mes {mesLabel(mes)}, ya descontando lo comprometido.
-      </p>
-    </div>
-  );
-}
-
-function TarjetaCosto({ item, data, rol, onUpdate, defaultOpen }) {
-  const [open, setOpen] = useState(!!defaultOpen);
-  const info = MAT_ESTADO[item.materialesEstado];
-  return (
-    <div className="border rounded-md" style={cardStyle}>
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between p-3 text-left gap-2">
-        <div className="flex items-start gap-2.5 min-w-0">
-          {open ? <ChevronDown size={16} color={COLORS.slate} className="mt-0.5 shrink-0" /> : <ChevronRight size={16} color={COLORS.slate} className="mt-0.5 shrink-0" />}
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <TipoChip tipo={item.tipo} />
-              <span className="text-[10px] font-bold" style={cChar}>{item.codigo}</span>
-            </div>
-            <p className="font-semibold text-sm mt-1 truncate" style={cChar}>{item.tarea}</p>
-            <p className="text-xs truncate" style={cSlate}>{ubicacionTexto(data.sedes, item)}</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <div className="flex flex-col items-end gap-1">
-            {info && <Chip color={info.color}>{info.label}</Chip>}
-            <span className="text-xs font-bold" style={cOrange}>{money(costoEstimado(item))}</span>
-          </div>
-          <BotonDetalle item={item} />
-        </div>
-      </button>
-      {open && (
-        <div className="px-3 pb-3 border-t pt-3 space-y-3" style={bLine}>
-          <p className="text-xs" style={cSlate}>
-            Técnico: {usuarioNombre(data.usuarios, item.tecnicoId)}
-            {item.solicitanteId ? ` · Solicitó: ${usuarioNombre(data.usuarios, item.solicitanteId)}` : ""}
-            {item.fechaProgramada ? ` · ${item.fechaProgramada}` : ""}
-          </p>
-          {item.observaciones && <Field label="Observaciones del técnico"><ReadOnly>{item.observaciones}</ReadOnly></Field>}
-          {/* El supervisor puede corregir la foto del solicitante desde aquí:
-              a veces llega sin foto o con una equivocada y hay que ajustarla
-              sin importar en qué etapa de costeo esté la actividad. */}
-          {rol === "admin" ? (
-            <FotoUploader foto={item.fotoSolicitante} label="Foto del solicitante" carpeta="solicitudes"
-              onChange={(foto) => onUpdate({ fotoSolicitante: foto })} />
-          ) : item.fotoSolicitante && (
-            <Field label="Foto del solicitante">
-              <img src={item.fotoSolicitante} alt="Reportado por el solicitante" className="rounded-md max-h-40 border" style={bLine} />
-            </Field>
-          )}
-          <FotoUploader foto={item.foto} onChange={(foto) => onUpdate({ foto })}
-            readOnly={rol !== "admin"} label="Evidencia del técnico" carpeta="evidencias" />
-          <MaterialesPanel item={item} rol={rol} onUpdate={onUpdate} />
-          <ContextoPresupuesto item={item} data={data} />
-        </div>
-      )}
-    </div>
-  );
-}
-
 /* ============================================================================
    14b. TÉCNICO · "Mis actividades", con el mismo agrupado por etapa que ve
-   el supervisor (Programadas, En presupuesto, En aprobación, Resueltas),
+   el supervisor (Programadas, En ejecución, Resueltas),
    pero solo con lo suyo, rol="tecnico" (sin permisos de corrección), y los
    servicios sin mostrar el valor — el técnico solo ve qué le toca ejecutar.
    ========================================================================= */
 function TecnicoPreventivos({ data, acciones, ordenes }) {
-  const enCosteo = ordenes.filter((o) => o.materialesEstado === "pendiente_costeo");
-  const enAprobacion = ordenes.filter((o) => ["pendiente_aprobacion", "en_espera"].includes(o.materialesEstado));
-  const rechazadas = ordenes.filter((o) => o.materialesEstado === "rechazado");
-  const idsEnFlujoCostos = new Set([...enCosteo, ...enAprobacion, ...rechazadas].map((o) => o.id));
 
   const programadas = [...ordenes].filter((o) => o.estado === "programada")
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
-  const enEjecucion = [...ordenes].filter((o) => ["en_proceso", "espera"].includes(o.estado) && !idsEnFlujoCostos.has(o.id))
+  const enEjecucion = [...ordenes].filter((o) => ["en_proceso", "espera"].includes(o.estado))
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
   const finalizadas = [...ordenes].filter((o) => o.estado === "completada")
     .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
@@ -6246,18 +5864,6 @@ function TecnicoPreventivos({ data, acciones, ordenes }) {
         {enEjecucion.map(tarjeta)}
         {enEjecucion.length === 0 && <Empty>Sin preventivos en ejecución.</Empty>}
       </SeccionPlegable>
-      <SeccionPlegable titulo="En presupuesto" count={enCosteo.length} color={COLORS.ambar}>
-        {enCosteo.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-        {enCosteo.length === 0 && <Empty>Nada esperando precios.</Empty>}
-      </SeccionPlegable>
-      <SeccionPlegable titulo="En espera de aprobación del cliente" count={enAprobacion.length} color={ESTADOS.por_aprobar.color}>
-        {enAprobacion.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-        {enAprobacion.length === 0 && <Empty>Nada esperando decisión del cliente.</Empty>}
-      </SeccionPlegable>
-      <SeccionPlegable titulo="Rechazados" count={rechazadas.length} color={COLORS.rojo}>
-        {rechazadas.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-        {rechazadas.length === 0 && <Empty>Nada rechazado.</Empty>}
-      </SeccionPlegable>
       <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
         {finalizadas.slice(0, 5).map(tarjeta)}
         {finalizadas.length > 5 && <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Histórico.</p>}
@@ -6268,17 +5874,13 @@ function TecnicoPreventivos({ data, acciones, ordenes }) {
 }
 
 function TecnicoCorrectivos({ data, acciones, solicitudes }) {
-  const enCosteo = solicitudes.filter((s) => s.materialesEstado === "pendiente_costeo");
-  const enAprobacion = solicitudes.filter((s) => ["pendiente_aprobacion", "en_espera"].includes(s.materialesEstado));
-  const rechazadas = solicitudes.filter((s) => s.materialesEstado === "rechazado");
-  const idsEnFlujoCostos = new Set([...enCosteo, ...enAprobacion, ...rechazadas].map((s) => s.id));
 
   // Reportadas en sus sedes, aún sin fecha asignada
   const sinProgramar = [...solicitudes].filter((s) => s.estado === "pendiente")
     .sort((a, b) => (CRITICIDAD[b.criticidad]?.nivel || 0) - (CRITICIDAD[a.criticidad]?.nivel || 0));
   const programadas = [...solicitudes].filter((s) => s.estado === "programada")
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
-  const enEjecucion = [...solicitudes].filter((s) => ["en_proceso", "espera"].includes(s.estado) && !idsEnFlujoCostos.has(s.id))
+  const enEjecucion = [...solicitudes].filter((s) => ["en_proceso", "espera"].includes(s.estado))
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
   const finalizadas = [...solicitudes].filter((s) => s.estado === "completada")
     .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
@@ -6299,18 +5901,6 @@ function TecnicoCorrectivos({ data, acciones, solicitudes }) {
       <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange} defaultOpen>
         {enEjecucion.map(tarjeta)}
         {enEjecucion.length === 0 && <Empty>Sin correctivos en ejecución.</Empty>}
-      </SeccionPlegable>
-      <SeccionPlegable titulo="En presupuesto" count={enCosteo.length} color={COLORS.ambar}>
-        {enCosteo.map((i) => <TarjetaCosto key={i.id} item={{ ...i, tipo: "correctivo", tarea: i.descripcion }} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-        {enCosteo.length === 0 && <Empty>Nada esperando precios.</Empty>}
-      </SeccionPlegable>
-      <SeccionPlegable titulo="En espera de aprobación del cliente" count={enAprobacion.length} color={ESTADOS.por_aprobar.color}>
-        {enAprobacion.map((i) => <TarjetaCosto key={i.id} item={{ ...i, tipo: "correctivo", tarea: i.descripcion }} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-        {enAprobacion.length === 0 && <Empty>Nada esperando decisión del cliente.</Empty>}
-      </SeccionPlegable>
-      <SeccionPlegable titulo="Rechazados" count={rechazadas.length} color={COLORS.rojo}>
-        {rechazadas.map((i) => <TarjetaCosto key={i.id} item={{ ...i, tipo: "correctivo", tarea: i.descripcion }} data={data} rol="tecnico" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-        {rechazadas.length === 0 && <Empty>Nada rechazado.</Empty>}
       </SeccionPlegable>
       <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
         {finalizadas.slice(0, 5).map(tarjeta)}
@@ -6459,24 +6049,16 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
   };
 
   /* Mismas etapas que preventivos y servicios, para que las tres pestañas se
-     lean igual: sin programar → programadas → en ejecución → costeo →
-     aprobación → rechazados → resueltas. */
+     lean igual: sin programar → programadas → en ejecución → resueltas. */
   const visibles = data.solicitudes.filter((s) => fSede === "todas" || s.sedeId === fSede);
   const sinProgramar = visibles.filter((s) => s.estado === "pendiente")
     .sort((a, b) => (CRITICIDAD[b.criticidad]?.nivel || 0) - (CRITICIDAD[a.criticidad]?.nivel || 0));
-  const enFlujoCostosIds = new Set(
-    visibles.filter((s) => ["pendiente_costeo", "pendiente_aprobacion", "en_espera", "rechazado"].includes(s.materialesEstado)).map((s) => s.id)
-  );
   const programadas = visibles.filter((s) => s.estado === "programada")
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
-  const enEjecucion = visibles.filter((s) => ["en_proceso", "espera"].includes(s.estado) && !enFlujoCostosIds.has(s.id))
+  const enEjecucion = visibles.filter((s) => ["en_proceso", "espera"].includes(s.estado))
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
   const finalizadas = visibles.filter((s) => s.estado === "completada")
     .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
-
-  const enCosteo = itemsConMateriales(data, ["pendiente_costeo"]);
-  const enAprobacion = itemsConMateriales(data, ["pendiente_aprobacion", "en_espera"]);
-  const rechazadas = itemsConMateriales(data, ["rechazado"]);
 
   const tarjetaAct = (sol) => (
     <TarjetaActividad key={sol.id} rol="admin" data={data} acciones={acciones}
@@ -6526,20 +6108,6 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
         {enEjecucion.length === 0 && <Empty>Sin correctivos en ejecución.</Empty>}
       </SeccionPlegable>
 
-      <SeccionPlegable titulo="En presupuesto" count={enCosteo.length} color={COLORS.ambar}>
-        {enCosteo.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="admin" defaultOpen onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-        {enCosteo.length === 0 && <Empty>Nada esperando precios.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="En espera de aprobación del cliente" count={enAprobacion.length} color={ESTADOS.por_aprobar.color}>
-        {enAprobacion.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="admin" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-        {enAprobacion.length === 0 && <Empty>Nada esperando decisión del cliente.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="Rechazados" count={rechazadas.length} color={COLORS.rojo}>
-        {rechazadas.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="admin" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-        {rechazadas.length === 0 && <Empty>Nada rechazado.</Empty>}
-      </SeccionPlegable>
 
       <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
         {finalizadas.slice(0, 5).map(tarjetaAct)}
@@ -6572,10 +6140,9 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
     return out;
   }, [data, mes]);
 
-  // El detalle usa el mismo costo que la barra (aprobado + bodega); con
-  // costoEstimado quedaban fuera las órdenes que solo gastaron bodega.
+  // El detalle usa el mismo costo que la barra (consumo de bodega)
   const actividadesDetalle = detalle
-    ? actividadesDeSedeMes(data, detalle, mes).filter((a) => costoAprobado(a) + costoConsumos(a) > 0 || (MAT_COMPROMETIDOS.includes(a.materialesEstado) && costoEstimado(a) > 0))
+    ? actividadesDeSedeMes(data, detalle, mes).filter((a) => costoConsumos(a) > 0)
     : [];
 
   /* Acumulado del período: suma mes a mes desde el primer mes con actividad
@@ -6589,21 +6156,20 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
     // Si el mes elegido es anterior al arranque, solo se muestra ese mes
     const desdeMes = (yIni === y) ? Math.min(mIni, m) : 1;
 
-    let presupuesto = 0, gastado = 0, comprometido = 0, servicios = 0;
+    let presupuesto = 0, gastado = 0, servicios = 0;
     const serie = [];
     for (let i = desdeMes; i <= m; i++) {
       const k = `${y}-${String(i).padStart(2, "0")}`;
       const gm = presupuestoGlobalMes(data, k);
       presupuesto += gm.presupuesto;
       gastado += gm.gastado;
-      comprometido += gm.comprometido;
       servicios += gm.costoServicios || 0;
       serie.push({ mes: MESES[i - 1].slice(0, 3), acumulado: Number(gastado.toFixed(2)) });
     }
     return {
       anio: y, desdeMes, meses: m - desdeMes + 1,
-      presupuesto, gastado, comprometido, servicios, serie,
-      disponible: presupuesto - gastado - comprometido,
+      presupuesto, gastado, servicios, serie,
+      disponible: presupuesto - gastado,
       pct: presupuesto > 0 ? (gastado / presupuesto) * 100 : 0,
     };
   }, [data, mes]);
@@ -6617,10 +6183,9 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
         <MesSelector mes={mes} onChange={onMesChange} />
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
         <Stat label="Presupuesto total" value={money(g.presupuesto)} icon={<Wallet size={14} />} color={COLORS.charcoal} sub={`${data.sedes.length} sedes`} />
-        <Stat label="Gastado (aprobado)" value={money(g.gastado)} icon={<DollarSign size={14} />} color={COLORS.orange} sub={`${g.pct.toFixed(0)}% del total`} />
-        <Stat label="Comprometido" value={money(g.comprometido)} icon={<Clock size={14} />} color={COLORS.ambar} sub="Sin aprobar aún" />
+        <Stat label="Gastado" value={money(g.gastado)} icon={<DollarSign size={14} />} color={COLORS.orange} sub={`${g.pct.toFixed(0)}% del total`} />
         <Stat label="Disponible" value={money(g.disponible)} icon={<TrendingUp size={14} />} color={g.disponible >= 0 ? COLORS.verde : COLORS.rojo}
           sub={g.excedidas > 0 ? `${g.excedidas} sede(s) excedida(s)` : g.enRiesgo > 0 ? `${g.enRiesgo} sede(s) en riesgo` : "Todo en orden"} />
       </div>
@@ -6635,13 +6200,11 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
           </Chip>
         </div>
 
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
           <Stat label="Presupuesto acumulado" value={money(acumulado.presupuesto)} icon={<Wallet size={14} />}
             color={COLORS.charcoal} sub={`${acumulado.meses} mes(es)`} />
           <Stat label="Gastado acumulado" value={money(acumulado.gastado)} icon={<DollarSign size={14} />}
-            color={COLORS.orange} sub="Aprobado + bodega" />
-          <Stat label="Comprometido" value={money(acumulado.comprometido)} icon={<Clock size={14} />}
-            color={COLORS.ambar} sub="Sin aprobar aún" />
+            color={COLORS.orange} sub="Consumo de bodega" />
           <Stat label="Disponible" value={money(acumulado.disponible)} icon={<TrendingUp size={14} />}
             color={acumulado.disponible >= 0 ? COLORS.verde : COLORS.rojo} sub="Del período completo" />
         </div>
@@ -6676,14 +6239,13 @@ function VistaPresupuesto({ data, mes, onMesChange }) {
                 {detalle === p.sedeId && (
                   <div className="mt-2 pl-2 border-l-2 space-y-1" style={{ borderColor: est.color }}>
                     {actividadesDetalle.map((a) => {
-                      const real = costoAprobado(a) + costoConsumos(a);
-                      const pendiente = MAT_COMPROMETIDOS.includes(a.materialesEstado);
+                      const real = costoConsumos(a);
                       return (
                         <div key={a.id} className="flex items-center justify-between text-[11px] gap-2">
                           <span className="min-w-0 truncate" style={cChar}>{a.codigo} · {a.tarea || a.descripcion}</span>
                           <span className="flex items-center gap-1.5 shrink-0">
-                            <span className="font-semibold" style={{ color: pendiente ? COLORS.slate : COLORS.orange }}>
-                              {money(pendiente ? costoEstimado(a) : real)}{pendiente ? " (sin aprobar)" : ""}
+                            <span className="font-semibold" style={cOrange}>
+                              {money(real)}
                             </span>
                             <BotonDetalle item={a} size={12} />
                           </span>
@@ -7065,17 +6627,9 @@ function AdminPreventivos({ data, persist, user }) {
   const atrasadas = abiertas.filter((o) => o.fechaProgramada && o.fechaProgramada < hoy);
   const alDia = abiertas.filter((o) => !o.fechaProgramada || o.fechaProgramada >= hoy);
 
-  const enFlujoCostosIds = new Set(
-    data.ordenes.filter((o) => ["pendiente_costeo", "pendiente_aprobacion", "en_espera", "rechazado"].includes(o.materialesEstado)).map((o) => o.id)
-  );
   const programadas = alDia.filter((o) => o.estado === "programada");
-  const enEjecucion = alDia.filter((o) => ["en_proceso", "espera"].includes(o.estado) && !enFlujoCostosIds.has(o.id));
+  const enEjecucion = alDia.filter((o) => ["en_proceso", "espera"].includes(o.estado));
 
-  // Etapas de costo, solo de órdenes preventivas
-  const soloPrev = (arr) => arr.filter((i) => i.tipo === "preventivo" && coincide(i, i.tarea));
-  const enCosteo = soloPrev(itemsConMateriales(data, ["pendiente_costeo"]));
-  const enAprobacion = soloPrev(itemsConMateriales(data, ["pendiente_aprobacion", "en_espera"]));
-  const rechazadas = soloPrev(itemsConMateriales(data, ["rechazado"]));
   const finalizadas = data.ordenes
     .filter((o) => o.estado === "completada" && coincide(o, o.tarea))
     .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
@@ -7168,20 +6722,6 @@ function AdminPreventivos({ data, persist, user }) {
           {enEjecucion.length === 0 && <Empty>Sin órdenes preventivas en ejecución.</Empty>}
         </SeccionPlegable>
 
-        <SeccionPlegable titulo="En presupuesto" count={enCosteo.length} color={COLORS.ambar}>
-          {enCosteo.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="admin" defaultOpen onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-          {enCosteo.length === 0 && <Empty>Nada esperando precios.</Empty>}
-        </SeccionPlegable>
-
-        <SeccionPlegable titulo="En espera de aprobación del cliente" count={enAprobacion.length} color={ESTADOS.por_aprobar.color}>
-          {enAprobacion.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="admin" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-          {enAprobacion.length === 0 && <Empty>Nada esperando decisión del cliente.</Empty>}
-        </SeccionPlegable>
-
-        <SeccionPlegable titulo="Rechazados" count={rechazadas.length} color={COLORS.rojo}>
-          {rechazadas.map((i) => <TarjetaCosto key={i.id} item={i} data={data} rol="admin" onUpdate={(p) => acciones.updateActividad(i, p)} />)}
-          {rechazadas.length === 0 && <Empty>Nada rechazado.</Empty>}
-        </SeccionPlegable>
 
         <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
           {finalizadas.slice(0, 5).map(tarjeta)}
@@ -7954,7 +7494,7 @@ function exportarCSV(filas, data) {
 
   const filasCsv = filas.map((h) => {
     const esServ = h.tipo === "servicio";
-    const costo = esServ ? costoServicio(h) : costoAprobado(h) + costoConsumos(h);
+    const costo = esServ ? costoServicio(h) : costoConsumos(h);
     const resp = h.tipo === "correctivo" && h.fecha && h.fechaCompletada
       ? (horasEntre(h.fecha, h.hora, h.fechaCompletada, h.horaCompletada) / 24).toFixed(2) : "";
     return [
@@ -7984,7 +7524,7 @@ function GrupoHistorico({ tipo, items, data, abiertoInicial }) {
   const [open, setOpen] = useState(abiertoInicial);
   const meta = tipoMeta(tipo);
   const costo = items.reduce((a, h) =>
-    a + (h.tipo === "servicio" ? costoServicio(h) : costoAprobado(h) + costoConsumos(h)), 0);
+    a + (h.tipo === "servicio" ? costoServicio(h) : costoConsumos(h)), 0);
 
   return (
     <div className="border rounded-md overflow-hidden" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${meta.color}` }}>
@@ -8043,7 +7583,7 @@ function VistaHistorico({ data, sedes, rol }) {
   });
 
   const costoTotal = filtrado.reduce((a, h) =>
-    a + (h.tipo === "servicio" ? costoServicio(h) : costoAprobado(h) + costoConsumos(h)), 0);
+    a + (h.tipo === "servicio" ? costoServicio(h) : costoConsumos(h)), 0);
 
   const grupos = ["preventivo", "correctivo", "servicio"]
     .map((t) => ({ tipo: t, items: ordenar(filtrado.filter((h) => h.tipo === t)) }))
@@ -8121,7 +7661,7 @@ function VistaHistorico({ data, sedes, rol }) {
 function RegistroHistorico({ h, data }) {
   const [open, setOpen] = useState(false);
   const esServ = h.tipo === "servicio";
-  const costo = esServ ? costoServicio(h) : costoAprobado(h) + costoConsumos(h);
+  const costo = esServ ? costoServicio(h) : costoConsumos(h);
   const respuesta = h.tipo === "correctivo" && h.fecha && h.fechaCompletada
     ? duracionTexto(horasEntre(h.fecha, h.hora, h.fechaCompletada, h.horaCompletada) / 24) : null;
 
@@ -8195,7 +7735,7 @@ function RegistroHistorico({ h, data }) {
           {(h.materiales || []).length > 0 && (
             <div>
               <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>
-                Materiales {h.materialesEstado === "aprobado" ? "(aprobados)" : `(${MAT_ESTADO[h.materialesEstado]?.label || "sin aprobar"})`}
+                Materiales comprados · registro anterior {h.materialesEstado === "aprobado" ? "(aprobados)" : `(${MAT_ESTADO[h.materialesEstado]?.label || "sin aprobar"})`}
               </p>
               {h.materiales.map((m) => (
                 <div key={m.id} className="flex items-center justify-between text-xs">
@@ -8203,6 +7743,9 @@ function RegistroHistorico({ h, data }) {
                   <span className="font-semibold" style={cOrange}>{money(m.cantidad * m.costoUnitario)}</span>
                 </div>
               ))}
+              {h.materialesLiquidados && (
+                <p className="text-[10px] mt-0.5" style={cSlate}>Solo consulta: su costo ya está incluido en el consumo de bodega.</p>
+              )}
             </div>
           )}
 
@@ -8445,13 +7988,8 @@ function resumenMaterialesHTML(acts) {
   };
 
   acts.forEach((a) => {
-    // Lo retirado de bodega siempre cuenta: ya salió físicamente
+    // Lo retirado de bodega: ya salió físicamente
     (a.consumos || []).forEach((c) => sumar(c.nombre, c.unidad || "u", c.cantidad, c.costoUnitario, "Bodega"));
-    /* El material comprado solo cuenta si está aprobado y aún no se liquidó;
-       una vez liquidado ya figura arriba como consumo y se duplicaría. */
-    if (a.materialesEstado === "aprobado" && !a.materialesLiquidados) {
-      (a.materiales || []).forEach((m) => sumar(m.nombre, m.unidad || "u", m.cantidad, m.costoUnitario, "Compra"));
-    }
   });
 
   const filas = Object.values(mapa)
@@ -8494,10 +8032,9 @@ function filaPresupuesto(p) {
     <div class="cump-h"><span>${_esc(p.nombre)}</span><b style="color:${est.color}">${money(p.gastado)} / ${money(p.presupuesto)}</b></div>
     ${barraApilada([
       { n: "Gastado", v: p.gastado, c: est.color },
-      { n: "Comprometido", v: p.comprometido, c: est.color + "66" },
       { n: "Disponible", v: Math.max(0, p.disponible), c: "#E3E0D8" },
     ])}
-    <span class="cump-d">${est.label}${p.comprometido > 0 ? ` · ${money(p.comprometido)} comprometido` : ""}${p.costoServicios > 0 ? ` · servicios externos ${money(p.costoServicios)}` : ""}</span>
+    <span class="cump-d">${est.label}${p.costoServicios > 0 ? ` · servicios externos ${money(p.costoServicios)}` : ""}</span>
   </div>`;
 }
 
@@ -8741,7 +8278,7 @@ const costoServicio = (s) =>
     : Number(s.presupuestoAprobado ?? s.presupuesto) || 0;
 
 const costoActividad = (a) =>
-  a.tipo === "servicio" ? costoServicio(a) : costoAprobado(a) + costoConsumos(a);
+  a.tipo === "servicio" ? costoServicio(a) : costoConsumos(a);
 
 /* Checklist ejecutado, para el parte de trabajo impreso.
    Los pasos sin llenar quedan con línea para completar a mano en campo. */
@@ -9009,7 +8546,7 @@ function construirReporteHTML(items, data, meta) {
       ${a.observaciones ? `<div class="blk"><h4>Observaciones</h4><p>${esc(a.observaciones)}</p></div>` : ""}
       ${a.resolucion ? `<div class="blk"><h4>Resolución</h4><p>${esc(a.resolucion)}</p></div>` : ""}
       ${consumos ? `<div class="blk"><h4>Consumo de bodega</h4><table class="mini"><tbody>${consumos}</tbody></table></div>` : ""}
-      ${materiales ? `<div class="blk"><h4>Materiales</h4><table class="mini"><tbody>${materiales}</tbody></table></div>` : ""}
+      ${materiales ? `<div class="blk"><h4>Materiales comprados (registro anterior)</h4><table class="mini"><tbody>${materiales}</tbody></table>${a.materialesLiquidados ? '<p class="mut">Solo consulta: su costo ya está incluido en el consumo de bodega.</p>' : ""}</div>` : ""}
 
       <div class="firma">
         <div><span></span><p>Ejecutado por</p></div>
@@ -9347,7 +8884,7 @@ function VistaReportes({ data, sedes, user }) {
             {filtradas.map((a, i) => {
               const marcada = sel === null || sel.includes(a.id);
               const t = tiempoActividad(a);
-              const costo = a.tipo === "servicio" ? costoServicio(a) : costoAprobado(a) + costoConsumos(a);
+              const costo = a.tipo === "servicio" ? costoServicio(a) : costoConsumos(a);
               return (
                 <tr key={a.id} style={{ background: i % 2 ? COLORS.paper : "white", borderTop: `1px solid ${COLORS.line}`, opacity: marcada ? 1 : .45 }}>
                   <td className="px-2.5 py-2"><input type="checkbox" checked={marcada} onChange={() => alternar(a.id)} /></td>
@@ -9971,15 +9508,11 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
 }
 
 function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
-  const acciones = useAcciones(data, persist, user);
   const [tab, setTab] = useState("dashboard");
   const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
 
-  const porAprobar = itemsConMateriales(data, ["pendiente_aprobacion"]);
   const serviciosPorAprobar = (data.servicios || []).filter((s) => s.estado === "por_aprobar");
-  const enEspera = itemsConMateriales(data, ["en_espera"]);
-  const historial = itemsConMateriales(data, ["aprobado", "rechazado"]);
-  const bandeja = porAprobar.length + enEspera.length + serviciosPorAprobar.length;
+  const bandeja = serviciosPorAprobar.length;
 
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
@@ -10027,43 +9560,6 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
             </div>
           </div>
 
-          <div>
-            <p className="text-xs mb-3" style={cSlate}>
-              Actividades correctivas con materiales costeados que requieren tu aprobación antes de ejecutarse.
-            </p>
-            <SectionTitle count={porAprobar.length}>Pendientes de tu aprobación</SectionTitle>
-            <div className="space-y-2">
-              {porAprobar.map((i) => (
-                <TarjetaCosto key={i.id} item={i} data={data} rol="cliente" defaultOpen onUpdate={(p) => acciones.updateActividad(i, p)} />
-              ))}
-              {porAprobar.length === 0 && <Empty>No hay solicitudes de costo nuevas.</Empty>}
-            </div>
-          </div>
-
-          {enEspera.length > 0 && (
-            <div>
-              <SectionTitle count={enEspera.length}>En espera de tu decisión</SectionTitle>
-              <p className="text-xs mb-2" style={cSlate}>
-                Las dejaste en espera. Siguen reservando presupuesto hasta que las apruebes o rechaces.
-              </p>
-              <div className="space-y-2">
-                {enEspera.map((i) => (
-                  <TarjetaCosto key={i.id} item={i} data={data} rol="cliente" defaultOpen onUpdate={(p) => acciones.updateActividad(i, p)} />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {historial.length > 0 && (
-            <div>
-              <SectionTitle count={historial.length}>Historial de decisiones</SectionTitle>
-              <div className="space-y-2">
-                {historial.map((i) => (
-                  <TarjetaCosto key={i.id} item={i} data={data} rol="cliente" onUpdate={(p) => acciones.updateActividad(i, p)} />
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>
