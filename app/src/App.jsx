@@ -1340,17 +1340,6 @@ function useAcciones(data, persist, usuario) {
       persist((data) => ({ ...data, ordenes: data.ordenes.map((o) => (o.id === id ? { ...o, ...patch } : o)) })),
     updateSolicitud: (id, patch) =>
       persist((data) => ({ ...data, solicitudes: data.solicitudes.map((s) => (s.id === id ? { ...s, ...patch } : s)) })),
-    /* Alta de un material nuevo en el catálogo de la sede, con existencia cero.
-       Devuelve el artículo para que quien lo pidió lo use de inmediato. */
-    altaArticulo: (sedeId, nombre, unidad, costo = 0) => {
-      const existente = (data.stock || []).find(
-        (x) => x.sedeId === sedeId && x.nombre.trim().toLowerCase() === nombre.trim().toLowerCase()
-      );
-      if (existente) return existente;
-      const art = { id: uid("stk"), sedeId, nombre, unidad, cantidad: 0, costoUnitario: Number(costo) || 0, minimo: 0 };
-      persist((data) => ({ ...data, stock: [...(data.stock || []), art] }));
-      return art;
-    },
     // Consumir stock: descuenta bodega y registra el consumo en la actividad
     consumirStock: (item, art, cantidad) => {
       const consumo = {
@@ -1988,196 +1977,6 @@ function FotoUploader({ foto, onChange, readOnly, label = "Foto", carpeta = "gen
           }
         }} />
     </Field>
-  );
-}
-
-/* Materiales según rol: técnico lista · admin costea · cliente decide.
-   Solo para materiales NUEVOS (que no existen en bodega) — esos sí necesitan
-   que alguien les ponga precio y los apruebe. Lo que ya existe en bodega se
-   registra por "Consumo de bodega", que descuenta al momento y nunca pasa
-   por aprobación. */
-function MaterialesPanel({ item, rol, onUpdate, puedeEnviar = true, onAltaArticulo }) {
-  const [agregando, setAgregando] = useState(false);
-  const [nuevoNombre, setNuevoNombre] = useState("");
-  const [nuevaUnidad, setNuevaUnidad] = useState("u");
-  const materiales = item.materiales || [];
-  const estado = item.materialesEstado || "";
-  const puedeListar = (rol === "tecnico" || rol === "admin") && (estado === "" || estado === "borrador");
-  /* El admin costea mientras el cliente no haya decidido. Antes solo podía
-     hacerlo en "pendiente_costeo", así que un precio mal digitado quedaba
-     congelado en cuanto se enviaba a aprobación y no había forma de corregirlo. */
-  const puedeCostear = rol === "admin" && (estado === "pendiente_costeo" || estado === "pendiente_aprobacion" || estado === "en_espera");
-  const yaEnviado = rol === "admin" && (estado === "pendiente_aprobacion" || estado === "en_espera");
-  const puedeAprobar = (rol === "cliente" || rol === "admin") && (estado === "pendiente_aprobacion" || estado === "en_espera");
-  const total = costoEstimado(item);
-  const info = MAT_ESTADO[estado];
-
-  if (materiales.length === 0 && !puedeListar) return null;
-
-  const set = (id, patch) => onUpdate({ materiales: materiales.map((m) => (m.id === id ? { ...m, ...patch } : m)) });
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-1.5 gap-2">
-        <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Recursos / materiales</p>
-        {info && <Chip color={info.color}>{info.label}</Chip>}
-      </div>
-
-      <div className="space-y-1.5">
-        {materiales.map((m) => (
-          <div key={m.id} className="border rounded-md p-2" style={bLine}>
-            {puedeListar ? (
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs min-w-0" style={cChar}>
-                  {m.nombre}
-                  {m.enBodega > 0
-                    ? <span style={cSlate}> · {m.enBodega} {m.unidad} en bodega</span>
-                    : <span style={cSlate}> · sin stock</span>}
-                </span>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <CampoVivo type="number" min="0" value={m.cantidad} onCommit={(v) => set(m.id, { cantidad: v })}
-                    className="w-16 border rounded px-2 py-1 text-xs text-right outline-none" style={inputStyle} />
-                  <span className="text-[10px] w-10" style={cSlate}>{m.unidad}</span>
-                  <button onClick={() => onUpdate({ materiales: materiales.filter((x) => x.id !== m.id) })} className="shrink-0 px-1">
-                    <Trash2 size={13} color={COLORS.slate} />
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center justify-between text-xs gap-2">
-                <span className="min-w-0 truncate" style={cChar}>
-                  {m.nombre || "—"}{puedeCostear ? "" : ` · ${m.cantidad} ${m.unidad}`}
-                </span>
-                {puedeCostear ? (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <CampoVivo type="number" min="0" value={m.cantidad} onCommit={(v) => set(m.id, { cantidad: v })}
-                      title="Cantidad"
-                      className="w-14 border rounded px-1.5 py-1 text-xs text-right outline-none" style={{ borderColor: COLORS.orange }} />
-                    <CampoVivo value={m.unidad} onCommit={(v) => set(m.id, { unidad: v })} placeholder="Unid."
-                      title="La unidad puede cambiar según el proveedor"
-                      className="w-14 border rounded px-1.5 py-1 text-xs outline-none" style={{ borderColor: COLORS.orange }} />
-                    <span className="text-[10px]" style={cSlate}>$/u</span>
-                    <CampoVivo type="number" min="0" step="0.01" value={m.costoUnitario} onCommit={(v) => set(m.id, { costoUnitario: v })}
-                      className="w-16 border rounded px-1.5 py-1 text-xs outline-none" style={{ borderColor: COLORS.orange }} />
-                  </div>
-                ) : Number(m.costoUnitario) > 0 ? (
-                  <span className="font-semibold shrink-0" style={cOrange}>
-                    {money((Number(m.cantidad) || 0) * (Number(m.costoUnitario) || 0))}
-                  </span>
-                ) : null}
-              </div>
-            )}
-          </div>
-        ))}
-        {materiales.length === 0 && puedeListar && <Empty>Sin materiales agregados.</Empty>}
-      </div>
-
-      {puedeListar && (
-        agregando ? (
-          <div className="border rounded-md p-2 mt-2" style={{ borderColor: COLORS.orange }}>
-            <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={cSlate}>Material nuevo (compra)</p>
-            <div className="flex gap-1.5">
-              <input value={nuevoNombre} onChange={(e) => setNuevoNombre(e.target.value)}
-                placeholder="Nombre del material"
-                className="flex-1 min-w-0 border rounded px-2 py-1.5 text-xs outline-none" style={inputStyle} />
-              <input value={nuevaUnidad} onChange={(e) => setNuevaUnidad(e.target.value)}
-                placeholder="u" title="Unidad"
-                className="w-14 border rounded px-2 py-1.5 text-xs outline-none" style={inputStyle} />
-              <button disabled={!nuevoNombre.trim()}
-                onClick={() => {
-                  const art = onAltaArticulo
-                    ? onAltaArticulo(nuevoNombre.trim(), nuevaUnidad.trim() || "u")
-                    : { id: uid("stk"), nombre: nuevoNombre.trim(), unidad: nuevaUnidad.trim() || "u", cantidad: 0, costoUnitario: 0 };
-                  onUpdate({
-                    materiales: [...materiales, {
-                      id: uid("mat"), stockId: art.id, nombre: art.nombre, unidad: art.unidad,
-                      cantidad: 1, costoUnitario: 0, enBodega: 0,
-                    }],
-                    materialesEstado: "borrador",
-                  });
-                  setNuevoNombre(""); setNuevaUnidad("u"); setAgregando(false);
-                }}
-                className="text-xs font-semibold px-2.5 py-1.5 rounded-md text-white shrink-0 disabled:opacity-40"
-                style={{ background: COLORS.orange }}>
-                Crear
-              </button>
-            </div>
-            <p className="text-[10px] mt-1.5" style={cSlate}>
-              Si ya existe en bodega, regístralo en "Consumo de bodega" — ahí no necesita presupuesto ni aprobación.
-              Usa esto solo para lo que hay que comprar nuevo.
-            </p>
-            <button onClick={() => setAgregando(false)} className="text-[11px] font-semibold mt-2" style={cSlate}>Cancelar</button>
-          </div>
-        ) : (
-          <button onClick={() => setAgregando(true)}
-            className="flex items-center gap-1 text-[11px] font-semibold mt-1.5" style={cOrange}>
-            <Plus size={11} /> Agregar material nuevo
-          </button>
-        )
-      )}
-
-      {puedeListar && materiales.length > 0 && (
-        puedeEnviar ? (
-          <button onClick={() => onUpdate({ materialesEstado: "pendiente_costeo" })}
-            className="w-full mt-2 text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.charcoal }}>
-            Enviar a presupuesto
-          </button>
-        ) : (
-          <p className="text-[10px] mt-2" style={cSlate}>
-            Activa la actividad (programada o en proceso) para enviar los materiales a presupuesto.
-          </p>
-        )
-      )}
-
-      {(estado === "pendiente_aprobacion" || estado === "en_espera" || estado === "aprobado" || estado === "rechazado" || puedeCostear) && (
-        <div className="flex items-center justify-between mt-2 pt-2 border-t" style={bLine}>
-          <span className="text-xs font-bold" style={cChar}>Total</span>
-          <span className="text-sm font-bold" style={cOrange}>{money(total)}</span>
-        </div>
-      )}
-
-      {puedeCostear && !yaEnviado && (
-        <button onClick={() => onUpdate({ materialesEstado: "pendiente_aprobacion" })}
-          className="w-full mt-2 text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.orange }}>
-          Enviar a aprobación del cliente
-        </button>
-      )}
-
-      {yaEnviado && (
-        <div className="mt-2 rounded-md p-2.5" style={{ background: `${COLORS.ambar}12` }}>
-          <p className="text-[11px]" style={cChar}>
-            Ya está con el cliente. Puedes corregir cantidades y precios aquí mismo;
-            el cambio se refleja de inmediato en lo que él ve.
-          </p>
-          <button onClick={() => onUpdate({ materialesEstado: "pendiente_costeo" })}
-            className="w-full mt-2 text-xs font-semibold py-2 rounded-md border"
-            style={{ borderColor: COLORS.ambar, color: COLORS.ambar, background: "white" }}>
-            Retirar de aprobación y volver a presupuesto
-          </button>
-        </div>
-      )}
-
-      {rol === "admin" && (estado === "aprobado" || estado === "rechazado") && (
-        <button onClick={() => onUpdate({ materialesEstado: "pendiente_costeo" })}
-          className="w-full mt-2 text-[11px] font-semibold py-2 rounded-md border"
-          style={{ borderColor: COLORS.line, color: COLORS.slate, background: "white" }}
-          title="Reabre el costeo si hay que corregir un valor ya decidido">
-          Reabrir para corregir
-        </button>
-      )}
-
-      {puedeAprobar && (
-        <div className="grid grid-cols-3 gap-2 mt-2">
-          <button onClick={() => onUpdate({ materialesEstado: "aprobado" })} className="text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.verde }}>Aprobar</button>
-          <button onClick={() => onUpdate({ materialesEstado: "en_espera" })}
-            className="text-xs font-semibold py-2 rounded-md text-white disabled:opacity-40"
-            disabled={estado === "en_espera"}
-            title="Queda en tu bandeja de pendientes para decidir más tarde"
-            style={{ background: MAT_ESTADO.en_espera.color }}>En espera</button>
-          <button onClick={() => onUpdate({ materialesEstado: "rechazado" })} className="text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.rojo }}>Rechazar</button>
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -2922,7 +2721,7 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
           </p>
           {stockSede.length === 0 && (
             <p className="text-[10px] mt-1.5" style={cSlate}>
-              No hay artículos en bodega para esta sede. Si es material nuevo por comprar, agrégalo en "Recursos / materiales".
+              No hay artículos en bodega para esta sede. Dalos de alta en Bodega para poder registrarlos aquí.
             </p>
           )}
         </>
@@ -4764,17 +4563,13 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             onRegistrar={registrarConsumo} onQuitar={quitarConsumo}
             readOnly={item.estado === "completada"} />
 
-          {esServ ? (
+          {esServ && (
             <div className="rounded-md p-2.5 flex items-center justify-between gap-2" style={{ background: COLORS.cream }}>
               <span className="text-xs min-w-0" style={cChar}>{item.proveedor || "Sin proveedor"}</span>
               {rol !== "tecnico" && (
                 <span className="text-sm font-bold shrink-0" style={cOrange}>{money(costoServicio(item))}</span>
               )}
             </div>
-          ) : (
-            <MaterialesPanel item={item} rol={rol} onUpdate={(patch) => acciones.updateActividad(item, patch)}
-              puedeEnviar={ESTADOS_ABIERTOS.includes(estado)}
-              onAltaArticulo={(nombre, unidad) => acciones.altaArticulo(item.sedeId, nombre, unidad)} />
           )}
 
           <div className="flex items-center justify-between gap-2">
@@ -6207,7 +6002,6 @@ function TarjetaCosto({ item, data, rol, onUpdate, defaultOpen }) {
           )}
           <FotoUploader foto={item.foto} onChange={(foto) => onUpdate({ foto })}
             readOnly={rol !== "admin"} label="Evidencia del técnico" carpeta="evidencias" />
-          <MaterialesPanel item={item} rol={rol} onUpdate={onUpdate} />
           <ContextoPresupuesto item={item} data={data} />
         </div>
       )}
