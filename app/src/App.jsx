@@ -8667,68 +8667,84 @@ async function compartirPDF(blob, nombre) {
   return "descargado";
 }
 
-/* Reporte de monitoreo: misma tabla que el popup (variables por plan, meses
-   agrupados o desplegados según lo que el usuario dejó abierto en pantalla),
-   en formato compacto para que quepa todo en el ancho de la hoja. */
-function construirReporteMonitoreoHTML(titulo, breadcrumb, porPlan, columnas, celda, etiquetaCorta, nombreCorto) {
-  const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+/* Reporte de monitoreo: una sección por sede (cada una arranca en su hoja),
+   con las variables completas por ubicación y plan, y los meses agrupados o
+   desplegados según lo que el usuario dejó abierto en pantalla. */
+function construirReporteMonitoreoHTML(titulo, bloques, mesesAbiertos) {
+  const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
-  const nCols = columnas.length + 1;
+  const fmt = (iso) => (iso ? iso.split("-").reverse().join("/") : "");
 
-  const cuerpo = Object.entries(porPlan).map(([plan, vars]) => {
-    const cab = `<tr><td colspan="${nCols}" class="grp">${esc(plan)}</td></tr>`;
-    const filas = vars.map((v) => {
-      const celdas = columnas.map((c) => {
-        const d = celda(v, c);
-        if (!d) return `<td class="c mut">·</td>`;
-        if (v.tipo === "numero") {
-          const dl = d.delta !== null && d.delta !== undefined
-            ? `<br><span class="dl" style="color:${d.delta >= 0 ? "#2E7D5B" : "#C1442D"}">${d.delta >= 0 ? "+" : ""}${esc(d.delta)}</span>` : "";
-          return `<td class="c"><b>${esc(d.valor)}</b>${dl}</td>`;
-        }
-        const et = etiquetaCorta(v.tipo, d.valor);
-        return `<td class="c" style="color:${et.color};font-weight:700">${esc(et.txt)}</td>`;
+  const cabecera = (sub) => `<div class="hdr">
+    <div><h1>Monitoreo de condición</h1><p class="sub">${esc(sub)}</p></div>
+    <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div>
+  </div>`;
+
+  const secciones = bloques.map((b) => {
+    const columnas = columnasMonitoreo(b.fechas, mesesAbiertos);
+    const nCols = columnas.length + 1;
+    const cuerpo = b.ubicaciones.map((u) => {
+      const cabU = b.ubicaciones.length > 1 ? `<tr><td colspan="${nCols}" class="ubi">${esc(u.label)}</td></tr>` : "";
+      return cabU + Object.entries(u.porPlan).map(([plan, vars]) => {
+        const cab = `<tr><td colspan="${nCols}" class="grp">${esc(plan)} <span class="mut">· ${vars.length} variable(s)</span></td></tr>`;
+        return cab + vars.map((v) => {
+          const [etq, resto] = partesVariable(v.texto);
+          const celdas = columnas.map((c) => {
+            const d = celdaMonitoreo(v, c);
+            if (!d) return `<td class="c mut">·</td>`;
+            if (v.tipo === "numero") {
+              const dl = d.delta !== null && d.delta !== undefined
+                ? `<br><span class="dl" style="color:${d.delta >= 0 ? "#2E7D5B" : "#C1442D"}">${d.delta >= 0 ? "+" : ""}${esc(d.delta)}</span>` : "";
+              return `<td class="c"><b>${esc(d.valor)}</b>${dl}</td>`;
+            }
+            const et = etiquetaMonitoreo(v.tipo, d.valor);
+            return `<td class="c" style="color:${et.color};font-weight:700">${esc(et.txt)}</td>`;
+          }).join("");
+          return `<tr><td class="v">${etq ? `<b>${esc(etq)}</b> ` : ""}${esc(resto)}${v.unidad ? ` <span class="mut">(${esc(v.unidad)})</span>` : ""}</td>${celdas}</tr>`;
+        }).join("");
       }).join("");
-      return `<tr><td class="v" title="${esc(v.texto)}">${esc(nombreCorto(v.texto))}${v.unidad ? ` <span class="mut">(${esc(v.unidad)})</span>` : ""}</td>${celdas}</tr>`;
     }).join("");
-    return cab + filas;
+    const ultima = b.fechas[b.fechas.length - 1];
+    return `<section class="pagina">
+      ${cabecera(`${titulo} · ${emitido.slice(0, 10)}`)}
+      <div class="sede"><h2>${esc(b.sede.nombre)}</h2><span>${b.nVariables} variable(s)${ultima ? ` · última lectura ${fmt(ultima)}` : ""}</span></div>
+      <table>
+        <thead><tr><th class="vh">Variable</th>${columnas.map((c) => `<th class="c">${esc(c.label)}</th>`).join("")}</tr></thead>
+        <tbody>${cuerpo || `<tr><td colspan="${nCols}" class="c">Sin lecturas</td></tr>`}</tbody>
+      </table>
+      <div class="pie"><span>IndustriaMe S.A.S. · Reporte de monitoreo · ${esc(b.sede.nombre)}</span><span>Generado el ${esc(emitido)}</span></div>
+    </section>`;
   }).join("");
-
-  const cabFechas = columnas.map((c) => `<th class="c">${esc(c.label)}</th>`).join("");
 
   return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
 <title>Monitoreo · ${esc(titulo)}</title>
 <style>
-@page { size: A4 landscape; margin: 10mm; }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:8pt;line-height:1.3}
+.pagina{padding:4px 2px 8px}
 .hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #35383C;padding-bottom:6px;margin-bottom:8px}
 .hdr h1{font-size:12pt;letter-spacing:.02em;text-transform:uppercase}
 .hdr .sub{font-size:7.5pt;color:#787D85;margin-top:2px}
 .hdr .marca{text-align:right;font-size:7.5pt;color:#787D85}
 .hdr .marca b{display:block;font-size:10pt;color:#ED5B23;letter-spacing:.06em}
 .marca img{max-height:26px;margin-bottom:2px}
-table{width:100%;border-collapse:collapse;font-size:7pt;table-layout:fixed}
-thead th{background:#35383C;color:#fff;text-align:left;padding:3px;font-size:6.5pt;text-transform:uppercase;white-space:nowrap}
-thead th.c{text-align:center}
-tbody td{padding:2px 3px;border-bottom:1px solid #E3E0D8;vertical-align:top}
-td.v{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td.grp{background:#F2EFE9;font-weight:700;font-size:7pt;padding:3px}
+.sede{display:flex;justify-content:space-between;align-items:baseline;border-left:3px solid #ED5B23;padding:3px 8px;margin-bottom:6px;background:#FAF8F4}
+.sede h2{font-size:11pt}
+.sede span{font-size:7pt;color:#787D85}
+table{width:100%;border-collapse:collapse;font-size:7.5pt}
+thead th{background:#35383C;color:#fff;padding:4px 3px;font-size:6.8pt;text-transform:uppercase;white-space:nowrap}
+thead th.vh{text-align:left;width:46%}
+tbody td{padding:3px 4px;border-bottom:1px solid #E3E0D8;vertical-align:middle}
+td.v{line-height:1.3}
+td.grp{background:#F2EFE9;font-weight:700;font-size:7.5pt;padding:4px}
+td.ubi{background:#35383C;color:#fff;font-weight:700;font-size:7.5pt;padding:4px}
 .c{text-align:center}
-.mut{color:#8D939B}
+.mut{color:#8D939B;font-weight:400}
 .dl{font-size:6pt}
-.pie{margin-top:10px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.5pt;color:#8D939B;display:flex;justify-content:space-between}
+.pie{margin-top:8px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.5pt;color:#8D939B;display:flex;justify-content:space-between}
+.nota{margin-top:6px;color:#8D939B;font-size:6.8pt}
 </style></head><body>
-<div class="hdr">
-  <div><h1>Monitoreo de condición</h1><p class="sub">${esc(titulo)} · ${esc(breadcrumb)}</p></div>
-  <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div>
-</div>
-<table>
-  <thead><tr><th style="width:92px">Variable</th>${cabFechas}</tr></thead>
-  <tbody>${cuerpo || `<tr><td colspan="${nCols}" class="c">Sin lecturas</td></tr>`}</tbody>
-</table>
-<p class="mut" style="margin-top:6px">En variables numéricas, el número pequeño es la diferencia con la lectura anterior; en un mes agrupado, el consumo de ese mes.</p>
-<div class="pie"><span>IndustriaMe S.A.S. · Reporte de monitoreo</span><span>Generado el ${esc(emitido)}</span></div>
+${secciones || `<section class="pagina">${cabecera(titulo)}<p>Sin lecturas.</p></section>`}
 </body></html>`;
 }
 
@@ -9339,236 +9355,136 @@ function FilaUsuario({ user, data, onEdit, onDelete }) {
 
 
 /* ============================================================================
-   16.5. MONITOREO DE CONDICIÓN — árbol compacto sede → fase → activo.
-   Cada nivel con datos muestra un botón (i) que abre el histórico completo
-   en un popup, filtrable por mes; validación/estado/check se ven en tabla.
+   16.5. MONITOREO DE CONDICIÓN — todo a la vista, agrupado por sede.
+   Cada sede muestra sus variables (texto completo) por ubicación y plan, con
+   los meses en columnas; un mes se puede desplegar por día. El PDF usa la
+   misma agrupación.
    ========================================================================= */
+
+/* Lecturas por ubicación (sede|fase|activo) de los planes con monitoreo. */
+function gruposMonitoreo(data) {
+  const planes = new Map((data.planes || []).filter((p) => p.monitoreo).map((p) => [p.id, p]));
+  const mapa = {};
+  (data.ordenes || []).forEach((o) => {
+    if (!o.planId || !planes.has(o.planId) || !o.sedeId) return;
+    const checklist = o.checklist || [];
+    if (!checklist.length) return;
+    const key = `${o.sedeId}|${o.faseId || ""}|${o.activoId || ""}`;
+    const fecha = o.fechaCompletada || o.fechaProgramada || "";
+    const g = mapa[key] || (mapa[key] = {
+      key, sedeId: o.sedeId, faseId: o.faseId || "", activoId: o.activoId || "", variables: {},
+    });
+    checklist.forEach((it) => {
+      if (it.tipo === "texto") return;
+      /* La variable se identifica por plan + nombre: dos planes distintos
+         pueden tener un paso con el mismo texto (ej. "Horas de uso") y no
+         deben mezclarse en la misma serie. */
+      const clave = `${o.planId}|${it.texto}`;
+      const v = g.variables[clave] || (g.variables[clave] = {
+        clave, tipo: it.tipo, unidad: it.unidad, texto: it.texto,
+        plan: planes.get(o.planId)?.tarea || "Sin plan", lecturas: [],
+      });
+      v.lecturas.push({ fecha, valor: it.tipo === "numero" ? Number(it.valor) || 0 : it.valor });
+    });
+  });
+  /* En numéricas se calcula la diferencia contra la lectura anterior de la
+     misma variable — útil para contadores acumulados (ej. horas de un
+     generador: 80 - 50 = 30 horas de uso). */
+  Object.values(mapa).forEach((g) => Object.values(g.variables).forEach((v) => {
+    v.lecturas.sort((x, y) => (x.fecha || "").localeCompare(y.fecha || ""));
+    v.lecturas = v.lecturas.map((l, i) => ({
+      ...l, diferencia: v.tipo === "numero" && i > 0 ? l.valor - v.lecturas[i - 1].valor : null,
+    }));
+  }));
+  return mapa;
+}
+
+/* Bloques por sede: cada uno con sus ubicaciones, variables por plan y las
+   fechas con lecturas. */
+function bloquesMonitoreo(data, grupos) {
+  return (data.sedes || []).map((sede) => {
+    const gs = Object.values(grupos).filter((g) => g.sedeId === sede.id);
+    if (!gs.length) return null;
+    const ubicaciones = gs.map((g) => {
+      const fase = (sede.fases || []).find((f) => f.id === g.faseId);
+      const activo = (fase?.activos || []).find((x) => x.id === g.activoId);
+      const label = !g.faseId ? "Sede completa" : [fase?.nombre, activo?.nombre].filter(Boolean).join(" · ") || "Ubicación";
+      const porPlan = {};
+      Object.values(g.variables).forEach((v) => { (porPlan[v.plan] = porPlan[v.plan] || []).push(v); });
+      Object.values(porPlan).forEach((vs) => vs.sort((x, y) => x.texto.localeCompare(y.texto, "es")));
+      return { key: g.key, label, orden: `${g.faseId ? 1 : 0}${label}`, porPlan };
+    }).sort((x, y) => x.orden.localeCompare(y.orden, "es"));
+    const fechas = [...new Set(gs.flatMap((g) => Object.values(g.variables).flatMap((v) => v.lecturas.map((l) => l.fecha))).filter(Boolean))].sort();
+    const nVariables = gs.reduce((n, g) => n + Object.keys(g.variables).length, 0);
+    return { sede, ubicaciones, fechas, nVariables };
+  }).filter(Boolean);
+}
+
+// Columnas: un mes plegado ocupa una columna; desplegado, una por fecha
+function columnasMonitoreo(fechas, mesesAbiertos) {
+  const cols = [];
+  [...new Set(fechas.map(mesKey))].sort().forEach((m) => {
+    const delMes = fechas.filter((f) => mesKey(f) === m);
+    if (mesesAbiertos.has(m)) delMes.forEach((f) => cols.push({ key: f, mes: m, fecha: f, label: `${f.slice(8)}/${f.slice(5, 7)}`, plegado: false }));
+    else cols.push({ key: m, mes: m, label: `${MESES[Number(m.slice(5)) - 1].slice(0, 3)} ${m.slice(2, 4)}`, plegado: true });
+  });
+  return cols;
+}
+
+/* Valor de una celda. En un mes plegado se muestra la última lectura del
+   mes; en numéricas, la diferencia contra el cierre del mes anterior —
+   que es el consumo real del período (ej. horas de uso del mes). */
+function celdaMonitoreo(v, col) {
+  if (!col.plegado) {
+    const l = v.lecturas.filter((x) => x.fecha === col.fecha).pop();
+    return l ? { valor: l.valor, delta: l.diferencia } : null;
+  }
+  const delMes = v.lecturas.filter((l) => mesKey(l.fecha) === col.mes);
+  if (!delMes.length) return null;
+  const ultima = delMes[delMes.length - 1];
+  if (v.tipo !== "numero") return { valor: ultima.valor, delta: null };
+  const previas = v.lecturas.filter((l) => mesKey(l.fecha) < col.mes);
+  const base = previas.length ? previas[previas.length - 1].valor : null;
+  return { valor: ultima.valor, delta: base === null ? null : ultima.valor - base };
+}
+
+function etiquetaMonitoreo(tipo, valor) {
+  if (tipo === "estado") return { txt: valor === "bueno" ? "Bueno" : valor === "alarma" ? "Alarma" : valor === "malo" ? "Malo" : "—", color: ESTADO_PASO[valor]?.color || COLORS.slate };
+  if (tipo === "validacion") return { txt: valor === "si" ? "Sí" : valor === "no" ? "No" : "—", color: VALIDACION[valor]?.color || COLORS.slate };
+  if (tipo === "check") return { txt: valor ? "✓" : "–", color: valor ? COLORS.verde : COLORS.slate };
+  return { txt: String(valor ?? "—"), color: COLORS.charcoal };
+}
+
+/* "Etiqueta: descripción" → la etiqueta en negrita y el resto normal, pero
+   siempre el texto completo. */
+const partesVariable = (texto) => {
+  const t = String(texto || "");
+  const i = t.indexOf(":");
+  return i > 2 && i <= 40 ? [t.slice(0, i + 1), t.slice(i + 1).trim()] : ["", t];
+};
+
 function VistaMonitoreo({ data }) {
-  const grupos = useMemo(() => {
-    const planes = new Map((data.planes || []).filter((p) => p.monitoreo).map((p) => [p.id, p]));
-    const mapa = {};
-    (data.ordenes || []).forEach((o) => {
-      if (!o.planId || !planes.has(o.planId) || !o.sedeId) return;
-      const checklist = o.checklist || [];
-      if (!checklist.length) return;
-      const key = `${o.sedeId}|${o.faseId || ""}|${o.activoId || ""}`;
-      const fecha = o.fechaCompletada || o.fechaProgramada || "";
-      const g = mapa[key] || (mapa[key] = {
-        sedeId: o.sedeId, faseId: o.faseId || "", activoId: o.activoId || "", variables: {},
-      });
-      checklist.forEach((it) => {
-        if (it.tipo === "texto") return;
-        /* La variable se identifica por plan + nombre: dos planes distintos
-           pueden tener un paso con el mismo texto (ej. "Horas de uso") y no
-           deben mezclarse en la misma serie. */
-        const clave = `${o.planId}|${it.texto}`;
-        const v = g.variables[clave] || (g.variables[clave] = {
-          tipo: it.tipo, unidad: it.unidad, texto: it.texto,
-          plan: planes.get(o.planId)?.tarea || "", lecturas: [],
-        });
-        v.lecturas.push({ fecha, valor: it.tipo === "numero" ? Number(it.valor) || 0 : it.valor });
-      });
-    });
-    Object.values(mapa).forEach((g) =>
-      Object.values(g.variables).forEach((v) => v.lecturas.sort((a, b) => (a.fecha || "").localeCompare(b.fecha || "")))
-    );
-    return mapa;
-  }, [data.planes, data.ordenes]);
-
-  const [popup, setPopup] = useState(null);
-  const sedesConDatos = (data.sedes || []).filter((sede) => Object.values(grupos).some((g) => g.sedeId === sede.id));
-
-  return (
-    <div className="space-y-2">
-      <p className="text-xs" style={cSlate}>
-        Sedes, fases y activos con seguimiento activo. El ícono <Info size={11} className="inline align-text-top" color={COLORS.orange} /> abre
-        el histórico completo. Para agregar más, marca un plan como "monitoreo de condición" en Configuración.
-      </p>
-      {sedesConDatos.length ? (
-        <div className="border rounded-md overflow-hidden divide-y" style={cardStyle}>
-          {sedesConDatos.map((sede) => (
-            <FilaSede key={sede.id} sede={sede} grupos={grupos} onVer={setPopup} />
-          ))}
-        </div>
-      ) : (
-        <Empty>
-          Aún no hay lecturas. Marca un plan como "monitoreo de condición" y completa al menos una orden con checklist para ver datos aquí.
-        </Empty>
-      )}
-
-      {popup && <PopupMonitoreo {...popup} onClose={() => setPopup(null)} />}
-    </div>
-  );
-}
-
-function FilaSede({ sede, grupos, onVer }) {
-  const [open, setOpen] = useState(false);
-  const fasesConDatos = (sede.fases || []).filter((fase) =>
-    (fase.activos || []).some((a) => grupos[`${sede.id}|${fase.id}|${a.id}`]) || grupos[`${sede.id}|${fase.id}|`]
-  );
-  const grupoSede = grupos[`${sede.id}||`];
-  const hayHijos = fasesConDatos.length > 0;
-
-  return (
-    <div style={bLine}>
-      <div className="flex items-center gap-1.5 py-1.5 px-2.5 cursor-pointer hover:bg-black/[0.02]"
-        onClick={() => hayHijos && setOpen(!open)}>
-        {hayHijos ? (open ? <ChevronDown size={13} color={COLORS.charcoal} /> : <ChevronRight size={13} color={COLORS.charcoal} />)
-          : <span className="w-[13px] shrink-0" />}
-        <p className="text-xs font-bold flex-1 truncate" style={cChar}>{sede.nombre}</p>
-        {grupoSede && (
-          <button onClick={(e) => { e.stopPropagation(); onVer({ titulo: "Sede completa", breadcrumb: sede.nombre, grupo: grupoSede }); }}
-            className="shrink-0 p-0.5">
-            <Info size={14} color={COLORS.orange} />
-          </button>
-        )}
-      </div>
-      {open && fasesConDatos.map((fase) => (
-        <FilaFase key={fase.id} sede={sede} fase={fase} grupos={grupos} onVer={onVer} />
-      ))}
-    </div>
-  );
-}
-
-function FilaFase({ sede, fase, grupos, onVer }) {
-  const [open, setOpen] = useState(false);
-  const activosConDatos = (fase.activos || []).filter((a) => grupos[`${sede.id}|${fase.id}|${a.id}`]);
-  const grupoFase = grupos[`${sede.id}|${fase.id}|`];
-  const hayHijos = activosConDatos.length > 0;
-
-  return (
-    <div style={bLine}>
-      <div className="flex items-center gap-1.5 py-1.5 pl-7 pr-2.5 cursor-pointer hover:bg-black/[0.02]"
-        style={{ borderTop: `1px solid ${COLORS.line}` }} onClick={() => hayHijos && setOpen(!open)}>
-        {hayHijos ? (open ? <ChevronDown size={12} color={COLORS.slate} /> : <ChevronRight size={12} color={COLORS.slate} />)
-          : <span className="w-3 shrink-0" />}
-        <Layers size={11} color={COLORS.orange} className="shrink-0" />
-        <p className="text-xs font-semibold flex-1 truncate" style={cSlate}>{fase.nombre}</p>
-        {grupoFase && (
-          <button onClick={(e) => { e.stopPropagation(); onVer({ titulo: "Fase completa", breadcrumb: `${sede.nombre} · ${fase.nombre}`, grupo: grupoFase }); }}
-            className="shrink-0 p-0.5">
-            <Info size={13} color={COLORS.orange} />
-          </button>
-        )}
-      </div>
-      {open && activosConDatos.map((a) => (
-        <FilaActivo key={a.id} sede={sede} fase={fase} activo={a} grupo={grupos[`${sede.id}|${fase.id}|${a.id}`]} onVer={onVer} />
-      ))}
-    </div>
-  );
-}
-
-function FilaActivo({ sede, fase, activo, grupo, onVer }) {
-  return (
-    <div className="flex items-center gap-1.5 py-1.5 pl-11 pr-2.5 cursor-pointer hover:bg-black/[0.02]"
-      style={{ borderTop: `1px solid ${COLORS.line}` }}
-      onClick={() => onVer({ titulo: activo.nombre, breadcrumb: `${sede.nombre} · ${fase.nombre} · ${activo.nombre}`, grupo })}>
-      <p className="text-xs flex-1 truncate" style={cSlate}>{activo.nombre}</p>
-      <Info size={13} color={COLORS.orange} className="shrink-0" />
-    </div>
-  );
-}
-
-/* Popup con el histórico completo de un nodo (sede/fase/activo): tabla
-   compacta con las fechas en columnas (giradas, para ahorrar espacio) y
-   cada variable en una fila. En variables numéricas se calcula, de forma
-   automática y genérica, la diferencia contra la lectura anterior de esa
-   misma variable — útil para contadores acumulados (ej. horas de un
-   generador: 80 - 50 = 30 horas de uso). En variables donde ese dato no
-   aplica (ej. voltaje) simplemente se ve la fluctuación entre tomas, sin
-   necesidad de configurar nada por variable. */
-function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
-  const variables = grupo?.variables || {};
-
-  const variablesConDelta = useMemo(() => {
-    const out = {};
-    Object.entries(variables).forEach(([clave, v]) => {
-      out[clave] = {
-        ...v,
-        lecturas: v.lecturas.map((l, i) => ({
-          ...l,
-          diferencia: v.tipo === "numero" && i > 0 ? l.valor - v.lecturas[i - 1].valor : null,
-        })),
-      };
-    });
-    return out;
-  }, [variables]);
-
-  const todasFechas = [...new Set(Object.values(variablesConDelta).flatMap((v) => v.lecturas.map((l) => l.fecha)).filter(Boolean))].sort();
-  const mesesDisponibles = [...new Set(todasFechas.map(mesKey))].sort();
-
-  /* Cada mes arranca plegado: así caben todos los meses a la vez y la tabla
-     se lee de un vistazo. Al desplegar uno se ven sus fechas individuales. */
+  const grupos = useMemo(() => gruposMonitoreo(data), [data.planes, data.ordenes]); // eslint-disable-line react-hooks/exhaustive-deps
+  const bloques = useMemo(() => bloquesMonitoreo(data, grupos), [data.sedes, grupos]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [fSede, setFSede] = useState("todas");
   const [mesesAbiertos, setMesesAbiertos] = useState(() => new Set());
-  const [planesCerrados, setPlanesCerrados] = useState(() => new Set());
-  const toggleMes = (m) => setMesesAbiertos((s) => {
-    const n = new Set(s); n.has(m) ? n.delete(m) : n.add(m); return n;
-  });
-  const togglePlan = (p) => setPlanesCerrados((s) => {
-    const n = new Set(s); n.has(p) ? n.delete(p) : n.add(p); return n;
-  });
-
-  // Columnas: un mes plegado ocupa una columna; desplegado, una por fecha
-  const columnas = [];
-  mesesDisponibles.forEach((m) => {
-    const fechasDelMes = todasFechas.filter((f) => mesKey(f) === m);
-    if (mesesAbiertos.has(m)) {
-      fechasDelMes.forEach((f) => columnas.push({ key: f, mes: m, fecha: f, label: f.slice(8), plegado: false }));
-    } else {
-      columnas.push({ key: m, mes: m, fechas: fechasDelMes, label: MESES[Number(m.slice(5)) - 1].slice(0, 3), plegado: true });
-    }
-  });
-
-  // Variables agrupadas por plan preventivo
-  const porPlan = {};
-  Object.entries(variablesConDelta).forEach(([clave, v]) => {
-    const p = v.plan || "Sin plan";
-    (porPlan[p] = porPlan[p] || []).push({ clave, ...v });
-  });
-
-  /* Valor de una celda. En un mes plegado se muestra la última lectura del
-     mes; en numéricas, la diferencia contra el cierre del mes anterior —
-     que es el consumo real del período (ej. horas de uso del mes). */
-  const celda = (v, col) => {
-    if (!col.plegado) {
-      const l = v.lecturas.find((x) => x.fecha === col.fecha);
-      return l ? { valor: l.valor, delta: l.diferencia } : null;
-    }
-    const delMes = v.lecturas.filter((l) => mesKey(l.fecha) === col.mes);
-    if (!delMes.length) return null;
-    const ultima = delMes[delMes.length - 1];
-    if (v.tipo !== "numero") return { valor: ultima.valor, delta: null };
-    const previas = v.lecturas.filter((l) => mesKey(l.fecha) < col.mes);
-    const base = previas.length ? previas[previas.length - 1].valor : null;
-    return { valor: ultima.valor, delta: base === null ? null : ultima.valor - base };
-  };
-
-  /* Muchas variables se escriben como "Etiqueta: descripción larga". En la
-     tabla basta la etiqueta — el texto completo queda en el tooltip. Las que
-     no siguen ese patrón se recortan a dos líneas. */
-  const nombreCorto = (texto) => {
-    const t = String(texto || "");
-    const i = t.indexOf(":");
-    return i > 2 && i <= 32 ? t.slice(0, i) : t;
-  };
-
-  const etiquetaCorta = (tipo, valor) => {
-    if (tipo === "estado") return { txt: valor === "bueno" ? "Bueno" : valor === "alarma" ? "Alarma" : valor === "malo" ? "Malo" : "—", color: ESTADO_PASO[valor]?.color || COLORS.slate };
-    if (tipo === "validacion") return { txt: valor === "si" ? "Sí" : valor === "no" ? "No" : "—", color: VALIDACION[valor]?.color || COLORS.slate };
-    if (tipo === "check") return { txt: valor ? "✓" : "–", color: valor ? COLORS.verde : COLORS.slate };
-    return { txt: String(valor ?? "—"), color: COLORS.charcoal };
-  };
-
+  const [cerradas, setCerradas] = useState(() => new Set());
   const [generando, setGenerando] = useState(false);
   const [progreso, setProgreso] = useState("");
   const [avisoPDF, setAvisoPDF] = useState("");
 
+  const visibles = bloques.filter((b) => fSede === "todas" || b.sede.id === fSede);
+  const meses = [...new Set(visibles.flatMap((b) => b.fechas.map(mesKey)))].sort();
+  const toggle = (setter) => (k) => setter((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
+  const toggleMes = toggle(setMesesAbiertos);
+  const toggleSede = toggle(setCerradas);
+
   const hacerPDF = async () => {
     setGenerando(true); setAvisoPDF(""); setProgreso("Preparando…");
     try {
-      const html = construirReporteMonitoreoHTML(titulo, breadcrumb, porPlan, columnas, celda, etiquetaCorta, nombreCorto);
-      const blob = await generarPDF(html, { onProgreso: setProgreso });
-      const slug = `${titulo}`.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+      const titulo = fSede === "todas" ? "Todas las sedes" : visibles[0]?.sede.nombre || "";
+      const blob = await generarPDF(construirReporteMonitoreoHTML(titulo, visibles, mesesAbiertos), { onProgreso: setProgreso });
+      const slug = sinTildes(titulo).replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
       const nombre = `monitoreo-${slug || "reporte"}-${fmtDate(new Date())}.pdf`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -9585,121 +9501,167 @@ function PopupMonitoreo({ titulo, breadcrumb, grupo, onClose }) {
     }
   };
 
-  const bd = `1px solid ${COLORS.line}`;
-  const nCols = columnas.length + 1;
+  if (!bloques.length) {
+    return (
+      <div className="mt-4">
+        <Empty>
+          Aún no hay lecturas. Marca un plan como "monitoreo de condición" y completa al menos una orden con checklist para ver datos aquí.
+        </Empty>
+      </div>
+    );
+  }
 
   return (
-    <Modal title={titulo} onClose={onClose} xl>
-      <div className="space-y-2">
-        <div className="flex items-start justify-between gap-2 flex-wrap -mt-1">
-          <p className="text-[11px]" style={cSlate}>{breadcrumb}</p>
-          <button onClick={hacerPDF} disabled={generando}
-            className="flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-md text-white disabled:opacity-60 shrink-0"
-            style={{ background: COLORS.charcoal }}>
-            <Download size={12} /> {generando ? (progreso || "Generando…") : "PDF"}
+    <div className="mt-4 space-y-3">
+      <p className="text-xs" style={cSlate}>
+        Variables de los planes con monitoreo de condición, agrupadas por sede. Cada columna es un mes con su última
+        lectura; toca un mes para verlo por día. Para agregar más, marca un plan como "monitoreo de condición" en Configuración.
+      </p>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        {bloques.length > 1 && (
+          <select value={fSede} onChange={(e) => setFSede(e.target.value)}
+            className="border rounded-md px-2 py-2 text-sm bg-white flex-1 min-w-0" style={inputStyle}>
+            <option value="todas">Todas las sedes ({bloques.length})</option>
+            {bloques.map((b) => <option key={b.sede.id} value={b.sede.id}>{b.sede.nombre}</option>)}
+          </select>
+        )}
+        <button onClick={hacerPDF} disabled={generando}
+          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white disabled:opacity-60 shrink-0"
+          style={{ background: COLORS.charcoal }}>
+          <Download size={13} /> {generando ? (progreso || "Generando…") : "PDF"}
+        </button>
+      </div>
+
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-[10px]" style={cSlate}>Ver por día:</span>
+        {meses.map((m) => (
+          <button key={m} onClick={() => toggleMes(m)} className="text-[10px] font-semibold px-2 py-1 rounded"
+            style={mesesAbiertos.has(m) ? { background: COLORS.orange, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
+            {MESES[Number(m.slice(5)) - 1].slice(0, 3)} {m.slice(2, 4)}
           </button>
-        </div>
+        ))}
+        {bloques.length > 1 && (
+          <span className="ml-auto flex gap-2">
+            <button onClick={() => setCerradas(new Set())} className="text-[10px] font-semibold" style={cOrange}>Desplegar todo</button>
+            <button onClick={() => setCerradas(new Set(visibles.map((b) => b.sede.id)))} className="text-[10px] font-semibold" style={cSlate}>Plegar todo</button>
+          </span>
+        )}
+      </div>
+      {avisoPDF && <p className="text-[11px]" style={cSlate}>{avisoPDF}</p>}
 
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-[10px]" style={cSlate}>Meses:</span>
-          {mesesDisponibles.map((m) => (
-            <button key={m} onClick={() => toggleMes(m)}
-              className="text-[10px] font-semibold px-2 py-1 rounded"
-              style={mesesAbiertos.has(m)
-                ? { background: COLORS.orange, color: "white" }
-                : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
-              {MESES[Number(m.slice(5)) - 1].slice(0, 3)} {m.slice(2, 4)}
-            </button>
-          ))}
-          <span className="text-[10px]" style={cSlate}>· naranja = desplegado por día</span>
-        </div>
-        {avisoPDF && <p className="text-[11px]" style={cSlate}>{avisoPDF}</p>}
+      {visibles.map((b) => (
+        <SedeMonitoreo key={b.sede.id} bloque={b} mesesAbiertos={mesesAbiertos} onToggleMes={toggleMes}
+          abierta={!cerradas.has(b.sede.id)} onToggle={() => toggleSede(b.sede.id)} />
+      ))}
 
-        {columnas.length ? (
-          <div className="border rounded-md" style={{ borderColor: COLORS.line, maxHeight: "58vh", overflow: "auto" }}>
-            <table style={{ borderCollapse: "separate", borderSpacing: 0, width: "max-content", minWidth: "100%" }}>
-              <thead>
-                <tr>
-                  <th className="sticky left-0 top-0 z-30 bg-white text-left px-2 py-1"
-                    style={{ borderBottom: bd, borderRight: bd, width: 130, minWidth: 130, maxWidth: 130, fontSize: 10, ...cChar }}>
-                    Variable
+      <p className="text-[10px]" style={cSlate}>
+        En variables numéricas, el número pequeño es la diferencia con la lectura anterior; en un mes agrupado, el
+        consumo de ese mes.
+      </p>
+    </div>
+  );
+}
+
+function SedeMonitoreo({ bloque, mesesAbiertos, onToggleMes, abierta, onToggle }) {
+  const { sede, ubicaciones, fechas, nVariables } = bloque;
+  const columnas = columnasMonitoreo(fechas, mesesAbiertos);
+  const ultima = fechas[fechas.length - 1];
+  const bd = `1px solid ${COLORS.line}`;
+  const nCols = columnas.length + 1;
+  const variableW = "clamp(160px, 34vw, 360px)";
+
+  return (
+    <div className="border rounded-md overflow-hidden text-left" style={{ ...cardStyle, borderLeft: `3px solid ${COLORS.orange}` }}>
+      <button onClick={onToggle} className="w-full flex items-center gap-2 px-3 py-2.5 text-left" style={{ background: COLORS.paper }}>
+        {abierta ? <ChevronDown size={15} color={COLORS.charcoal} /> : <ChevronRight size={15} color={COLORS.charcoal} />}
+        <Building2 size={14} color={COLORS.orange} className="shrink-0" />
+        <span className="text-sm font-bold flex-1 min-w-0" style={cChar}>{sede.nombre}</span>
+        <span className="text-[10px] shrink-0 text-right" style={cSlate}>
+          {nVariables} variable(s){ultima ? ` · última lectura ${ultima.split("-").reverse().join("/")}` : ""}
+        </span>
+      </button>
+
+      {abierta && (
+        <div style={{ overflowX: "auto", borderTop: bd }}>
+          <table style={{ borderCollapse: "separate", borderSpacing: 0, width: "max-content", minWidth: "100%" }}>
+            <thead>
+              <tr>
+                <th className="sticky left-0 z-20 bg-white text-left px-2 py-1.5"
+                  style={{ borderBottom: bd, borderRight: bd, width: variableW, minWidth: variableW, maxWidth: variableW, fontSize: 10, ...cChar }}>
+                  Variable
+                </th>
+                {columnas.map((c) => (
+                  <th key={c.key} onClick={() => onToggleMes(c.mes)} title={c.plegado ? "Ver por día" : "Agrupar el mes"}
+                    className="bg-white px-1.5 py-1.5 cursor-pointer"
+                    style={{ borderBottom: bd, borderRight: bd, minWidth: c.plegado ? 56 : 44, fontSize: 10 }}>
+                    <span style={{ color: c.plegado ? COLORS.orange : COLORS.slate, fontWeight: 700, whiteSpace: "nowrap" }}>{c.label}</span>
                   </th>
-                  {columnas.map((c) => (
-                    <th key={c.key} onClick={() => toggleMes(c.mes)} title={c.plegado ? "Ver por día" : "Agrupar el mes"}
-                      className="sticky top-0 z-20 bg-white px-1 py-1 cursor-pointer"
-                      style={{ borderBottom: bd, borderRight: bd, minWidth: c.plegado ? 44 : 30, fontSize: 9 }}>
-                      <span style={{ color: c.plegado ? COLORS.orange : COLORS.slate, fontWeight: 600, whiteSpace: "nowrap" }}>
-                        {c.label}
-                      </span>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(porPlan).map(([plan, vars]) => {
-                  const cerrado = planesCerrados.has(plan);
-                  return (
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {ubicaciones.map((u) => (
+                <React.Fragment key={u.key}>
+                  {ubicaciones.length > 1 && (
+                    <tr>
+                      <td colSpan={nCols} className="px-2 py-1.5" style={{ background: COLORS.charcoal, color: "white", fontSize: 10, fontWeight: 700 }}>
+                        <span className="sticky left-2">{u.label}</span>
+                      </td>
+                    </tr>
+                  )}
+                  {Object.entries(u.porPlan).map(([plan, vars]) => (
                     <React.Fragment key={plan}>
                       <tr>
-                        <td colSpan={nCols} onClick={() => togglePlan(plan)}
-                          className="sticky left-0 px-2 py-1 cursor-pointer"
-                          style={{ background: COLORS.cream, borderBottom: bd, fontSize: 10, fontWeight: 700, ...cChar }}>
-                          {cerrado ? "▸" : "▾"} {plan} <span style={{ fontWeight: 400, color: COLORS.slate }}>· {vars.length} variable(s)</span>
+                        <td colSpan={nCols} className="px-2 py-1.5"
+                          style={{ background: COLORS.cream, borderBottom: bd, fontSize: 11, fontWeight: 700, ...cChar }}>
+                          <span className="sticky left-2">{plan} <span style={{ fontWeight: 400, color: COLORS.slate }}>· {vars.length} variable(s)</span></span>
                         </td>
                       </tr>
-                      {!cerrado && vars.map((v) => (
-                        <tr key={v.clave}>
-                          <td className="sticky left-0 z-10 bg-white px-2 py-1"
-                            title={v.texto}
-                            style={{
-                              borderBottom: bd, borderRight: bd, fontSize: 10, ...cSlate,
-                              width: 130, minWidth: 130, maxWidth: 130,
-                              display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
-                              overflow: "hidden", lineHeight: 1.25,
-                            }}>
-                            {nombreCorto(v.texto)}{v.unidad ? ` (${v.unidad})` : ""}
-                          </td>
-                          {columnas.map((c) => {
-                            const d = celda(v, c);
-                            if (!d) return <td key={c.key} className="text-center" style={{ borderBottom: bd, borderRight: bd, fontSize: 9, color: COLORS.line }}>·</td>;
-                            if (v.tipo === "numero") {
+                      {vars.map((v) => {
+                        const [etq, resto] = partesVariable(v.texto);
+                        return (
+                          <tr key={v.clave}>
+                            <td className="sticky left-0 z-10 bg-white px-2 py-1.5 align-top"
+                              style={{ borderBottom: bd, borderRight: bd, width: variableW, minWidth: variableW, maxWidth: variableW, fontSize: 11, lineHeight: 1.3, whiteSpace: "normal", wordBreak: "break-word" }}>
+                              {etq && <b style={cChar}>{etq} </b>}<span style={etq ? cSlate : cChar}>{resto}</span>
+                              {v.unidad ? <span style={cSlate}> ({v.unidad})</span> : null}
+                            </td>
+                            {columnas.map((c) => {
+                              const d = celdaMonitoreo(v, c);
+                              if (!d) return <td key={c.key} className="text-center align-middle" style={{ borderBottom: bd, borderRight: bd, fontSize: 10, color: COLORS.line }}>·</td>;
+                              if (v.tipo === "numero") {
+                                return (
+                                  <td key={c.key} className="text-center align-middle px-1 py-1" style={{ borderBottom: bd, borderRight: bd }}>
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.charcoal, lineHeight: 1.15 }}>{d.valor}</div>
+                                    {d.delta !== null && (
+                                      <div style={{ fontSize: 9, lineHeight: 1.1, color: d.delta >= 0 ? COLORS.verde : COLORS.rojo }}>
+                                        {d.delta >= 0 ? "+" : ""}{d.delta}
+                                      </div>
+                                    )}
+                                  </td>
+                                );
+                              }
+                              const et = etiquetaMonitoreo(v.tipo, d.valor);
                               return (
-                                <td key={c.key} className="text-center px-0.5 py-0.5" style={{ borderBottom: bd, borderRight: bd }}>
-                                  <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.charcoal, lineHeight: 1.1 }}>{d.valor}</div>
-                                  {d.delta !== null && (
-                                    <div style={{ fontSize: 8, lineHeight: 1.1, color: d.delta >= 0 ? COLORS.verde : COLORS.rojo }}>
-                                      {d.delta >= 0 ? "+" : ""}{d.delta}
-                                    </div>
-                                  )}
+                                <td key={c.key} className="text-center align-middle px-1 py-1"
+                                  style={{ borderBottom: bd, borderRight: bd, fontSize: 11, fontWeight: 700, color: et.color }}>
+                                  {et.txt}
                                 </td>
                               );
-                            }
-                            const et = etiquetaCorta(v.tipo, d.valor);
-                            return (
-                              <td key={c.key} className="text-center px-0.5 py-0.5"
-                                style={{ borderBottom: bd, borderRight: bd, fontSize: 9, fontWeight: 700, color: et.color }}>
-                                {et.txt}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
+                            })}
+                          </tr>
+                        );
+                      })}
                     </React.Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <Empty>Sin lecturas registradas.</Empty>
-        )}
-
-        <p className="text-[10px]" style={cSlate}>
-          Toca un mes para ver sus días, o el nombre del plan para plegarlo. En variables numéricas, el número pequeño
-          es la diferencia con la lectura anterior — en un mes agrupado, el consumo de ese mes.
-        </p>
-      </div>
-    </Modal>
+                  ))}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 
