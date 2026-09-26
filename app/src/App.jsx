@@ -665,23 +665,24 @@ function indicadoresMes(data, sedeIds, mes) {
 }
 
 /* Cumplimiento del plan preventivo: para cada aplicación de plan (un activo
-   con un preventivo asignado), se mira si ya tiene una orden para el mes
-   elegido y en qué estado quedó esa orden. Solo 3 categorías: Sin Programar
-   (nada generado aún para este mes), En Ejecución (programada, en espera o
-   en proceso) y Completadas. Lo de otros meses no cuenta. */
+   con un preventivo asignado) se decide una sola categoría:
+   - Completadas / En Ejecución: según su orden con fecha en el mes elegido.
+   - Sin Programar: con el mismo criterio de ciclo que getPendientes (sin
+     orden abierta y con el ciclo vencido o por vencer), para que el
+     Dashboard coincida con Programación y Actividades.
+   Lo que no cae en ninguna (ya ejecutado y con el ciclo vigente, o
+   programado para otro mes) está al día y no suma al total del mes. */
 function avancePlan(data, sedeIds, mes) {
   let sinProgramar = 0, enEjecucion = 0, completadas = 0;
 
   (data.planes || []).forEach((plan) => {
     (plan.aplicaciones || []).forEach((ap) => {
       if (!sedeIds.includes(ap.sedeId)) return;
-      const rel = (data.ordenes || []).filter(
-        (o) => o.planId === plan.id && o.sedeId === ap.sedeId && o.faseId === ap.faseId && o.activoId === ap.activoId
-          && mesKey(o.fechaProgramada) === mes
-      );
-      if (rel.some((o) => o.estado === "completada")) { completadas++; return; }
-      if (rel.some((o) => ["programada", "en_proceso", "espera"].includes(o.estado))) { enEjecucion++; return; }
-      sinProgramar++;
+      const todas = ordenesDeAplicacion(data, plan, ap);
+      const delMes = todas.filter((o) => mesKey(o.fechaProgramada) === mes);
+      if (delMes.some((o) => o.estado === "completada")) { completadas++; return; }
+      if (delMes.some((o) => ESTADOS_ABIERTOS.includes(o.estado))) { enEjecucion++; return; }
+      if (preventivoPendiente(plan, todas)) sinProgramar++;
     });
   });
 
@@ -869,6 +870,38 @@ const semaforoDe = (item) =>
     : semaforoCorrectivo(item);
 const ordenarPorUrgencia = (items) => [...items].sort((a, b) => semaforoDe(b).nivel - semaforoDe(a).nivel);
 
+/* Órdenes de una aplicación de plan (mismo plan, sede, fase y activo). */
+const ordenesDeAplicacion = (data, plan, ap) => (data.ordenes || []).filter(
+  (o) => o.planId === plan.id && o.sedeId === ap.sedeId && o.faseId === ap.faseId && o.activoId === ap.activoId
+);
+
+/* Criterio único de "preventivo pendiente de programar". Lo usan
+   getPendientes (Programación, Actividades) y avancePlan (Dashboard,
+   reportes), para que todas las vistas coincidan en qué falta programar.
+   Devuelve la última orden completada si está pendiente, o false si no. */
+function preventivoPendiente(plan, rel) {
+  // Con una orden abierta (en cualquier fecha) ya está programado
+  if (rel.some((o) => ESTADOS_ABIERTOS.includes(o.estado))) return false;
+  const ultima = rel
+    .filter((o) => o.estado === "completada")
+    .sort((a, b) => (a.fechaCompletada < b.fechaCompletada ? 1 : -1))[0];
+
+  /* Si ya se ejecutó y su ciclo todavía no vence, no toca aún: aparecerá
+     como pendiente recién cuando se acerque la próxima fecha. Antes, al
+     completar un mensual volvía a la lista de "sin programar" el mismo
+     día, aunque le tocara el mes siguiente. */
+  if (ultima?.fechaCompletada) {
+    const ciclo = FRECUENCIA_DIAS[plan.frecuencia] || 90;
+    const proxima = new Date(`${ultima.fechaCompletada}T00:00:00`);
+    proxima.setDate(proxima.getDate() + ciclo);
+    // Se anticipa medio mes para poder programarla antes de que venza
+    const margen = new Date();
+    margen.setDate(margen.getDate() + 15);
+    if (proxima > margen) return false;
+  }
+  return { ultima };
+}
+
 /* --- Pendientes: preventivo sin OT abierta (reaparece tras completarse) +
    correctivo en estado 'pendiente' --------------------------------------- */
 function getPendientes(data) {
@@ -876,27 +909,9 @@ function getPendientes(data) {
 
   (data.planes || []).forEach((plan) => {
     (plan.aplicaciones || []).forEach((ap) => {
-      const rel = (data.ordenes || []).filter(
-        (o) => o.planId === plan.id && o.sedeId === ap.sedeId && o.faseId === ap.faseId && o.activoId === ap.activoId
-      );
-      if (rel.some((o) => ESTADOS_ABIERTOS.includes(o.estado))) return;
-      const ultima = rel
-        .filter((o) => o.estado === "completada")
-        .sort((a, b) => (a.fechaCompletada < b.fechaCompletada ? 1 : -1))[0];
-
-      /* Si ya se ejecutó y su ciclo todavía no vence, no toca aún: aparecerá
-         como pendiente recién cuando se acerque la próxima fecha. Antes, al
-         completar un mensual volvía a la lista de "sin programar" el mismo
-         día, aunque le tocara el mes siguiente. */
-      if (ultima?.fechaCompletada) {
-        const ciclo = FRECUENCIA_DIAS[plan.frecuencia] || 90;
-        const proxima = new Date(`${ultima.fechaCompletada}T00:00:00`);
-        proxima.setDate(proxima.getDate() + ciclo);
-        // Se anticipa medio mes para poder programarla antes de que venza
-        const margen = new Date();
-        margen.setDate(margen.getDate() + 15);
-        if (proxima > margen) return;
-      }
+      const pend = preventivoPendiente(plan, ordenesDeAplicacion(data, plan, ap));
+      if (!pend) return;
+      const { ultima } = pend;
 
       items.push({
         key: `${plan.id}|${ap.sedeId}|${ap.faseId}|${ap.activoId}`,
