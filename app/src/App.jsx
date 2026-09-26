@@ -15,7 +15,7 @@ import {
   QrCode, Wrench, ClipboardList, BarChart3, Plus, X, ChevronRight, ChevronDown,
   ChevronLeft, ChevronUp, AlertTriangle, CheckCircle2, Clock, DollarSign, Building2, Layers,
   Users, ShieldCheck, ArrowLeft, Download, Send, Trash2, Pencil, CalendarDays,
-  Filter, KeyRound, Eye, EyeOff, Camera, LogOut, TrendingUp, Wallet, Star, Info, RefreshCw, FileText
+  Filter, KeyRound, Eye, EyeOff, Camera, LogOut, TrendingUp, Wallet, Star, Info, RefreshCw, FileText, Search
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, ReferenceLine, XAxis, YAxis, CartesianGrid,
@@ -2583,6 +2583,100 @@ function BotonHistorial({ item, data }) {
    No pasa por aprobación — el valor entra directo al presupuesto de la sede.
    Si el artículo no está en el catálogo, o la bodega está vacía, se puede dar
    de alta aquí mismo: lo importante es no bloquear el registro de lo usado. */
+/* Búsqueda de artículos sin distinguir mayúsculas ni tildes: "valvula"
+   encuentra "Válvula". Cada palabra escrita debe aparecer en el nombre, en
+   cualquier orden ("led foco" encuentra "Foco LED 18W"). */
+const sinTildes = (t) => String(t || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+const coincideArticulo = (nombre, q) => {
+  const n = sinTildes(nombre);
+  return sinTildes(q).split(/\s+/).filter(Boolean).every((w) => n.includes(w));
+};
+
+/* Desplegable de artículos con buscador integrado. La lista se abre debajo,
+   dentro del mismo flujo (no flotante), para que en el celular y dentro de
+   los modales nunca quede cortada; los nombres largos se ven completos. */
+function SelectorArticulo({ articulos, value, onChange }) {
+  const [abierto, setAbierto] = useState(false);
+  const [q, setQ] = useState("");
+  const [activo, setActivo] = useState(0);
+  const caja = useRef(null);
+  const lista = useRef(null);
+  const sel = articulos.find((x) => x.id === value);
+  const filtrados = articulos
+    .filter((x) => coincideArticulo(x.nombre, q))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
+
+  // Cerrar al tocar fuera
+  useEffect(() => {
+    if (!abierto) return;
+    const fuera = (e) => { if (caja.current && !caja.current.contains(e.target)) setAbierto(false); };
+    document.addEventListener("pointerdown", fuera);
+    return () => document.removeEventListener("pointerdown", fuera);
+  }, [abierto]);
+
+  // Mantener visible la opción marcada con el teclado
+  useEffect(() => {
+    lista.current?.children[activo]?.scrollIntoView({ block: "nearest" });
+  }, [activo]);
+
+  const elegir = (x) => { onChange(x.id); setAbierto(false); setQ(""); };
+  const teclas = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setActivo((i) => Math.min(i + 1, filtrados.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActivo((i) => Math.max(i - 1, 0)); }
+    else if (e.key === "Enter") { e.preventDefault(); if (filtrados[activo]) elegir(filtrados[activo]); }
+    else if (e.key === "Escape") { setAbierto(false); setQ(""); }
+  };
+  const existencia = (x) => x.cantidad > 0 ? `${x.cantidad} ${x.unidad} en bodega` : "Sin stock";
+
+  return (
+    <div ref={caja}>
+      {!abierto ? (
+        <button type="button" onClick={() => { setAbierto(true); setActivo(0); }}
+          className="w-full flex items-start justify-between gap-2 border rounded-md px-2.5 py-2 text-left bg-white"
+          style={inputStyle}>
+          {sel ? (
+            <span className="min-w-0">
+              <span className="block text-xs font-semibold break-words" style={cChar}>{sel.nombre}</span>
+              <span className="block text-[10px]" style={{ color: sel.cantidad > 0 ? COLORS.slate : COLORS.rojo }}>{existencia(sel)}</span>
+            </span>
+          ) : (
+            <span className="text-xs flex items-center gap-1.5" style={cSlate}><Search size={13} /> Buscar o elegir artículo…</span>
+          )}
+          <ChevronDown size={14} color={COLORS.slate} className="shrink-0 mt-0.5" />
+        </button>
+      ) : (
+        <div className="border rounded-md bg-white" style={{ borderColor: COLORS.orange }}>
+          <div className="flex items-center gap-1.5 px-2.5 py-2 border-b" style={bLine}>
+            <Search size={14} color={COLORS.slate} className="shrink-0" />
+            <input autoFocus value={q} onChange={(e) => { setQ(e.target.value); setActivo(0); }} onKeyDown={teclas}
+              placeholder="Escribe parte del nombre…" enterKeyHint="search"
+              className="flex-1 min-w-0 text-sm outline-none bg-transparent" style={cChar} />
+            <button type="button" onClick={() => { setAbierto(false); setQ(""); }} className="shrink-0 p-0.5" title="Cerrar">
+              <X size={14} color={COLORS.slate} />
+            </button>
+          </div>
+          <div ref={lista} role="listbox" className="overflow-y-auto" style={{ maxHeight: 240 }}>
+            {filtrados.map((x, i) => (
+              <button type="button" key={x.id} role="option" aria-selected={x.id === value}
+                onClick={() => elegir(x)} onMouseEnter={() => setActivo(i)}
+                className="w-full flex items-start justify-between gap-3 px-2.5 py-2 text-left border-b last:border-b-0"
+                style={{ borderColor: COLORS.line, background: i === activo ? `${COLORS.orange}12` : "white" }}>
+                <span className="text-xs min-w-0 break-words" style={{ ...cChar, fontWeight: x.id === value ? 700 : 500 }}>{x.nombre}</span>
+                <span className="text-[10px] shrink-0 text-right" style={{ color: x.cantidad > 0 ? COLORS.slate : COLORS.rojo }}>
+                  {existencia(x)}
+                </span>
+              </button>
+            ))}
+            {filtrados.length === 0 && (
+              <p className="px-2.5 py-3 text-xs text-center" style={cSlate}>Ningún artículo coincide con “{q}”.</p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
   const [sel, setSel] = useState("");
   const [cant, setCant] = useState(1);
@@ -2604,7 +2698,7 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
         <div className="space-y-1 mb-2">
           {consumos.map((c) => (
             <div key={c.id} className="flex items-center justify-between text-xs gap-2 border rounded-md px-2 py-1.5" style={bLine}>
-              <span className="min-w-0 truncate" style={cChar}>{c.nombre} · {c.cantidad} {c.unidad}</span>
+              <span className="min-w-0 break-words" style={cChar}>{c.nombre} · {c.cantidad} {c.unidad}</span>
               <span className="flex items-center gap-2 shrink-0">
                 <span className="font-semibold" style={cOrange}>{money(c.cantidad * c.costoUnitario)}</span>
                 {!readOnly && <button onClick={() => onQuitar(c)}><Trash2 size={12} color={COLORS.slate} /></button>}
@@ -2618,21 +2712,15 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
         <>
           {stockSede.length > 0 && (
             <>
-              <div className="flex gap-1.5">
-                <select value={sel} onChange={(e) => { setSel(e.target.value); setCant(1); }}
-                  className="flex-1 min-w-0 border rounded-md px-2 py-1.5 text-xs" style={inputStyle}>
-                  <option value="">Elegir artículo…</option>
-                  {stockSede.map((x) => (
-                    <option key={x.id} value={x.id}>
-                      {x.nombre} · {x.cantidad > 0 ? `${x.cantidad} ${x.unidad}` : "sin stock"}
-                    </option>
-                  ))}
-                </select>
-                <input type="number" min="1" value={cant} onChange={(e) => setCant(e.target.value)}
-                  className="w-14 border rounded-md px-2 py-1.5 text-xs outline-none" style={inputStyle} />
+              <SelectorArticulo articulos={stockSede} value={sel} onChange={(id) => { setSel(id); setCant(1); }} />
+              <div className="flex items-center gap-1.5 mt-1.5">
+                <span className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Cantidad</span>
+                <input type="number" min="1" inputMode="decimal" value={cant} onChange={(e) => setCant(e.target.value)}
+                  className="w-20 border rounded-md px-2 py-1.5 text-xs outline-none" style={inputStyle} />
+                {art && <span className="text-[10px]" style={cSlate}>{art.unidad}</span>}
                 <button disabled={!valido}
                   onClick={() => { onRegistrar(art, Number(cant)); setSel(""); setCant(1); }}
-                  className="text-xs font-semibold px-2.5 py-1.5 rounded-md text-white shrink-0 disabled:opacity-40"
+                  className="ml-auto text-xs font-semibold px-3 py-1.5 rounded-md text-white shrink-0 disabled:opacity-40"
                   style={{ background: COLORS.orange }}>
                   Cargar
                 </button>
@@ -7292,9 +7380,26 @@ thead th:first-child{text-align:left;width:190px}
 </body></html>`;
 }
 
+/* Ajusta la altura de un textarea a su contenido, para que el nombre del
+   artículo se lea completo en varias líneas en lugar de quedar cortado. */
+const ajustarAltura = (el) => {
+  if (!el) return;
+  el.style.height = "auto";
+  // Oculto (vista de celular vs. computador) mide 0: se deja en automático
+  if (el.scrollHeight) el.style.height = `${el.scrollHeight}px`;
+};
+
+const FILTROS_BODEGA = [
+  ["todos", "Todos"],
+  ["bajo", "Bajo mínimo"],
+  ["agotado", "Agotados"],
+];
+
 function VistaBodega({ data, persist, sedes, editable }) {
   const [sedeId, setSedeId] = useState(sedes[0]?.id || "");
   const [nuevo, setNuevo] = useState(null);
+  const [q, setQ] = useState("");
+  const [fEstado, setFEstado] = useState("todos");
 
   useEffect(() => {
     if (!sedes.some((s) => s.id === sedeId)) setSedeId(sedes[0]?.id || "");
@@ -7305,18 +7410,55 @@ function VistaBodega({ data, persist, sedes, editable }) {
   const bajos = items.filter((x) => x.cantidad <= x.minimo);
   const agotados = items.filter((x) => x.cantidad <= 0);
 
+  const estadoDe = (x) => (x.cantidad <= 0 ? "agotado" : x.cantidad <= x.minimo ? "bajo" : "ok");
+  // "Bajo mínimo" incluye los agotados, igual que la tarjeta de arriba
+  const visibles = items
+    .filter((x) => coincideArticulo(x.nombre, q))
+    .filter((x) => fEstado === "todos" || (fEstado === "bajo" ? estadoDe(x) !== "ok" : estadoDe(x) === "agotado"))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
+  const hayFiltro = q.trim() !== "" || fEstado !== "todos";
+
   const setItem = (id, patch) => persist((data) => ({ ...data, stock: data.stock.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
+  const borrar = (id) => persist((data) => ({ ...data, stock: data.stock.filter((y) => y.id !== id) }));
 
   const th = "text-left text-[10px] font-semibold uppercase tracking-wide px-2.5 py-2 whitespace-nowrap";
-  const td = "px-2.5 py-2 text-xs align-middle";
+  const td = "px-2.5 py-2 text-xs align-top";
   const cellInput = "w-full border rounded px-1.5 py-1 text-xs outline-none bg-white";
+
+  const metaEstado = (x) => {
+    const e = estadoDe(x);
+    return e === "agotado" ? { color: COLORS.rojo, label: "Agotado" }
+      : e === "bajo" ? { color: COLORS.ambar, label: "Bajo mínimo" }
+      : { color: COLORS.verde, label: "Disponible" };
+  };
+
+  // Nombre: en edición es un textarea que crece con el texto; si no, texto que salta de línea
+  const campoNombre = (x) => editable ? (
+    <CampoVivo as="textarea" rows={1} value={x.nombre} onCommit={(v) => setItem(x.id, { nombre: v })}
+      ref={ajustarAltura} onInput={(e) => ajustarAltura(e.target)}
+      className={`${cellInput} resize-none overflow-hidden leading-snug font-semibold`} style={{ ...bLine, ...cChar, fieldSizing: "content" }} />
+  ) : (
+    <span className="break-words font-semibold" style={cChar}>{x.nombre}</span>
+  );
+  const campoNum = (x, k, w, extra = {}) => (
+    <CampoVivo type="number" min="0" inputMode="decimal" {...extra} value={x[k]}
+      onCommit={(v) => setItem(x.id, { [k]: Number(v) || 0 })}
+      className={cellInput} style={{ borderColor: COLORS.line, width: w }} />
+  );
+  const campoUnidad = (x, w) => (
+    <CampoVivo value={x.unidad} onCommit={(v) => setItem(x.id, { unidad: v })}
+      className={cellInput} style={{ borderColor: COLORS.line, width: w }} />
+  );
+  const vacio = items.length === 0
+    ? "Esta sede aún no tiene artículos en bodega."
+    : "Ningún artículo coincide con la búsqueda.";
 
   return (
     <div className="mt-4">
       <p className="text-xs mb-3" style={cSlate}>
         {editable
-          ? "Insumos ya comprados. El técnico los consume directo en preventivos: el consumo descuenta existencias y carga su valor al presupuesto de la sede, sin aprobación."
-          : "Existencias disponibles en tus sedes. Se descuentan solas cuando cargas un consumo en una actividad preventiva."}
+          ? "Insumos ya comprados. El técnico los consume directo en las actividades: el consumo descuenta existencias y carga su valor al presupuesto de la sede, sin aprobación."
+          : "Existencias disponibles en tus sedes. Se descuentan solas cuando cargas un consumo en una actividad."}
       </p>
 
       <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
@@ -7343,11 +7485,69 @@ function VistaBodega({ data, persist, sedes, editable }) {
         )}
       </div>
 
-      <div className="border rounded-md overflow-x-auto" style={cardStyle}>
-        <table className="w-full border-collapse" style={{ minWidth: editable ? 640 : 420 }}>
+      {/* Buscador y filtro por estado */}
+      <div className="flex gap-2 mb-2 flex-wrap">
+        <div className="flex-1 min-w-48 flex items-center gap-1.5 border rounded-md px-2.5 bg-white" style={inputStyle}>
+          <Search size={14} color={COLORS.slate} className="shrink-0" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar artículo…" enterKeyHint="search"
+            className="flex-1 min-w-0 py-2 text-sm outline-none bg-transparent" style={cChar} />
+          {q && (
+            <button onClick={() => setQ("")} className="shrink-0 p-0.5" title="Limpiar búsqueda">
+              <X size={14} color={COLORS.slate} />
+            </button>
+          )}
+        </div>
+        <select value={fEstado} onChange={(e) => setFEstado(e.target.value)}
+          className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
+          {FILTROS_BODEGA.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+        </select>
+      </div>
+      {hayFiltro && (
+        <p className="text-[11px] mb-2" style={cSlate}>
+          Mostrando {visibles.length} de {items.length} artículo(s).{" "}
+          <button onClick={() => { setQ(""); setFEstado("todos"); }} className="font-semibold" style={cOrange}>Quitar filtros</button>
+        </p>
+      )}
+
+      {/* Celular: una tarjeta por artículo, con el nombre completo arriba */}
+      <div className="md:hidden space-y-2">
+        {visibles.map((x) => {
+          const est = metaEstado(x);
+          return (
+            <div key={x.id} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${est.color}` }}>
+              <div className="flex items-start gap-2">
+                <div className="flex-1 min-w-0 text-sm">{campoNombre(x)}</div>
+                {editable && <DeleteBtn onConfirm={() => borrar(x.id)} />}
+              </div>
+              <div className="flex items-center justify-between gap-2 mt-1.5">
+                <Chip color={est.color}>{est.label}</Chip>
+                {editable && <span className="text-xs font-bold" style={cOrange}>{money(x.cantidad * x.costoUnitario)}</span>}
+              </div>
+              <div className={`grid ${editable ? "grid-cols-4" : "grid-cols-3"} gap-2 mt-2`}>
+                {[
+                  ["Existencias", editable ? campoNum(x, "cantidad", "100%") : <span style={{ color: est.color, fontWeight: 700 }}>{x.cantidad}</span>],
+                  ["Unidad", editable ? campoUnidad(x, "100%") : x.unidad],
+                  ["Mínimo", editable ? campoNum(x, "minimo", "100%") : x.minimo],
+                  ...(editable ? [["Costo u.", campoNum(x, "costoUnitario", "100%", { step: "0.01" })]] : []),
+                ].map(([label, val]) => (
+                  <div key={label} className="min-w-0">
+                    <p className="text-[9px] font-semibold uppercase tracking-wide mb-0.5" style={cSlate}>{label}</p>
+                    <div className="text-xs" style={cChar}>{val}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+        {visibles.length === 0 && <Empty>{vacio}</Empty>}
+      </div>
+
+      {/* Computador / tablet: tabla, con la columna del artículo amplia */}
+      <div className="hidden md:block border rounded-md overflow-x-auto" style={cardStyle}>
+        <table className="w-full border-collapse" style={{ minWidth: editable ? 760 : 480 }}>
           <thead>
             <tr style={{ background: COLORS.charcoal }}>
-              <th className={th} style={{ color: "white" }}>Artículo</th>
+              <th className={th} style={{ color: "white", width: "40%" }}>Artículo</th>
               <th className={th} style={{ color: "white" }}>Existencias</th>
               <th className={th} style={{ color: "white" }}>Unidad</th>
               <th className={th} style={{ color: "white" }}>Mínimo</th>
@@ -7358,63 +7558,27 @@ function VistaBodega({ data, persist, sedes, editable }) {
             </tr>
           </thead>
           <tbody>
-            {items.map((x, i) => {
-              const agotado = x.cantidad <= 0;
-              const bajo = !agotado && x.cantidad <= x.minimo;
-              const color = agotado ? COLORS.rojo : bajo ? COLORS.ambar : COLORS.verde;
+            {visibles.map((x, i) => {
+              const est = metaEstado(x);
               return (
                 <tr key={x.id} style={{ background: i % 2 ? COLORS.paper : "white", borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className={td} style={{ ...cChar, fontWeight: 600 }}>
-                    {editable
-                      ? <CampoVivo value={x.nombre} onCommit={(v) => setItem(x.id, { nombre: v })}
-                          className={cellInput} style={bLine} />
-                      : x.nombre}
-                  </td>
+                  <td className={td} style={{ minWidth: 220 }}>{campoNombre(x)}</td>
                   <td className={td}>
-                    {editable
-                      ? <CampoVivo type="number" min="0" value={x.cantidad}
-                          onCommit={(v) => setItem(x.id, { cantidad: Number(v) || 0 })}
-                          className={cellInput} style={{ borderColor: COLORS.line, width: 68 }} />
-                      : <span style={{ color, fontWeight: 700 }}>{x.cantidad}</span>}
+                    {editable ? campoNum(x, "cantidad", 68) : <span style={{ color: est.color, fontWeight: 700 }}>{x.cantidad}</span>}
                   </td>
-                  <td className={td} style={cSlate}>
-                    {editable
-                      ? <CampoVivo value={x.unidad} onCommit={(v) => setItem(x.id, { unidad: v })}
-                          className={cellInput} style={{ borderColor: COLORS.line, width: 74 }} />
-                      : x.unidad}
-                  </td>
-                  <td className={td} style={cSlate}>
-                    {editable
-                      ? <CampoVivo type="number" min="0" value={x.minimo}
-                          onCommit={(v) => setItem(x.id, { minimo: Number(v) || 0 })}
-                          className={cellInput} style={{ borderColor: COLORS.line, width: 62 }} />
-                      : x.minimo}
-                  </td>
-                  {editable && (
-                    <td className={td}>
-                      <CampoVivo type="number" min="0" step="0.01" value={x.costoUnitario}
-                        onCommit={(v) => setItem(x.id, { costoUnitario: Number(v) || 0 })}
-                        className={cellInput} style={{ borderColor: COLORS.line, width: 78 }} />
-                    </td>
-                  )}
+                  <td className={td} style={cSlate}>{editable ? campoUnidad(x, 74) : x.unidad}</td>
+                  <td className={td} style={cSlate}>{editable ? campoNum(x, "minimo", 62) : x.minimo}</td>
+                  {editable && <td className={td}>{campoNum(x, "costoUnitario", 78, { step: "0.01" })}</td>}
                   {editable && (
                     <td className={td} style={{ ...cOrange, fontWeight: 700 }}>{money(x.cantidad * x.costoUnitario)}</td>
                   )}
-                  <td className={td}>
-                    <Chip color={color}>{agotado ? "Agotado" : bajo ? "Bajo mínimo" : "Disponible"}</Chip>
-                  </td>
-                  {editable && (
-                    <td className={td}>
-                      <DeleteBtn onConfirm={() => persist((data) => ({ ...data, stock: data.stock.filter((y) => y.id !== x.id) }))} />
-                    </td>
-                  )}
+                  <td className={td}><Chip color={est.color}>{est.label}</Chip></td>
+                  {editable && <td className={td}><DeleteBtn onConfirm={() => borrar(x.id)} /></td>}
                 </tr>
               );
             })}
-            {items.length === 0 && (
-              <tr><td colSpan={editable ? 8 : 5} className="px-3 py-5 text-sm text-center" style={cSlate}>
-                Esta sede aún no tiene artículos en bodega.
-              </td></tr>
+            {visibles.length === 0 && (
+              <tr><td colSpan={editable ? 8 : 5} className="px-3 py-5 text-sm text-center" style={cSlate}>{vacio}</td></tr>
             )}
           </tbody>
         </table>
