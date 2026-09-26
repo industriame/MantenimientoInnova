@@ -3866,7 +3866,7 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
     { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
     { id: "planual", label: "Plan anual", icon: <CalendarDays size={14} /> },
     { id: "solicitudes", label: "Solicitudes", icon: <ClipboardList size={14} /> },
-    { id: "historico", label: "Histórico", icon: <ClipboardList size={14} /> },
+    { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
   ];
 
   return (
@@ -3941,7 +3941,7 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
 
       {tab === "planual" && <VistaPlanAnual data={data} sedes={misSedes} />}
 
-      {tab === "historico" && <VistaHistorico data={data} sedes={misSedes} rol="solicitante" />}
+      {tab === "reportes" && <VistaReportes data={data} sedes={misSedes} user={user} />}
 
       {ubicDirecta && (
         <Modal title="Reportar novedad" onClose={() => setUbicDirecta(null)} wide>
@@ -4676,8 +4676,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               <strong>{item.codigo}</strong> · {item.tarea}
             </p>
             <p className="text-xs" style={cSlate}>
-              Se registrará la fecha y hora de cierre, y los materiales aprobados se descontarán de bodega.
-              La actividad pasará al histórico.
+              Se registrará la fecha y hora de cierre.
+              La actividad quedará cerrada y se podrá consultar en Reportes.
             </p>
             <div className="flex gap-2">
               <button onClick={() => setConfirmarCierre(false)}
@@ -4731,7 +4731,6 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
     { id: "monitoreo", label: "Monitoreo", icon: <BarChart3 size={14} /> },
     { id: "bodega", label: "Bodega", icon: <Layers size={14} /> },
     { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
-    { id: "historico", label: "Histórico", icon: <ClipboardList size={14} /> },
   ];
 
   // El técnico adelanta una actividad pendiente y queda asignada a él
@@ -4821,7 +4820,6 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
       {tab === "planual" && <VistaPlanAnual data={data} sedes={misSedes} />}
       {tab === "monitoreo" && <VistaMonitoreo data={{ ...data, sedes: misSedes }} />}
       {tab === "reportes" && <VistaReportes data={data} sedes={misSedes} user={user} />}
-      {tab === "historico" && <VistaHistorico data={data} sedes={misSedes} rol="tecnico" />}
 
       {tab === "programacion" && (
         <PanelProgramacion data={data} sedes={misSedes} pendientes={pendientes} onActivar={setActivar}
@@ -5974,7 +5972,7 @@ function TecnicoPreventivos({ data, acciones, ordenes }) {
       </SeccionPlegable>
       <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
         {finalizadas.slice(0, 5).map(tarjeta)}
-        {finalizadas.length > 5 && <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Histórico.</p>}
+        {finalizadas.length > 5 && <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Reportes.</p>}
         {finalizadas.length === 0 && <Empty>Aún no hay preventivos resueltos.</Empty>}
       </SeccionPlegable>
     </div>
@@ -6012,7 +6010,7 @@ function TecnicoCorrectivos({ data, acciones, solicitudes }) {
       </SeccionPlegable>
       <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
         {finalizadas.slice(0, 5).map(tarjeta)}
-        {finalizadas.length > 5 && <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Histórico.</p>}
+        {finalizadas.length > 5 && <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Reportes.</p>}
         {finalizadas.length === 0 && <Empty>Aún no hay correctivos resueltos.</Empty>}
       </SeccionPlegable>
     </div>
@@ -6064,7 +6062,7 @@ function TecnicoServicios({ data, servicios }) {
       </SeccionPlegable>
       <SeccionPlegable titulo="Finalizados" count={finalizados.length} color={COLORS.verde} defaultOpen={false}>
         {finalizados.slice(0, 5).map(tarjeta)}
-        {finalizados.length > 5 && <p className="text-[11px] text-center" style={cSlate}>{finalizados.length - 5} más en Histórico.</p>}
+        {finalizados.length > 5 && <p className="text-[11px] text-center" style={cSlate}>{finalizados.length - 5} más en Reportes.</p>}
         {finalizados.length === 0 && <Empty>Aún no hay servicios finalizados.</Empty>}
       </SeccionPlegable>
     </div>
@@ -6220,7 +6218,7 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
       <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
         {finalizadas.slice(0, 5).map(tarjetaAct)}
         {finalizadas.length > 5 && (
-          <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Histórico.</p>
+          <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Reportes.</p>
         )}
         {finalizadas.length === 0 && <Empty>Aún no hay correctivos resueltos.</Empty>}
       </SeccionPlegable>
@@ -6677,7 +6675,7 @@ function AdminServicios({ data, persist, user }) {
       <SeccionPlegable titulo="Finalizados" count={finalizados.length} color={COLORS.verde} defaultOpen={false}>
         {finalizados.slice(0, 5).map((s) => tarjeta(s))}
         {finalizados.length > 5 && (
-          <p className="text-[11px] text-center" style={cSlate}>{finalizados.length - 5} más en Histórico.</p>
+          <p className="text-[11px] text-center" style={cSlate}>{finalizados.length - 5} más en Reportes.</p>
         )}
         {finalizados.length === 0 && <Empty>Aún no hay servicios finalizados.</Empty>}
       </SeccionPlegable>
@@ -6771,7 +6769,7 @@ function AdminPreventivos({ data, persist, user }) {
   return (
     <div className="mt-4">
       <p className="text-xs mb-3" style={cSlate}>
-        Preventivos que siguen abiertos. Los completados están en Histórico.
+        Preventivos que siguen abiertos. Los completados se consultan en Reportes.
       </p>
 
       <div className="flex gap-2 mb-3 flex-wrap">
@@ -6834,7 +6832,7 @@ function AdminPreventivos({ data, persist, user }) {
         <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
           {finalizadas.slice(0, 5).map(tarjeta)}
           {finalizadas.length > 5 && (
-            <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Histórico.</p>
+            <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Reportes.</p>
           )}
           {finalizadas.length === 0 && <Empty>Aún no hay preventivos completados.</Empty>}
         </SeccionPlegable>
@@ -6955,7 +6953,6 @@ function AdminActividades({ data, persist, persistYa, user }) {
     { id: "preventivos", label: "Preventivos", icon: <ClipboardList size={14} />, n: nPrev, alerta: atrasados },
     { id: "correctivos", label: "Correctivos", icon: <AlertTriangle size={14} />, n: nCorr },
     { id: "servicios", label: "Servicios", icon: <Wrench size={14} />, n: nServ },
-    { id: "historico", label: "Histórico", icon: <Clock size={14} /> },
   ];
 
   return (
@@ -6979,7 +6976,6 @@ function AdminActividades({ data, persist, persistYa, user }) {
       {sub === "preventivos" && <AdminPreventivos data={data} persist={persist} user={user} />}
       {sub === "correctivos" && <AdminCorrectivos data={data} persist={persist} persistYa={persistYa} user={user} />}
       {sub === "servicios" && <AdminServicios data={data} persist={persist} user={user} />}
-      {sub === "historico" && <VistaHistorico data={data} sedes={data.sedes} rol="admin" />}
     </div>
   );
 }
@@ -7715,24 +7711,11 @@ function VistaBodega({ data, persist, sedes, editable }) {
 }
 
 /* ============================================================================
-   15e. HISTÓRICO · Todo lo ejecutado, buscable por código
+   15e. EXPORTACIÓN CSV (se usa desde Reportes)
    ========================================================================= */
 
-/* El histórico no es una tabla nueva: son las mismas órdenes, solicitudes y
-   servicios ya cerrados. Esta vista los unifica y los hace buscables. */
-function historicoDe(data, sedeIds) {
-  const dentro = (x) => !sedeIds || sedeIds.includes(x.sedeId);
-  const pre = (data.ordenes || []).filter((o) => o.estado === "completada" && dentro(o))
-    .map((o) => ({ ...o, tipo: "preventivo" }));
-  const cor = (data.solicitudes || []).filter((s) => s.estado === "completada" && dentro(s))
-    .map((s) => ({ ...s, tipo: "correctivo", tarea: s.descripcion }));
-  const srv = (data.servicios || []).filter((s) => s.estado === "completada" && dentro(s))
-    .map((s) => ({ ...s, tipo: "servicio", tarea: s.trabajo, fechaCompletada: s.fecha }));
-  return [...pre, ...cor, ...srv].sort((a, b) =>
-    (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
-}
-
-/* Exporta el histórico a CSV. Formato simple de tabla, una fila por tarea. */
+/* Exporta a CSV las actividades de un reporte. Formato simple de tabla,
+   una fila por tarea. */
 function exportarCSV(filas, data) {
   const cols = [
     "Tipo", "Codigo", "Tarea", "Sede", "Ubicacion", "Categoria",
@@ -7764,249 +7747,13 @@ function exportarCSV(filas, data) {
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
   const a = document.createElement("a");
   a.href = url;
-  a.download = `historico-mantenimiento-${fmtDate(new Date())}.csv`;
+  a.download = `reporte-mantenimiento-${fmtDate(new Date())}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
 
-/* Grupo desplegable de un tipo dentro del histórico. */
-function GrupoHistorico({ tipo, items, data, abiertoInicial }) {
-  const [open, setOpen] = useState(abiertoInicial);
-  const meta = tipoMeta(tipo);
-  const costo = items.reduce((a, h) =>
-    a + (h.tipo === "servicio" ? costoServicio(h) : costoConsumos(h)), 0);
-
-  return (
-    <div className="border rounded-md overflow-hidden" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${meta.color}` }}>
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-3 py-2.5"
-        style={{ background: open ? COLORS.paper : "white" }}>
-        {open ? <ChevronDown size={14} color={COLORS.slate} /> : <ChevronRight size={14} color={COLORS.slate} />}
-        <span className="text-xs font-bold uppercase tracking-wide flex-1 text-left" style={{ color: meta.color }}>
-          {TIPO_PLURAL[tipo]}
-        </span>
-        {costo > 0 && <Chip color={COLORS.orange}>{money(costo)}</Chip>}
-        <Chip color={meta.color}>{items.length}</Chip>
-      </button>
-      {open && (
-        <div className="p-2 space-y-2" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-          {items.map((h) => <RegistroHistorico key={h.id} h={h} data={data} />)}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function VistaHistorico({ data, sedes, rol }) {
-  const [q, setQ] = useState("");
-  const [fSede, setFSede] = useState("todas");
-  const [orden, setOrden] = useState("reciente");
-  const [desde, setDesde] = useState("");
-  const [hasta, setHasta] = useState("");
-  const sedeIds = sedes.map((s) => s.id);
-
-  const todo = useMemo(() => historicoDe(data, sedeIds), [data, sedeIds.join(",")]);
-
-  /* Fecha de origen de cada registro: las correctivas guardan cuándo se
-     reportaron ("fecha"); preventivas y servicios no tienen ese dato, así
-     que se usa su fecha programada, que es su equivalente de origen. */
-  const fechaOrigen = (h) => h.fecha || h.fechaProgramada || "";
-
-  const filtrado = todo.filter((h) => {
-    if (fSede !== "todas" && h.sedeId !== fSede) return false;
-    const f = fechaOrigen(h);
-    if (desde && (!f || f < desde)) return false;
-    if (hasta && (!f || f > hasta)) return false;
-    if (!q.trim()) return true;
-    const t = q.trim().toLowerCase();
-    return (h.codigo || "").toLowerCase().includes(t) ||
-      (h.tarea || "").toLowerCase().includes(t) ||
-      (h.proveedor || "").toLowerCase().includes(t) ||
-      usuarioNombre(data.usuarios, h.tecnicoId).toLowerCase().includes(t) ||
-      ubicacionTexto(data.sedes, h).toLowerCase().includes(t);
-  });
-
-  const hayFiltro = q.trim() || fSede !== "todas" || desde || hasta;
-
-  const ordenar = (arr) => [...arr].sort((a, b) => {
-    const fa = a.fechaCompletada || "", fb = b.fechaCompletada || "";
-    return orden === "reciente" ? fb.localeCompare(fa) : fa.localeCompare(fb);
-  });
-
-  const costoTotal = filtrado.reduce((a, h) =>
-    a + (h.tipo === "servicio" ? costoServicio(h) : costoConsumos(h)), 0);
-
-  const grupos = ["preventivo", "correctivo", "servicio"]
-    .map((t) => ({ tipo: t, items: ordenar(filtrado.filter((h) => h.tipo === t)) }))
-    .filter((g) => g.items.length > 0);
-
-  return (
-    <div className="mt-4">
-      <p className="text-xs mb-3" style={cSlate}>
-        Todo lo ejecutado y cerrado, agrupado por tipo. Busca por código (OT, SOL, SRV), tarea, activo, técnico o proveedor,
-        o acota por la fecha en que se creó la actividad.
-      </p>
-
-      <div className="flex gap-2 mb-3 flex-wrap">
-        <input value={q} onChange={(e) => setQ(e.target.value)}
-          placeholder="Buscar: OT-0001, SOL-0003, luminarias, Cristian…"
-          className="flex-1 min-w-48 border rounded-md px-3 py-2 text-sm outline-none" style={inputStyle} />
-        {sedes.length > 1 && (
-          <select value={fSede} onChange={(e) => setFSede(e.target.value)} className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
-            <option value="todas">Todas las sedes</option>
-            {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
-          </select>
-        )}
-        <select value={orden} onChange={(e) => setOrden(e.target.value)} className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
-          <option value="reciente">Más reciente primero</option>
-          <option value="antiguo">Más antiguo primero</option>
-        </select>
-        <button onClick={() => exportarCSV(ordenar(filtrado), data)} disabled={filtrado.length === 0}
-          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white disabled:opacity-40"
-          style={{ background: COLORS.charcoal }}>
-          <Download size={13} /> Descargar CSV
-        </button>
-      </div>
-
-      <div className="flex gap-2 mb-2 flex-wrap items-end">
-        <div>
-          <label className="text-[10px] font-semibold uppercase tracking-wide block mb-1" style={cSlate}>Creada desde</label>
-          <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)}
-            className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle} />
-        </div>
-        <div>
-          <label className="text-[10px] font-semibold uppercase tracking-wide block mb-1" style={cSlate}>Hasta</label>
-          <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)}
-            className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle} />
-        </div>
-        {(desde || hasta) && (
-          <button onClick={() => { setDesde(""); setHasta(""); }}
-            className="text-xs font-semibold px-3 py-2 rounded-md border" style={{ borderColor: COLORS.line, color: COLORS.slate }}>
-            Limpiar fechas
-          </button>
-        )}
-      </div>
-
-      <div className="grid grid-cols-2 gap-3 mb-3">
-        <Stat label="Tareas cerradas" value={filtrado.length} icon={<CheckCircle2 size={14} />} color={COLORS.verde}
-          sub={hayFiltro ? `de ${todo.length} en total` : "Histórico completo"} />
-        <Stat label="Costo acumulado" value={money(costoTotal)} icon={<DollarSign size={14} />} color={COLORS.orange} sub="Materiales, bodega y servicios" />
-      </div>
-
-      <div className="space-y-2">
-        {grupos.map((g, i) => (
-          <GrupoHistorico key={g.tipo} tipo={g.tipo} items={g.items} data={data} abiertoInicial={grupos.length === 1 || i === 0} />
-        ))}
-        {grupos.length === 0 && (
-          <Empty>
-            {q.trim() ? `Sin resultados para “${q}”.`
-              : (desde || hasta) ? "Sin tareas cerradas creadas en ese rango de fechas."
-              : "Todavía no hay tareas cerradas."}
-          </Empty>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function RegistroHistorico({ h, data }) {
-  const [open, setOpen] = useState(false);
-  const esServ = h.tipo === "servicio";
-  const costo = esServ ? costoServicio(h) : costoConsumos(h);
-  const respuesta = h.tipo === "correctivo" && h.fecha && h.fechaCompletada
-    ? duracionTexto(horasEntre(h.fecha, h.hora, h.fechaCompletada, h.horaCompletada) / 24) : null;
-
-  return (
-    <div className="border rounded-md" style={{ ...cardStyle, borderLeft: `3px solid ${tipoMeta(h.tipo).color}` }}>
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between p-3 text-left gap-2">
-        <div className="flex items-start gap-2.5 min-w-0">
-          {open ? <ChevronDown size={16} color={COLORS.slate} className="mt-0.5 shrink-0" /> : <ChevronRight size={16} color={COLORS.slate} className="mt-0.5 shrink-0" />}
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <TipoChip tipo={h.tipo} />
-              <span className="text-[10px] font-bold" style={cChar}>{h.codigo}</span>
-              {h.calificacion > 0 && <Estrellas valor={h.calificacion} size={11} readOnly />}
-            </div>
-            <p className="font-semibold text-sm mt-1 truncate" style={cChar}>{h.tarea}</p>
-            <p className="text-xs truncate" style={cSlate}>{ubicacionTexto(data.sedes, h)}</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <div className="flex flex-col items-end gap-1">
-            <span className="text-[11px] font-semibold" style={{ color: COLORS.verde }}>{h.fechaCompletada || "—"}</span>
-            {costo > 0 && <span className="text-xs font-bold" style={cOrange}>{money(costo)}</span>}
-          </div>
-          <BotonDetalle item={h} />
-        </div>
-      </button>
-
-      {open && (
-        <div className="px-3 pb-3 border-t pt-3 space-y-2.5" style={bLine}>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <div>
-              <p className="font-semibold" style={cSlate}>{esServ ? "Proveedor" : "Ejecutó"}</p>
-              <p style={cChar}>{esServ ? (h.proveedor || "—") : usuarioNombre(data.usuarios, h.tecnicoId)}</p>
-            </div>
-            <div>
-              <p className="font-semibold" style={cSlate}>Cierre</p>
-              <p style={cChar}>{h.fechaCompletada || "—"}{h.horaCompletada ? ` · ${h.horaCompletada}` : ""}</p>
-            </div>
-            {h.tipo === "correctivo" && (
-              <>
-                <div>
-                  <p className="font-semibold" style={cSlate}>Solicitó</p>
-                  <p style={cChar}>{usuarioNombre(data.usuarios, h.solicitanteId)} · {h.fecha}</p>
-                </div>
-                <div>
-                  <p className="font-semibold" style={cSlate}>Tiempo de respuesta</p>
-                  <p style={{ color: COLORS.verde, fontWeight: 600 }}>{respuesta || "—"}</p>
-                </div>
-              </>
-            )}
-          </div>
-
-          {h.observaciones && <Field label="Observaciones"><ReadOnly>{h.observaciones}</ReadOnly></Field>}
-          {h.resolucion && <Field label="Resolución"><ReadOnly>{h.resolucion}</ReadOnly></Field>}
-          {h.comentarioCalif && (
-            <Field label="Comentario del solicitante"><ReadOnly>“{h.comentarioCalif}”</ReadOnly></Field>
-          )}
-
-          {(h.consumos || []).length > 0 && (
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Consumo de bodega</p>
-              {h.consumos.map((c) => (
-                <div key={c.id} className="flex items-center justify-between text-xs">
-                  <span style={cChar}>{c.nombre} · {c.cantidad} {c.unidad}</span>
-                  <span className="font-semibold" style={cOrange}>{money(c.cantidad * c.costoUnitario)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {(h.materiales || []).length > 0 && (
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>
-                Materiales comprados · registro anterior {h.materialesEstado === "aprobado" ? "(aprobados)" : `(${MAT_ESTADO[h.materialesEstado]?.label || "sin aprobar"})`}
-              </p>
-              {h.materiales.map((m) => (
-                <div key={m.id} className="flex items-center justify-between text-xs">
-                  <span style={cChar}>{m.nombre} · {m.cantidad} {m.unidad}</span>
-                  <span className="font-semibold" style={cOrange}>{money(m.cantidad * m.costoUnitario)}</span>
-                </div>
-              ))}
-              {h.materialesLiquidados && (
-                <p className="text-[10px] mt-0.5" style={cSlate}>Solo consulta: su costo ya está incluido en el consumo de bodega.</p>
-              )}
-            </div>
-          )}
-
-          {h.foto && <img src={h.foto} alt="Evidencia" className="rounded-md max-h-40 border" style={bLine} />}
-        </div>
-      )}
-    </div>
-  );
-}
 
 /* ============================================================================
    RESUMEN DE GESTIÓN  ·  narrativa automática basada en los indicadores reales
@@ -9106,6 +8853,12 @@ function VistaReportes({ data, sedes, user }) {
           style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
           <Download size={13} /> Descargar PDF
         </button>
+        {/* Lo que antes exportaba el Histórico: las mismas órdenes en tabla para Excel */}
+        <button onClick={() => exportarCSV(marcadas, data)} disabled={marcadas.length === 0}
+          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md border disabled:opacity-40"
+          style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+          <FileText size={13} /> Excel (CSV)
+        </button>
         <span className="text-[11px]" style={cSlate}>
           {marcadas.length} de {filtradas.length} orden(es) en el reporte
         </span>
@@ -9773,7 +9526,6 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
     { id: "aprobaciones", label: `Aprobaciones (${bandeja})`, icon: <CheckCircle2 size={14} /> },
     { id: "presupuesto", label: "Presupuesto", icon: <Wallet size={14} /> },
     { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
-    { id: "historico", label: "Histórico", icon: <ClipboardList size={14} /> },
   ];
 
   const pendientesCliente = getPendientes(data);
@@ -9787,7 +9539,6 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
       {tab === "dashboard" && <Dashboard data={data} persist={persist} sedes={data.sedes} mes={mes} onMesChange={setMes} mostrarPresupuesto mostrarCosto mostrarSatisfaccion />}
       {tab === "presupuesto" && <VistaPresupuesto data={data} mes={mes} onMesChange={setMes} />}
       {tab === "reportes" && <VistaReportes data={data} sedes={data.sedes} user={user} />}
-      {tab === "historico" && <VistaHistorico data={data} sedes={data.sedes} rol="cliente" />}
 
       {tab === "programacion" && (
         <PanelProgramacion data={data} sedes={data.sedes} pendientes={pendientesCliente}
