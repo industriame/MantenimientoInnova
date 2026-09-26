@@ -668,8 +668,8 @@ function indicadoresMes(data, sedeIds, mes) {
    con un preventivo asignado) se decide una sola categoría:
    - Completadas / En Ejecución: según su orden con fecha en el mes elegido.
    - Sin Programar: con el mismo criterio de ciclo que getPendientes (sin
-     orden abierta y con el ciclo vencido o por vencer), para que el
-     Dashboard coincida con Programación y Actividades.
+     orden abierta y con la próxima fecha dentro del mes o ya vencida), para
+     que el Dashboard coincida con Programación y Actividades.
    Lo que no cae en ninguna (ya ejecutado y con el ciclo vigente, o
    programado para otro mes) está al día y no suma al total del mes. */
 function avancePlan(data, sedeIds, mes) {
@@ -682,7 +682,7 @@ function avancePlan(data, sedeIds, mes) {
       const delMes = todas.filter((o) => mesKey(o.fechaProgramada) === mes);
       if (delMes.some((o) => o.estado === "completada")) { completadas++; return; }
       if (delMes.some((o) => ESTADOS_ABIERTOS.includes(o.estado))) { enEjecucion++; return; }
-      if (preventivoPendiente(plan, todas)) sinProgramar++;
+      if (preventivoPendiente(plan, todas, mes)) sinProgramar++;
     });
   });
 
@@ -878,26 +878,23 @@ const ordenesDeAplicacion = (data, plan, ap) => (data.ordenes || []).filter(
 /* Criterio único de "preventivo pendiente de programar". Lo usan
    getPendientes (Programación, Actividades) y avancePlan (Dashboard,
    reportes), para que todas las vistas coincidan en qué falta programar.
+   Toca en el mes indicado (por defecto el actual) si su próxima fecha cae
+   dentro de ese mes o ya pasó; lo del mes siguiente no se adelanta.
    Devuelve la última orden completada si está pendiente, o false si no. */
-function preventivoPendiente(plan, rel) {
+function preventivoPendiente(plan, rel, mes = mesKey(fmtDate(new Date()))) {
   // Con una orden abierta (en cualquier fecha) ya está programado
   if (rel.some((o) => ESTADOS_ABIERTOS.includes(o.estado))) return false;
   const ultima = rel
     .filter((o) => o.estado === "completada")
     .sort((a, b) => (a.fechaCompletada < b.fechaCompletada ? 1 : -1))[0];
 
-  /* Si ya se ejecutó y su ciclo todavía no vence, no toca aún: aparecerá
-     como pendiente recién cuando se acerque la próxima fecha. Antes, al
-     completar un mensual volvía a la lista de "sin programar" el mismo
-     día, aunque le tocara el mes siguiente. */
+  /* Si ya se ejecutó y su próxima fecha cae después del mes, no toca aún:
+     aparecerá como pendiente cuando llegue el mes en que vence. */
   if (ultima?.fechaCompletada) {
     const ciclo = FRECUENCIA_DIAS[plan.frecuencia] || 90;
     const proxima = new Date(`${ultima.fechaCompletada}T00:00:00`);
     proxima.setDate(proxima.getDate() + ciclo);
-    // Se anticipa medio mes para poder programarla antes de que venza
-    const margen = new Date();
-    margen.setDate(margen.getDate() + 15);
-    if (proxima > margen) return false;
+    if (mesKey(fmtDate(proxima)) > mes) return false;
   }
   return { ultima };
 }
