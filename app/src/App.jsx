@@ -5586,7 +5586,8 @@ function TarjetaAgenda({ act, data, onEditar, ocultarCosto }) {
   const esServicio = act.tipo === "servicio";
   const esPrev = act.tipo === "preventivo";
   const ver = useDetalle();
-  const editable = !!onEditar;
+  // El técnico (vista sin costos) consulta los servicios externos, no los edita
+  const editable = !!onEditar && !(esServicio && ocultarCosto);
   return (
     <div onClick={() => ver(act)} title="Ver detalle completo"
       className="border rounded-md p-2.5 cursor-pointer hover:shadow-sm transition-shadow"
@@ -5670,9 +5671,12 @@ function Calendario({ data, sedes, tecnicoDefault, onEditar, ocultarCosto }) {
 
   const tecnicos = data.usuarios.filter((u) => u.rol === "tecnico");
 
+  /* Los servicios externos no tienen técnico asignado (los ejecuta un
+     proveedor), así que el filtro de técnico no los oculta: todos los
+     perfiles ven en su calendario los servicios programados de sus sedes. */
   const filtrada = agenda.filter((a) =>
     (fSede === "todas" || a.sedeId === fSede) &&
-    (fTecnico === "todos" || a.tecnicoId === fTecnico) &&
+    (fTecnico === "todos" || a.tipo === "servicio" || a.tecnicoId === fTecnico) &&
     (fTipo === "todos" || a.tipo === fTipo)
   );
 
