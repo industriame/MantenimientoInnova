@@ -5376,6 +5376,7 @@ function FormPlan({ data, initial, onSave, onClose, onAddCategoria }) {
         {nuevaCat === null ? (
           <select value={categoria} onChange={(e) => (e.target.value === "__NEW__" ? setNuevaCat("") : setCategoria(e.target.value))}
             className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
+            {categoria && !categorias.includes(categoria) && <option value={categoria}>{categoria}</option>}
             {categorias.map((c) => <option key={c} value={c}>{c}</option>)}
             <option value="__NEW__">+ Nueva categoría…</option>
           </select>
@@ -5384,7 +5385,16 @@ function FormPlan({ data, initial, onSave, onClose, onAddCategoria }) {
             <input autoFocus value={nuevaCat} onChange={(e) => setNuevaCat(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Escape") setNuevaCat(null); }}
               placeholder="Nombre de la categoría" className={inputCls} style={{ borderColor: COLORS.orange }} />
-            <button onClick={() => { const v = nuevaCat.trim().toUpperCase(); if (v) { onAddCategoria(v); setCategoria(v); } setNuevaCat(null); }}
+            <button onClick={() => {
+                const v = nuevaCat.trim().replace(/\s+/g, " ").toUpperCase();
+                if (v) {
+                  // Si ya existe (aunque sea con otras tildes) se reutiliza en vez de duplicarla
+                  const ya = categorias.find((c) => sinTildes(c) === sinTildes(v));
+                  if (!ya) onAddCategoria(v);
+                  setCategoria(ya || v);
+                }
+                setNuevaCat(null);
+              }}
               className="text-xs font-semibold px-2.5 py-2 rounded-md text-white shrink-0" style={{ background: COLORS.orange }}>OK</button>
             <button onClick={() => setNuevaCat(null)} className="shrink-0"><X size={16} color={COLORS.slate} /></button>
           </div>
@@ -7132,11 +7142,137 @@ function AdminReinicio({ data, persist }) {
   );
 }
 
+/* Catálogo de categorías de los planes preventivos. Renombrar actualiza
+   también los planes y las órdenes que la usan, para que reportes y
+   filtros sigan agrupando igual. Solo se puede eliminar una categoría que
+   ningún plan esté usando. */
+function AdminCategorias({ data, persist }) {
+  const categorias = data.categorias?.length ? data.categorias : CATEGORIAS_BASE;
+  const [nueva, setNueva] = useState("");
+  const [editando, setEditando] = useState(null);   // { original, valor }
+  const [q, setQ] = useState("");
+  const [msg, setMsg] = useState(null);             // { tipo: "ok" | "error", texto }
+
+  const norm = (t) => t.trim().replace(/\s+/g, " ").toUpperCase();
+  const existe = (nombre, salvo) => categorias.some((c) => c !== salvo && sinTildes(c) === sinTildes(nombre));
+  const usoPlanes = (c) => (data.planes || []).filter((p) => p.categoria === c).length;
+  const usoOrdenes = (c) => (data.ordenes || []).filter((o) => o.categoria === c).length;
+  const avisar = (tipo, texto) => { setMsg({ tipo, texto }); setTimeout(() => setMsg(null), 4000); };
+
+  const agregar = () => {
+    const v = norm(nueva);
+    if (!v) return;
+    if (existe(v)) return avisar("error", `Ya existe la categoría "${v}".`);
+    persist((d) => ({ ...d, categorias: [...(d.categorias?.length ? d.categorias : CATEGORIAS_BASE), v] }));
+    setNueva("");
+    avisar("ok", `Categoría "${v}" agregada.`);
+  };
+
+  const renombrar = () => {
+    const { original } = editando;
+    const v = norm(editando.valor);
+    if (!v || v === original) return setEditando(null);
+    if (existe(v, original)) return avisar("error", `Ya existe la categoría "${v}".`);
+    const cambiar = (x) => (x.categoria === original ? { ...x, categoria: v } : x);
+    persist((d) => ({
+      ...d,
+      categorias: (d.categorias?.length ? d.categorias : CATEGORIAS_BASE).map((c) => (c === original ? v : c)),
+      planes: (d.planes || []).map(cambiar),
+      ordenes: (d.ordenes || []).map(cambiar),
+    }));
+    setEditando(null);
+    avisar("ok", `"${original}" ahora se llama "${v}". Se actualizaron los planes y órdenes que la usaban.`);
+  };
+
+  const eliminar = (c) => {
+    persist((d) => ({ ...d, categorias: (d.categorias?.length ? d.categorias : CATEGORIAS_BASE).filter((x) => x !== c) }));
+    avisar("ok", `Categoría "${c}" eliminada.`);
+  };
+
+  const visibles = categorias.filter((c) => coincideArticulo(c, q));
+
+  return (
+    <div className="mt-3">
+      <p className="text-xs mb-3" style={cSlate}>
+        Categorías que se asignan a los planes preventivos. Al renombrar una, se actualiza en todos los planes y
+        órdenes que la usan. Solo se pueden eliminar las que ningún plan tiene asignadas.
+      </p>
+
+      <div className="flex gap-2 mb-2">
+        <input value={nueva} onChange={(e) => setNueva(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") agregar(); }}
+          placeholder="Nueva categoría (ej. CLIMATIZACIÓN)" className={`${inputCls} flex-1 min-w-0`} style={inputStyle} />
+        <button onClick={agregar} disabled={!nueva.trim()}
+          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white shrink-0 disabled:opacity-40"
+          style={{ background: COLORS.orange }}>
+          <Plus size={13} /> Agregar
+        </button>
+      </div>
+
+      <div className="flex items-center gap-1.5 border rounded-md px-2.5 bg-white mb-2" style={inputStyle}>
+        <Search size={14} color={COLORS.slate} className="shrink-0" />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar categoría…"
+          className="flex-1 min-w-0 py-2 text-sm outline-none bg-transparent" style={cChar} />
+        {q && <button onClick={() => setQ("")} className="shrink-0 p-0.5" title="Limpiar"><X size={14} color={COLORS.slate} /></button>}
+      </div>
+
+      {msg && (
+        <div className="text-xs rounded-md p-2.5 mb-2"
+          style={{ background: `${msg.tipo === "ok" ? COLORS.verde : COLORS.rojo}15`, color: msg.tipo === "ok" ? COLORS.verde : COLORS.rojo }}>
+          {msg.texto}
+        </div>
+      )}
+
+      <div className="border rounded-md divide-y text-left" style={{ ...cardStyle, borderColor: COLORS.line }}>
+        {visibles.map((c) => {
+          const nPlanes = usoPlanes(c);
+          const nOrdenes = usoOrdenes(c);
+          const enEdicion = editando?.original === c;
+          return (
+            <div key={c} className="flex items-center gap-2 px-3 py-1.5" style={{ borderColor: COLORS.line }}>
+              {enEdicion ? (
+                <>
+                  <input autoFocus value={editando.valor} onChange={(e) => setEditando({ ...editando, valor: e.target.value })}
+                    onKeyDown={(e) => { if (e.key === "Enter") renombrar(); if (e.key === "Escape") setEditando(null); }}
+                    className="flex-1 min-w-0 border rounded px-2 py-1.5 text-sm outline-none" style={{ borderColor: COLORS.orange }} />
+                  <button onClick={renombrar} className="text-xs font-semibold px-2.5 py-1.5 rounded-md text-white shrink-0" style={{ background: COLORS.orange }}>Guardar</button>
+                  <button onClick={() => setEditando(null)} className="shrink-0 p-1" title="Cancelar"><X size={15} color={COLORS.slate} /></button>
+                </>
+              ) : (
+                <>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold break-words" style={cChar}>{c}</p>
+                    <p className="text-[10px]" style={cSlate}>
+                      {nPlanes ? `${nPlanes} plan(es)` : "Sin planes"}{nOrdenes ? ` · ${nOrdenes} orden(es)` : ""}
+                    </p>
+                  </div>
+                  <button onClick={() => setEditando({ original: c, valor: c })} className="shrink-0 p-1.5" title="Renombrar">
+                    <Pencil size={14} color={COLORS.slate} />
+                  </button>
+                  {nPlanes ? (
+                    <span className="shrink-0 p-1.5 opacity-30" title={`En uso por ${nPlanes} plan(es): cámbiala en esos planes antes de eliminarla`}>
+                      <Trash2 size={13} color={COLORS.slate} />
+                    </span>
+                  ) : (
+                    <DeleteBtn onConfirm={() => eliminar(c)} />
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })}
+        {visibles.length === 0 && <p className="px-3 py-4 text-sm text-center" style={cSlate}>Ninguna categoría coincide con la búsqueda.</p>}
+      </div>
+      <p className="text-[10px] mt-2" style={cSlate}>{categorias.length} categoría(s).</p>
+    </div>
+  );
+}
+
 function AdminConfiguracion({ data, persist, setPlanModal }) {
   const [sub, setSub] = useState("usuarios");
   const subs = [
     { id: "usuarios", label: "Usuarios", icon: <Users size={14} /> },
     { id: "planes", label: "Planes de mantenimiento", icon: <ClipboardList size={14} /> },
+    { id: "categorias", label: "Categorías", icon: <Layers size={14} /> },
     { id: "reinicio", label: "Reiniciar datos", icon: <Trash2 size={14} /> },
   ];
 
@@ -7158,6 +7294,7 @@ function AdminConfiguracion({ data, persist, setPlanModal }) {
 
       {sub === "usuarios" && <AdminUsuarios data={data} persist={persist} />}
       {sub === "reinicio" && <AdminReinicio data={data} persist={persist} />}
+      {sub === "categorias" && <AdminCategorias data={data} persist={persist} />}
 
       {sub === "planes" && (
         <div className="mt-3">
