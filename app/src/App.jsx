@@ -682,7 +682,7 @@ function avancePlan(data, sedeIds, mes) {
       const delMes = todas.filter((o) => mesKey(o.fechaProgramada) === mes);
       if (delMes.some((o) => o.estado === "completada")) { completadas++; return; }
       if (delMes.some((o) => ESTADOS_ABIERTOS.includes(o.estado))) { enEjecucion++; return; }
-      if (preventivoPendiente(plan, todas, mes)) sinProgramar++;
+      if (preventivoPendiente(plan, todas, mes, ap)) sinProgramar++;
     });
   });
 
@@ -774,16 +774,30 @@ function serieConfiabilidad(data, sedeIds, mesFinal, meses = 6) {
    plan ante el cliente.
    ========================================================================= */
 
-/* Fecha de arranque de una aplicación: su fecha inicial, si no la del plan,
-   y como último recurso el inicio del servicio. */
-function inicioAplicacion(plan, ap, inicioServicio) {
-  return ap.fechaInicial || plan.createdAt || inicioServicio || fmtDate(new Date());
+/* Fecha de arranque de una aplicación, en este orden:
+   1. la fecha de inicio que se le asignó en el plan;
+   2. su primera ejecución real (primera orden completada);
+   3. la fecha de creación del plan, y como último recurso el inicio del
+      servicio.
+   La primera ejecución va antes que la creación: muchos planes se crearon
+   (o se les asignó fecha de creación al editarlos) después de haberse
+   ejecutado, y proyectar desde ahí corría el ciclo — un semestral hecho en
+   agosto aparecía programado en septiembre. */
+function inicioAplicacion(plan, ap, inicioServicio, ordenes = []) {
+  if (ap.fechaInicial) return ap.fechaInicial;
+  const primera = ordenes
+    .filter((o) => o.planId === plan.id && o.sedeId === ap.sedeId && o.estado === "completada"
+      && (o.faseId || "") === (ap.faseId || "") && (o.activoId || "") === (ap.activoId || ""))
+    .map((o) => o.fechaCompletada || o.fechaProgramada)
+    .filter(Boolean)
+    .sort()[0];
+  return primera || plan.createdAt || inicioServicio || fmtDate(new Date());
 }
 
 /* Meses (0-11) del año pedido en los que toca mantenimiento, según la
    frecuencia del plan, contando desde su fecha de arranque. */
-function mesesProyectados(plan, ap, anio, inicioServicio) {
-  const base = inicioAplicacion(plan, ap, inicioServicio);
+function mesesProyectados(plan, ap, anio, inicioServicio, ordenes = []) {
+  const base = inicioAplicacion(plan, ap, inicioServicio, ordenes);
   const paso = FRECUENCIA_MESES[plan.frecuencia] || 3;
   const d0 = new Date(`${base}T00:00:00`);
   if (isNaN(d0)) return [];
@@ -807,7 +821,7 @@ function cronogramaAnual(data, anio, sedeIds) {
   (data.planes || []).forEach((plan) => {
     (plan.aplicaciones || []).forEach((ap) => {
       if (sedeIds && !sedeIds.includes(ap.sedeId)) return;
-      const proyectados = mesesProyectados(plan, ap, anio, inicio);
+      const proyectados = mesesProyectados(plan, ap, anio, inicio, data.ordenes || []);
       if (!proyectados.length) return;
 
       /* Ejecutado: órdenes de ese plan y ubicación cerradas dentro del año,
@@ -825,11 +839,28 @@ function cronogramaAnual(data, anio, sedeIds) {
           .sort((a, b) => a.fecha.localeCompare(b.fecha)));
       });
 
+      // Última ejecución (de cualquier año) y la próxima según la frecuencia
+      const ultima = (data.ordenes || [])
+        .filter((o) => o.planId === plan.id && o.sedeId === ap.sedeId && o.estado === "completada"
+          && (o.faseId || "") === (ap.faseId || "") && (o.activoId || "") === (ap.activoId || ""))
+        .map((o) => o.fechaCompletada || o.fechaProgramada).filter(Boolean).sort().pop() || "";
+      const arranque = inicioAplicacion(plan, ap, inicio, data.ordenes || []);
+      let proxima = arranque;
+      if (ultima) {
+        const d = new Date(`${ultima}T00:00:00`);
+        d.setMonth(d.getMonth() + (FRECUENCIA_MESES[plan.frecuencia] || 3));
+        proxima = fmtDate(d);
+      }
+      const sede = (data.sedes || []).find((x) => x.id === ap.sedeId);
+      const fase = (sede?.fases || []).find((x) => x.id === ap.faseId);
+      const activo = (fase?.activos || []).find((x) => x.id === ap.activoId);
+
       filas.push({
         key: `${plan.id}|${ap.sedeId}|${ap.faseId || ""}|${ap.activoId || ""}`,
         planId: plan.id, tarea: plan.tarea, categoria: plan.categoria, frecuencia: plan.frecuencia,
         sedeId: ap.sedeId, ubicacion: ubicacionTexto(data.sedes, ap),
-        inicio: inicioAplicacion(plan, ap, inicio),
+        lugar: activo ? `${activo.nombre} · ${fase.nombre}` : fase ? `${fase.nombre} completa` : "Sede completa",
+        inicio: arranque, fechaInicial: ap.fechaInicial || "", ultima, proxima,
         proyectados, ejecutados,
       });
     });
@@ -886,12 +917,16 @@ const ordenesDeAplicacion = (data, plan, ap) => (data.ordenes || []).filter(
    Toca en el mes indicado (por defecto el actual) si su próxima fecha cae
    dentro de ese mes o ya pasó; lo del mes siguiente no se adelanta.
    Devuelve la última orden completada si está pendiente, o false si no. */
-function preventivoPendiente(plan, rel, mes = mesKey(fmtDate(new Date()))) {
+function preventivoPendiente(plan, rel, mes = mesKey(fmtDate(new Date())), ap = null) {
   // Con una orden abierta (en cualquier fecha) ya está programado
   if (rel.some((o) => ESTADOS_ABIERTOS.includes(o.estado))) return false;
   const ultima = rel
     .filter((o) => o.estado === "completada")
     .sort((a, b) => (a.fechaCompletada < b.fechaCompletada ? 1 : -1))[0];
+
+  /* Aún sin ejecutar y con fecha de inicio en un mes posterior: no toca
+     todavía. Aparece como pendiente cuando llega el mes de inicio. */
+  if (!ultima && ap?.fechaInicial && mesKey(ap.fechaInicial) > mes) return false;
 
   /* Si ya se ejecutó y su próxima fecha cae después del mes, no toca aún:
      aparecerá como pendiente cuando llegue el mes en que vence. */
@@ -911,7 +946,7 @@ function getPendientes(data) {
 
   (data.planes || []).forEach((plan) => {
     (plan.aplicaciones || []).forEach((ap) => {
-      const pend = preventivoPendiente(plan, ordenesDeAplicacion(data, plan, ap));
+      const pend = preventivoPendiente(plan, ordenesDeAplicacion(data, plan, ap), undefined, ap);
       if (!pend) return;
       const { ultima } = pend;
 
@@ -2056,7 +2091,7 @@ function DetalleActividad({ item, data, onClose }) {
           <Dato label="Último mantenimiento">{item.ultimoMantenimiento || "Sin registro previo"}</Dato>
         )}
         {sinActivar && esPrev && item.fechaInicial && (
-          <Dato label="Inspección inicial">{item.fechaInicial}</Dato>
+          <Dato label="Fecha de inicio">{item.fechaInicial}</Dato>
         )}
         {item.solicitanteId && (
           <Dato label="Solicitó">{`${usuarioNombre(data.usuarios, item.solicitanteId)} · ${item.fecha || ""} ${item.hora || ""}`}</Dato>
@@ -5279,7 +5314,6 @@ function FilaAplicacion({ row, index, sedes, onChange, onRemove, canRemove }) {
   const sede = sedes.find((s) => s.id === row.sedeId);
   const faseEsp = row.faseId !== TODO;
   const fase = faseEsp ? sede?.fases.find((f) => f.id === row.faseId) : null;
-  const activoEsp = row.activoId !== TODO;
 
   return (
     <div className="border rounded-md p-2.5" style={bLine}>
@@ -5289,37 +5323,34 @@ function FilaAplicacion({ row, index, sedes, onChange, onRemove, canRemove }) {
       </div>
       <div className="grid grid-cols-2 gap-2">
         <Field label="Sede">
-          <select value={row.sedeId} onChange={(e) => onChange(row.id, { sedeId: e.target.value, faseId: TODO, activoId: TODO, fechaInicial: "" })}
+          <select value={row.sedeId} onChange={(e) => onChange(row.id, { sedeId: e.target.value, faseId: TODO, activoId: TODO })}
             className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle}>
             {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
           </select>
         </Field>
         <Field label="Fase">
-          <select value={row.faseId} onChange={(e) => onChange(row.id, { faseId: e.target.value, activoId: TODO, fechaInicial: "" })}
+          <select value={row.faseId} onChange={(e) => onChange(row.id, { faseId: e.target.value, activoId: TODO })}
             className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle}>
             <option value={TODO}>Toda la sede</option>
             {(sede?.fases || []).map((f) => <option key={f.id} value={f.id}>{f.nombre}</option>)}
           </select>
         </Field>
       </div>
-      {faseEsp && (
-        <div className="grid grid-cols-2 gap-2 mt-2">
+      <div className="grid grid-cols-2 gap-2 mt-2">
+        {faseEsp ? (
           <Field label="Activo">
-            <select value={row.activoId}
-              onChange={(e) => onChange(row.id, { activoId: e.target.value, fechaInicial: e.target.value !== TODO ? (row.fechaInicial || fmtDate(new Date())) : "" })}
+            <select value={row.activoId} onChange={(e) => onChange(row.id, { activoId: e.target.value })}
               className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle}>
               <option value={TODO}>Toda la fase</option>
               {(fase?.activos || []).map((a) => <option key={a.id} value={a.id}>{a.nombre}</option>)}
             </select>
           </Field>
-          {activoEsp && (
-            <Field label="Fecha inicial">
-              <input type="date" value={row.fechaInicial} onChange={(e) => onChange(row.id, { fechaInicial: e.target.value })}
-                className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
-            </Field>
-          )}
-        </div>
-      )}
+        ) : <span />}
+        <Field label="Fecha de inicio (opcional)">
+          <input type="date" value={row.fechaInicial} onChange={(e) => onChange(row.id, { fechaInicial: e.target.value })}
+            className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
+        </Field>
+      </div>
     </div>
   );
 }
@@ -5345,15 +5376,17 @@ function FormPlan({ data, initial, onSave, onClose, onAddCategoria }) {
   const submit = () => {
     onSave({
       id: initial?.id || uid("plan"),
-      // Sirve de arranque del plan anual cuando una aplicación no trae fecha inicial
-      createdAt: initial?.createdAt || fmtDate(new Date()),
+      /* Último recurso del arranque en el plan anual. Solo se fecha al crear:
+         editar un plan viejo sin esta fecha le ponía la del día y corría su
+         proyección. */
+      createdAt: initial ? (initial.createdAt || "") : fmtDate(new Date()),
       tarea: tarea.trim(), procedimientoPasos: pasos.filter((p) => p.texto.trim()), categoria, frecuencia,
       duracionValor: Number(durVal) || 0, duracionUnidad: durUni, monitoreo,
       aplicaciones: rows.filter((r) => r.sedeId).map((r) => ({
         sedeId: r.sedeId,
         faseId: r.faseId === TODO ? "" : r.faseId,
         activoId: r.activoId === TODO ? "" : r.activoId,
-        fechaInicial: r.activoId !== TODO ? r.fechaInicial : "",
+        fechaInicial: r.fechaInicial || "",
       })),
     });
     onClose();
@@ -5428,7 +5461,9 @@ function FormPlan({ data, initial, onSave, onClose, onAddCategoria }) {
       <div className="border-t pt-3" style={bLine}>
         <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>¿Dónde aplica?</p>
         <p className="text-[10px] mb-2" style={cSlate}>
-          Una fila por ubicación; pueden ser de sedes distintas. La fecha inicial solo aplica al elegir un activo específico.
+          Una fila por ubicación; pueden ser de sedes distintas. La fecha de inicio es el día del primer mantenimiento
+          en esa ubicación: desde ahí se proyecta el plan anual según la frecuencia, y no aparece como pendiente antes
+          de ese mes. Si se deja vacía, se toma la primera ejecución real.
         </p>
         <div className="space-y-2">
           {rows.map((row, i) => (
@@ -5517,7 +5552,8 @@ function TarjetaPlan({ plan, sedes, onEdit, onDelete }) {
 function FormActivar({ item, data, onConfirm, onClose, soloTecnico }) {
   const tecnicos = soloTecnico ? [soloTecnico] : tecnicosDeSede(data.usuarios, item.sedeId);
   const [tecnicoId, setTecnicoId] = useState(tecnicos[0]?.id || "");
-  const [fecha, setFecha] = useState(item.fechaInicial || fmtDate(new Date()));
+  // La fecha de inicio del plan se propone solo si aún no pasó
+  const [fecha, setFecha] = useState(item.fechaInicial && item.fechaInicial >= fmtDate(new Date()) ? item.fechaInicial : fmtDate(new Date()));
   const esPrev = item.tipo === "preventivo";
   // El preventivo hereda la duración de su plan; el correctivo se estima aquí
   const [durValor, setDurValor] = useState(item.duracionValor ?? 60);
@@ -7328,16 +7364,37 @@ function AdminConfiguracion({ data, persist, setPlanModal }) {
 /* ============================================================================
    VISTA · PLAN ANUAL DE MANTENIMIENTO PREVENTIVO
    ========================================================================= */
+/* Cifras del plan anual para un conjunto de filas:
+   - tareas: cada plan en cada ubicación (plan × sede/fase/activo);
+   - ejecutadas: meses con ✓ en el año;
+   - cumplimiento: de lo que tocaba hasta hoy (año en curso) o en todo el
+     año (años pasados), cuánto ya se ejecutó. En años futuros no aplica. */
+function resumenPlanAnual(filas, anio) {
+  const hoy = new Date();
+  const hasta = anio < hoy.getFullYear() ? 11 : anio > hoy.getFullYear() ? -1 : hoy.getMonth();
+  const tocaban = filas.reduce((n, f) => n + f.proyectados.filter((m) => m <= hasta).length, 0);
+  const cumplidas = filas.reduce((n, f) => n + f.proyectados.filter((m) => m <= hasta && f.ejecutados.has(m)).length, 0);
+  const programadas = filas.reduce((n, f) => n + f.proyectados.length, 0);
+  const ejecutadas = filas.reduce((n, f) => n + f.ejecutados.size, 0);
+  return {
+    tareas: filas.length, programadas, ejecutadas, tocaban, cumplidas,
+    pct: tocaban ? Math.round((cumplidas / tocaban) * 100) : null,
+  };
+}
+
+const fmtDMY = (iso) => (iso ? iso.split("-").reverse().join("/") : "—");
+
 function VistaPlanAnual({ data, sedes }) {
   const hoyAnio = new Date().getFullYear();
   const [anio, setAnio] = useState(hoyAnio);
   const [fSede, setFSede] = useState("todas");
+  const [cerradas, setCerradas] = useState(() => new Set());
   const [generando, setGenerando] = useState(false);
   const [progreso, setProgreso] = useState("");
-  /* Mini visualizador con la fecha de ejecución: aparece al pasar el mouse
-     sobre el ✓ (web) o al tocarlo (celular). Va en posición fija para que el
-     contenedor con scroll de la tabla no lo recorte. */
-  const [pop, setPop] = useState(null);   // { key, mes, x, y, arriba, fila }
+  /* Mini visualizador: aparece al pasar el mouse (web) o al tocar (celular)
+     un mes ejecutado, un mes programado o el nombre de la tarea. Va en
+     posición fija para que el scroll de la tabla no lo recorte. */
+  const [pop, setPop] = useState(null);   // { tipo, key, mes, x, y, arriba, fila }
 
   useEffect(() => {
     if (!pop) return;
@@ -7353,38 +7410,51 @@ function VistaPlanAnual({ data, sedes }) {
     };
   }, [pop]);
 
-  const abrirPop = (e, f, i) => {
+  const abrirPop = (e, tipo, f, i = null) => {
     const r = e.currentTarget.getBoundingClientRect();
-    const arriba = r.top > 150;   // si no hay espacio arriba, se abre debajo
+    const arriba = r.top > 190;   // si no hay espacio arriba, se abre debajo
     setPop({
-      key: f.key, mes: i, fila: f, arriba,
-      x: Math.min(Math.max(r.left + r.width / 2, 110), window.innerWidth - 110),
+      tipo, key: f.key, mes: i, fila: f, arriba,
+      x: Math.min(Math.max(r.left + r.width / 2, 125), window.innerWidth - 125),
       y: arriba ? r.top - 6 : r.bottom + 6,
     });
   };
+  const esAbierto = (tipo, f, i = null) => pop && pop.tipo === tipo && pop.key === f.key && pop.mes === i;
+  /* Con mouse se abre al pasar por encima; el clic queda para el tacto y el
+     teclado, y alterna abrir/cerrar. */
+  const disparadores = (tipo, f, i = null) => ({
+    "data-pop-plan": true,
+    onPointerEnter: (e) => { if (e.pointerType === "mouse") abrirPop(e, tipo, f, i); },
+    onPointerLeave: (e) => { if (e.pointerType === "mouse") setPop(null); },
+    onClick: (e) => {
+      if (e.nativeEvent.pointerType === "mouse") return;
+      if (esAbierto(tipo, f, i)) setPop(null); else abrirPop(e, tipo, f, i);
+    },
+  });
 
   const sedeIds = sedes.map((s) => s.id);
   const filas = useMemo(
     () => cronogramaAnual(data, anio, fSede === "todas" ? sedeIds : [fSede]),
     [data, anio, fSede, sedeIds.join(",")]
   );
+  // Agrupado por sede, en el orden de las sedes
+  const grupos = sedes
+    .map((sede) => ({ sede, filas: filas.filter((f) => f.sedeId === sede.id) }))
+    .filter((g) => g.filas.length);
 
   // Cinco años proyectados desde el inicio del servicio (o desde este año)
   const inicioServicio = primerMesConDatos(data, null);
   const anioBase = inicioServicio ? Number(inicioServicio.slice(0, 4)) : hoyAnio;
   const anios = Array.from({ length: 5 }, (_, i) => anioBase + i);
 
-  const totalProy = filas.reduce((s, f) => s + f.proyectados.length, 0);
-  // Ejecutadas: todo mes con ✓ (lo que muestra la tabla). El cumplimiento
-  // mide solo lo programado que ya se ejecutó, para no pasar del 100 %.
-  const totalEjec = filas.reduce((s, f) => s + f.ejecutados.size, 0);
-  const totalCumpl = filas.reduce((s, f) => s + f.proyectados.filter((m) => f.ejecutados.has(m)).length, 0);
+  const tot = resumenPlanAnual(filas, anio);
+  const toggleSede = (id) => setCerradas((c) => { const n = new Set(c); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   const hacerPDF = async () => {
     setGenerando(true); setProgreso("Preparando…");
     try {
-      const nombreSede = fSede === "todas" ? "todas las sedes" : sedeNombre(data.sedes, fSede);
-      const blob = await generarPDF(construirPlanAnualHTML(filas, anio, nombreSede), { onProgreso: setProgreso });
+      const nombreSede = fSede === "todas" ? "Todas las sedes" : sedeNombre(data.sedes, fSede);
+      const blob = await generarPDF(construirPlanAnualHTML(grupos, anio, nombreSede), { onProgreso: setProgreso });
       const nombre = `plan-anual-preventivo-${anio}.pdf`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -7396,12 +7466,14 @@ function VistaPlanAnual({ data, sedes }) {
     } finally { setGenerando(false); setProgreso(""); }
   };
 
+  const bd = `1px solid ${COLORS.line}`;
+  const tareaW = "clamp(150px, 30vw, 240px)";
+
   return (
     <div className="mt-4 space-y-3">
       <p className="text-xs" style={cSlate}>
-        Proyección del plan preventivo a cinco años. Es una vista de planificación: no genera órdenes ni altera
-        la programación mensual. Los meses ya ejecutados se marcan en verde a medida que se cierran las órdenes;
-        pasa el mouse o toca el ✓ para ver la fecha de ejecución.
+        Proyección del plan preventivo, agrupada por sede. Cada tarea arranca en su fecha de inicio (o en su primera
+        ejecución) y se repite según su frecuencia. Pasa el mouse o toca un mes, o el nombre de la tarea, para ver el detalle.
       </p>
 
       <div className="flex items-center gap-2 flex-wrap">
@@ -7424,77 +7496,101 @@ function VistaPlanAnual({ data, sedes }) {
       </div>
 
       <div className="grid grid-cols-3 gap-3">
-        <Stat label="Tareas programadas" value={totalProy} icon={<CalendarDays size={14} />} color={COLORS.orange} sub={`en ${anio}`} />
-        <Stat label="Ya ejecutadas" value={totalEjec} icon={<CheckCircle2 size={14} />} color={COLORS.verde} sub="cerradas" />
-        <Stat label="Cumplimiento" value={totalProy ? `${Math.round((totalCumpl / totalProy) * 100)}%` : "—"}
-          icon={<BarChart3 size={14} />} color={colorCumpl(totalProy ? (totalCumpl / totalProy) * 100 : null)} sub="de lo programado" />
+        <Stat label="Tareas del plan" value={tot.tareas} icon={<ClipboardList size={14} />} color={COLORS.charcoal}
+          sub="cada plan en cada ubicación" />
+        <Stat label="Ejecutadas" value={tot.ejecutadas} icon={<CheckCircle2 size={14} />} color={COLORS.verde}
+          sub={`de ${tot.programadas} programadas en ${anio}`} />
+        <Stat label="Cumplimiento" value={tot.pct === null ? "—" : `${tot.pct}%`} icon={<BarChart3 size={14} />}
+          color={colorCumpl(tot.pct)}
+          sub={tot.pct === null ? "aún no toca nada" : `${tot.cumplidas} de ${tot.tocaban} que tocaban a la fecha`} />
       </div>
 
-      {filas.length ? (
-        <div className="border rounded-md" style={{ borderColor: COLORS.line, maxHeight: "60vh", overflow: "auto" }}>
-          <table style={{ borderCollapse: "separate", borderSpacing: 0, width: "max-content", minWidth: "100%" }}>
-            <thead>
-              <tr>
-                <th className="sticky left-0 top-0 z-30 bg-white text-left px-2 py-1.5"
-                  style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, width: 200, minWidth: 200, fontSize: 10, ...cChar }}>
-                  Tarea y ubicación
-                </th>
-                {MESES.map((m) => (
-                  <th key={m} className="sticky top-0 z-20 bg-white px-1 py-1.5"
-                    style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, minWidth: 34, fontSize: 9, color: COLORS.slate }}>
-                    {m.slice(0, 3)}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filas.map((f) => (
-                <tr key={f.key}>
-                  <td className="sticky left-0 z-10 bg-white px-2 py-1"
-                    style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, width: 200, minWidth: 200 }}>
-                    <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.charcoal }}>{f.tarea}</div>
-                    <div style={{ fontSize: 9, color: COLORS.slate }}>{f.ubicacion} · {f.frecuencia}</div>
-                  </td>
-                  {MESES.map((m, i) => {
-                    /* Solo dos estados por mes: Ejecutado (hay una orden
-                       cerrada ese mes) o Programado (tocaba y aún no). */
-                    const toca = f.proyectados.includes(i);
-                    const hecho = f.ejecutados.has(i);
-                    const abierto = pop && pop.key === f.key && pop.mes === i;
-                    return (
-                      <td key={m} className="text-center"
-                        style={{ borderBottom: `1px solid ${COLORS.line}`, borderRight: `1px solid ${COLORS.line}`, padding: 2 }}>
-                        {hecho ? (
-                          <button type="button" data-pop-plan aria-label={`Ejecutado en ${m}: ver fecha`}
-                            onPointerEnter={(e) => { if (e.pointerType === "mouse") abrirPop(e, f, i); }}
-                            onPointerLeave={(e) => { if (e.pointerType === "mouse") setPop(null); }}
-                            onClick={(e) => {
-                              // Con mouse ya se abrió al pasar por encima; el clic solo aplica al tacto y teclado
-                              if (e.nativeEvent.pointerType === "mouse") return;
-                              if (abierto) setPop(null); else abrirPop(e, f, i);
-                            }}
-                            style={{
-                              display: "inline-block", width: 18, height: 18, borderRadius: 3, fontSize: 10,
-                              lineHeight: "18px", color: "white", background: COLORS.verde, cursor: "pointer",
-                              boxShadow: abierto ? `0 0 0 2px ${COLORS.verde}55` : "none",
-                            }}>
-                            ✓
-                          </button>
-                        ) : toca && (
-                          <span title="Programado"
-                            style={{ display: "inline-block", width: 14, height: 14, borderRadius: 3, background: COLORS.orange }} />
-                        )}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {grupos.length > 1 && (
+        <div className="flex justify-end gap-3">
+          <button onClick={() => setCerradas(new Set())} className="text-[11px] font-semibold" style={cOrange}>Desplegar todo</button>
+          <button onClick={() => setCerradas(new Set(grupos.map((g) => g.sede.id)))} className="text-[11px] font-semibold" style={cSlate}>Plegar todo</button>
         </div>
-      ) : (
-        <Empty>No hay planes preventivos con aplicaciones para este año.</Empty>
       )}
+
+      {grupos.map(({ sede, filas: fs }) => {
+        const r = resumenPlanAnual(fs, anio);
+        const abierta = !cerradas.has(sede.id);
+        return (
+          <div key={sede.id} className="border rounded-md overflow-hidden text-left" style={{ ...cardStyle, borderLeft: `3px solid ${COLORS.orange}` }}>
+            <button onClick={() => toggleSede(sede.id)} className="w-full flex items-center gap-2 px-3 py-2.5 text-left" style={{ background: COLORS.paper }}>
+              {abierta ? <ChevronDown size={15} color={COLORS.charcoal} /> : <ChevronRight size={15} color={COLORS.charcoal} />}
+              <Building2 size={14} color={COLORS.orange} className="shrink-0" />
+              <span className="text-sm font-bold flex-1 min-w-0" style={cChar}>{sede.nombre}</span>
+              <span className="text-[10px] shrink-0 text-right" style={cSlate}>
+                {r.tareas} tarea(s) · {r.ejecutadas} ejecutada(s)
+              </span>
+              <Chip color={colorCumpl(r.pct)}>{r.pct === null ? "—" : `${r.pct}%`}</Chip>
+            </button>
+
+            {abierta && (
+              <div style={{ overflowX: "auto", borderTop: bd }}>
+                <table style={{ borderCollapse: "separate", borderSpacing: 0, width: "max-content", minWidth: "100%" }}>
+                  <thead>
+                    <tr>
+                      <th className="sticky left-0 z-20 bg-white text-left px-2 py-1.5"
+                        style={{ borderBottom: bd, borderRight: bd, width: tareaW, minWidth: tareaW, maxWidth: tareaW, fontSize: 10, ...cChar }}>
+                        Tarea y ubicación
+                      </th>
+                      {MESES.map((m) => (
+                        <th key={m} className="bg-white px-1 py-1.5"
+                          style={{ borderBottom: bd, borderRight: bd, minWidth: 34, fontSize: 9, color: COLORS.slate }}>
+                          {m.slice(0, 3)}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fs.map((f) => (
+                      <tr key={f.key}>
+                        <td className="sticky left-0 z-10 bg-white px-2 py-1 align-middle"
+                          style={{ borderBottom: bd, borderRight: bd, width: tareaW, minWidth: tareaW, maxWidth: tareaW }}>
+                          <button type="button" {...disparadores("tarea", f)} className="text-left w-full"
+                            aria-label={`Ver detalle de ${f.tarea}`}>
+                            <div style={{ fontSize: 10.5, fontWeight: 600, color: COLORS.charcoal, lineHeight: 1.25, wordBreak: "break-word",
+                              textDecoration: esAbierto("tarea", f) ? "underline" : "none" }}>{f.tarea}</div>
+                            <div style={{ fontSize: 9, color: COLORS.slate }}>{f.lugar} · {f.frecuencia}</div>
+                          </button>
+                        </td>
+                        {MESES.map((m, i) => {
+                          /* Solo dos estados por mes: Ejecutado (hay una orden
+                             cerrada ese mes) o Programado (tocaba y aún no). */
+                          const toca = f.proyectados.includes(i);
+                          const hecho = f.ejecutados.has(i);
+                          const tipo = hecho ? "ejec" : "prog";
+                          const abierto = esAbierto(tipo, f, i);
+                          return (
+                            <td key={m} className="text-center"
+                              style={{ borderBottom: bd, borderRight: bd, padding: 2 }}>
+                              {(hecho || toca) && (
+                                <button type="button" {...disparadores(tipo, f, i)}
+                                  aria-label={`${hecho ? "Ejecutado" : "Programado"} en ${m}: ver detalle`}
+                                  style={{
+                                    display: "inline-block", width: 18, height: 18, borderRadius: 3, fontSize: 10,
+                                    lineHeight: "18px", color: "white", cursor: "pointer",
+                                    background: hecho ? COLORS.verde : COLORS.orange,
+                                    boxShadow: abierto ? `0 0 0 2px ${hecho ? COLORS.verde : COLORS.orange}55` : "none",
+                                  }}>
+                                  {hecho ? "✓" : ""}
+                                </button>
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {!grupos.length && <Empty>No hay planes preventivos con aplicaciones para este año.</Empty>}
 
       <div className="flex items-center gap-3 flex-wrap">
         {[["Programado", COLORS.orange], ["Ejecutado", COLORS.verde]].map(([l, c]) => (
@@ -7502,28 +7598,41 @@ function VistaPlanAnual({ data, sedes }) {
             <span className="w-2.5 h-2.5 rounded-sm" style={{ background: c }} />{l}
           </span>
         ))}
-        <span className="text-[10px]" style={cSlate}>· Pasa el mouse o toca el ✓ para ver la fecha de ejecución.</span>
       </div>
 
       {pop && (() => {
-        const ejec = pop.fila.ejecutados.get(pop.mes) || [];
-        const fmt = (iso) => iso.split("-").reverse().join("/");
+        const f = pop.fila;
+        const ejec = pop.tipo === "ejec" ? f.ejecutados.get(pop.mes) || [] : [];
+        const titulo = pop.tipo === "ejec" ? `Ejecutado · ${MESES[pop.mes]}`
+          : pop.tipo === "prog" ? `Programado · ${MESES[pop.mes]} ${anio}` : "Tarea del plan";
+        const colorTit = pop.tipo === "prog" ? "#F6B593" : "#9FD8BC";
+        const dato = (k, v) => (
+          <p className="text-[11px] leading-snug"><span className="opacity-70">{k}: </span><b>{v}</b></p>
+        );
         return (
           <div data-pop-plan role="tooltip"
             className="fixed z-50 rounded-md shadow-lg px-3 py-2 pointer-events-none"
             style={{
               left: pop.x, top: pop.y, transform: `translate(-50%, ${pop.arriba ? "-100%" : "0"})`,
-              background: COLORS.charcoal, color: "white", minWidth: 150, maxWidth: 220,
+              background: COLORS.charcoal, color: "white", minWidth: 180, maxWidth: 240,
             }}>
-            <p className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: "#9FD8BC" }}>
-              Ejecutado · {MESES[pop.mes]}
-            </p>
+            <p className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: colorTit }}>{titulo}</p>
             {ejec.map((x, i) => (
               <p key={i} className="text-xs font-semibold mt-0.5">
-                {fmt(x.fecha)}{x.codigo ? <span className="font-normal opacity-70"> · {x.codigo}</span> : null}
+                {fmtDMY(x.fecha)}{x.codigo ? <span className="font-normal opacity-70"> · {x.codigo}</span> : null}
               </p>
             ))}
-            <p className="text-[10px] mt-1 opacity-70 leading-snug">{pop.fila.tarea} · {pop.fila.ubicacion}</p>
+            <p className="text-xs font-semibold mt-0.5 leading-snug">{f.tarea}</p>
+            <p className="text-[10px] opacity-70 leading-snug mb-1">{f.lugar} · {sedeNombre(data.sedes, f.sedeId)}</p>
+            {pop.tipo !== "ejec" && (
+              <>
+                {dato("Frecuencia", f.frecuencia)}
+                {pop.tipo === "tarea" && f.categoria && dato("Categoría", f.categoria)}
+                {dato(f.fechaInicial ? "Fecha de inicio" : "Arranque", fmtDMY(f.inicio))}
+                {dato("Última ejecución", fmtDMY(f.ultima))}
+                {pop.tipo === "tarea" && dato("Próxima", fmtDMY(f.proxima))}
+              </>
+            )}
           </div>
         );
       })()}
@@ -7531,35 +7640,32 @@ function VistaPlanAnual({ data, sedes }) {
   );
 }
 
-/* PDF del cronograma del año consultado. */
-function construirPlanAnualHTML(filas, anio, nombreSede) {
+/* PDF del cronograma del año consultado: una sección por sede. */
+function construirPlanAnualHTML(grupos, anio, nombreSede) {
   const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
-  const totalProy = filas.reduce((s, f) => s + f.proyectados.length, 0);
-  // Ejecutadas: todo mes con ✓ (lo que muestra la tabla). El cumplimiento
-  // mide solo lo programado que ya se ejecutó, para no pasar del 100 %.
-  const totalEjec = filas.reduce((s, f) => s + f.ejecutados.size, 0);
-  const totalCumpl = filas.reduce((s, f) => s + f.proyectados.filter((m) => f.ejecutados.has(m)).length, 0);
-  const pct = totalProy ? Math.round((totalCumpl / totalProy) * 100) : 0;
+  const todas = grupos.flatMap((g) => g.filas);
+  const tot = resumenPlanAnual(todas, anio);
+  const pct = (r) => (r.pct === null ? "—" : `${r.pct}%`);
 
-  const cuerpo = filas.map((f) => {
-    const celdas = MESES.map((m, i) => {
-      const toca = f.proyectados.includes(i);
-      const hecho = f.ejecutados.has(i);
-      if (hecho) return `<td class="c ok">✓</td>`;
-      if (toca) return `<td class="c prog">●</td>`;
-      return `<td class="c"></td>`;
+  const cabMeses = MESES.map((m) => `<th>${m.slice(0, 3)}</th>`).join("");
+  const secciones = grupos.map(({ sede, filas }) => {
+    const r = resumenPlanAnual(filas, anio);
+    const cuerpo = filas.map((f) => {
+      const celdas = MESES.map((m, i) => {
+        if (f.ejecutados.has(i)) return `<td class="c ok">✓</td>`;
+        if (f.proyectados.includes(i)) return `<td class="c prog">●</td>`;
+        return `<td class="c"></td>`;
+      }).join("");
+      return `<tr><td><b>${esc(f.tarea)}</b><br><span class="mut">${esc(f.lugar)} · ${esc(f.frecuencia)}</span></td>${celdas}</tr>`;
     }).join("");
-    return `<tr>
-      <td><b>${esc(f.tarea)}</b><br><span class="mut">${esc(f.ubicacion)} · ${esc(f.frecuencia)}</span></td>
-      ${celdas}
-    </tr>`;
+    return `<div class="sede"><h2>${esc(sede.nombre)}</h2><span>${r.tareas} tarea(s) · ${r.ejecutadas} ejecutada(s) de ${r.programadas} · cumplimiento ${pct(r)}</span></div>
+      <table><thead><tr><th>Tarea y ubicación</th>${cabMeses}</tr></thead><tbody>${cuerpo}</tbody></table>`;
   }).join("");
 
   return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
 <title>Plan anual preventivo ${anio}</title>
 <style>
-@page { size: A4 landscape; margin: 10mm; }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:8pt;line-height:1.35}
 .hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #35383C;padding-bottom:7px;margin-bottom:9px}
@@ -7568,10 +7674,14 @@ body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:8pt;l
 .marca{text-align:right;font-size:7.5pt;color:#787D85}
 .marca b{display:block;font-size:11pt;color:#ED5B23;letter-spacing:.06em}
 .marca img{max-height:34px;margin-bottom:3px}
-.res{display:flex;gap:10px;margin-bottom:9px}
+.res{display:flex;gap:10px;margin-bottom:10px}
 .res div{border:1px solid #D8D4CB;border-radius:2px;padding:6px 10px;flex:1}
 .res span{display:block;font-size:6.8pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B}
 .res b{font-size:14pt}
+.res i{display:block;font-style:normal;font-size:6.8pt;color:#8D939B}
+.sede{display:flex;justify-content:space-between;align-items:baseline;border-left:3px solid #ED5B23;padding:3px 8px;margin:10px 0 5px;background:#FAF8F4}
+.sede h2{font-size:10.5pt}
+.sede span{font-size:7pt;color:#787D85}
 table{width:100%;border-collapse:collapse;font-size:7.5pt}
 th,td{padding:3px 4px;border:1px solid #E3E0D8}
 thead th{background:#35383C;color:#fff;font-size:6.8pt;text-transform:uppercase;text-align:center}
@@ -7590,17 +7700,14 @@ thead th:first-child{text-align:left;width:190px}
 </div>
 
 <div class="res">
-  <div><span>Tareas programadas</span><b>${totalProy}</b></div>
-  <div><span>Ejecutadas</span><b style="color:#2E7D5B">${totalEjec}</b></div>
-  <div><span>Cumplimiento del año</span><b style="color:#ED5B23">${pct}%</b></div>
+  <div><span>Tareas del plan</span><b>${tot.tareas}</b><i>cada plan en cada ubicación</i></div>
+  <div><span>Ejecutadas</span><b style="color:#2E7D5B">${tot.ejecutadas}</b><i>de ${tot.programadas} programadas en ${anio}</i></div>
+  <div><span>Cumplimiento</span><b style="color:#ED5B23">${pct(tot)}</b><i>${tot.cumplidas} de ${tot.tocaban} que tocaban a la fecha</i></div>
 </div>
 
-<table>
-  <thead><tr><th>Tarea y ubicación</th>${MESES.map((m) => `<th>${m.slice(0, 3)}</th>`).join("")}</tr></thead>
-  <tbody>${cuerpo || `<tr><td colspan="13" class="c">Sin planes preventivos para este año.</td></tr>`}</tbody>
-</table>
+${secciones || `<p>Sin planes preventivos para este año.</p>`}
 
-<p class="ley">● programado · ✓ ejecutado. Proyección calculada desde la fecha inicial de cada plan según su frecuencia; es una referencia de planificación y no reemplaza la programación mensual.</p>
+<p class="ley">● programado · ✓ ejecutado. Cada tarea arranca en su fecha de inicio (o en su primera ejecución) y se repite según su frecuencia; es una referencia de planificación y no reemplaza la programación mensual.</p>
 <div class="pie"><span>IndustriaMe S.A.S. · Plan anual preventivo ${anio}</span><span>Generado el ${esc(emitido)}</span></div>
 </body></html>`;
 }
