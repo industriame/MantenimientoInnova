@@ -7632,8 +7632,6 @@ function VistaBodega({ data, persist, sedes, editable }) {
 
   const items = (data.stock || []).filter((x) => x.sedeId === sedeId);
   const valorTotal = items.reduce((a, x) => a + x.cantidad * x.costoUnitario, 0);
-  const bajos = items.filter((x) => x.cantidad <= x.minimo);
-  const agotados = items.filter((x) => x.cantidad <= 0);
 
   const estadoDe = (x) => (x.cantidad <= 0 ? "agotado" : x.cantidad <= x.minimo ? "bajo" : "ok");
   // "Bajo mínimo" incluye los agotados, igual que la tarjeta de arriba
@@ -7699,16 +7697,13 @@ function VistaBodega({ data, persist, sedes, editable }) {
         )}
       </div>
 
-      <div className={`grid ${editable ? "grid-cols-2 lg:grid-cols-3" : "grid-cols-2"} gap-3 mb-3`}>
-        <Stat label="Artículos" value={items.length} icon={<ClipboardList size={14} />} color={COLORS.charcoal}
-          sub={agotados.length ? `${agotados.length} agotado(s)` : "Todos con existencias"} />
-        <Stat label="Bajo mínimo" value={bajos.length} icon={<AlertTriangle size={14} />}
-          color={bajos.length ? COLORS.rojo : COLORS.verde}
-          sub={bajos.length ? bajos.map((b) => b.nombre).slice(0, 2).join(", ") : "Todo abastecido"} />
-        {editable && (
-          <Stat label="Valor en bodega" value={money(valorTotal)} icon={<Wallet size={14} />} color={COLORS.orange} sub="Existencias × costo" />
-        )}
-      </div>
+      {/* Solo el total en dinero, y solo para quien ve costos (el técnico no) */}
+      {editable && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
+          <Stat label="Total en bodega" value={money(valorTotal)} icon={<Wallet size={14} />} color={COLORS.orange}
+            sub={`${items.length} artículo(s) · existencias × costo`} />
+        </div>
+      )}
 
       {/* Buscador y filtro por estado */}
       <div className="flex gap-2 mb-2 flex-wrap">
