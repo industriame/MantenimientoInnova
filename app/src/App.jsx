@@ -2975,23 +2975,17 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
 
   /* El PDF del mes puede tardar unos segundos, así que el avance se muestra
      en el botón en lugar de dejar la pantalla sin respuesta. */
-  const pdfMensual = async (accion) => {
+  const pdfMensual = async () => {
     setGenPDF(true); setAvisoReporte(""); setProgMes("Preparando…");
     try {
       const blob = await generarPDF(construirReporteMensualHTML(data, mes), { onProgreso: setProgMes });
       const nombre = `reporte-gestion-${mes}.pdf`;
-      if (accion === "compartir") {
-        const via = await compartirPDF(blob, nombre);
-        setAvisoReporte(via === "compartido" ? "Reporte compartido."
-          : via === "cancelado" ? "" : "Tu dispositivo no permite compartir archivos, así que se descargó el PDF.");
-      } else {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url; a.download = nombre;
-        document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        setAvisoReporte(`Descargado ${nombre}`);
-      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = nombre;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setAvisoReporte(`Descargado ${nombre}`);
     } catch (e) {
       console.error("[pdf]", e);
       setAvisoReporte("No se pudo generar el PDF del mes.");
@@ -3071,15 +3065,10 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
         </div>
         {mostrarCosto && (
           <div className="flex items-center gap-1.5 flex-wrap">
-            <button onClick={() => pdfMensual("compartir")} disabled={genPDF}
+            <button onClick={pdfMensual} disabled={genPDF}
               className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white disabled:opacity-40"
               style={{ background: COLORS.orange }}>
-              <Send size={13} /> {genPDF ? (progMes || "Generando…") : "Compartir reporte mensual"}
-            </button>
-            <button onClick={() => pdfMensual("descargar")} disabled={genPDF}
-              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md border disabled:opacity-40"
-              style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
-              <Download size={13} /> Descargar PDF
+              <Download size={13} /> {genPDF ? (progMes || "Generando…") : "Descargar reporte mensual"}
             </button>
           </div>
         )}
