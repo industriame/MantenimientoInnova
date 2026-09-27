@@ -7353,21 +7353,17 @@ function AdminConfiguracion({ data, persist, setPlanModal }) {
 /* ============================================================================
    VISTA · PLAN ANUAL DE MANTENIMIENTO PREVENTIVO
    ========================================================================= */
-/* Cifras del plan anual para un conjunto de filas:
-   - tareas: cada plan en cada ubicación (plan × sede/fase/activo);
-   - ejecutadas: meses con ✓ en el año;
-   - cumplimiento: de lo que tocaba hasta hoy (año en curso) o en todo el
-     año (años pasados), cuánto ya se ejecutó. En años futuros no aplica. */
-function resumenPlanAnual(filas, anio) {
-  const hoy = new Date();
-  const hasta = anio < hoy.getFullYear() ? 11 : anio > hoy.getFullYear() ? -1 : hoy.getMonth();
-  const tocaban = filas.reduce((n, f) => n + f.proyectados.filter((m) => m <= hasta).length, 0);
-  const cumplidas = filas.reduce((n, f) => n + f.proyectados.filter((m) => m <= hasta && f.ejecutados.has(m)).length, 0);
-  const programadas = filas.reduce((n, f) => n + f.proyectados.length, 0);
+/* Cifras del plan anual para un conjunto de filas, contadas sobre el año:
+   - tareas: cada mes marcado en la tabla (programado o ejecutado), es decir,
+     todas las tareas del año;
+   - ejecutadas: los meses con ✓;
+   - cumplimiento: ejecutadas sobre el total de tareas del año. */
+function resumenPlanAnual(filas) {
+  const tareas = filas.reduce((n, f) => n + new Set([...f.proyectados, ...f.ejecutados.keys()]).size, 0);
   const ejecutadas = filas.reduce((n, f) => n + f.ejecutados.size, 0);
   return {
-    tareas: filas.length, programadas, ejecutadas, tocaban, cumplidas,
-    pct: tocaban ? Math.round((cumplidas / tocaban) * 100) : null,
+    tareas, ejecutadas, pendientes: tareas - ejecutadas,
+    pct: tareas ? Math.round((ejecutadas / tareas) * 100) : null,
   };
 }
 
@@ -7436,7 +7432,7 @@ function VistaPlanAnual({ data, sedes }) {
   const anioBase = inicioServicio ? Number(inicioServicio.slice(0, 4)) : hoyAnio;
   const anios = Array.from({ length: 5 }, (_, i) => anioBase + i);
 
-  const tot = resumenPlanAnual(filas, anio);
+  const tot = resumenPlanAnual(filas);
   const toggleSede = (id) => setCerradas((c) => { const n = new Set(c); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   const hacerPDF = async () => {
@@ -7485,13 +7481,13 @@ function VistaPlanAnual({ data, sedes }) {
       </div>
 
       <div className="grid grid-cols-3 gap-3">
-        <Stat label="Tareas del plan" value={tot.tareas} icon={<ClipboardList size={14} />} color={COLORS.charcoal}
-          sub="cada plan en cada ubicación" />
+        <Stat label="Tareas del año" value={tot.tareas} icon={<ClipboardList size={14} />} color={COLORS.charcoal}
+          sub={`total del plan en ${anio}`} />
         <Stat label="Ejecutadas" value={tot.ejecutadas} icon={<CheckCircle2 size={14} />} color={COLORS.verde}
-          sub={`de ${tot.programadas} programadas en ${anio}`} />
+          sub={`${tot.pendientes} por ejecutar`} />
         <Stat label="Cumplimiento" value={tot.pct === null ? "—" : `${tot.pct}%`} icon={<BarChart3 size={14} />}
           color={colorCumpl(tot.pct)}
-          sub={tot.pct === null ? "aún no toca nada" : `${tot.cumplidas} de ${tot.tocaban} que tocaban a la fecha`} />
+          sub={tot.pct === null ? "sin tareas este año" : `${tot.ejecutadas} de ${tot.tareas} tareas del año`} />
       </div>
 
       {grupos.length > 1 && (
@@ -7502,7 +7498,7 @@ function VistaPlanAnual({ data, sedes }) {
       )}
 
       {grupos.map(({ sede, filas: fs }) => {
-        const r = resumenPlanAnual(fs, anio);
+        const r = resumenPlanAnual(fs);
         const abierta = !cerradas.has(sede.id);
         return (
           <div key={sede.id} className="border rounded-md overflow-hidden text-left" style={{ ...cardStyle, borderLeft: `3px solid ${COLORS.orange}` }}>
@@ -7511,7 +7507,7 @@ function VistaPlanAnual({ data, sedes }) {
               <Building2 size={14} color={COLORS.orange} className="shrink-0" />
               <span className="text-sm font-bold flex-1 min-w-0" style={cChar}>{sede.nombre}</span>
               <span className="text-[10px] shrink-0 text-right" style={cSlate}>
-                {r.tareas} tarea(s) · {r.ejecutadas} ejecutada(s)
+                {r.tareas} tarea(s) del año · {r.ejecutadas} ejecutada(s)
               </span>
               <Chip color={colorCumpl(r.pct)}>{r.pct === null ? "—" : `${r.pct}%`}</Chip>
             </button>
@@ -7634,12 +7630,12 @@ function construirPlanAnualHTML(grupos, anio, nombreSede) {
   const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
   const todas = grupos.flatMap((g) => g.filas);
-  const tot = resumenPlanAnual(todas, anio);
+  const tot = resumenPlanAnual(todas);
   const pct = (r) => (r.pct === null ? "—" : `${r.pct}%`);
 
   const cabMeses = MESES.map((m) => `<th>${m.slice(0, 3)}</th>`).join("");
   const secciones = grupos.map(({ sede, filas }) => {
-    const r = resumenPlanAnual(filas, anio);
+    const r = resumenPlanAnual(filas);
     const cuerpo = filas.map((f) => {
       const celdas = MESES.map((m, i) => {
         if (f.ejecutados.has(i)) return `<td class="c ok">✓</td>`;
@@ -7648,7 +7644,7 @@ function construirPlanAnualHTML(grupos, anio, nombreSede) {
       }).join("");
       return `<tr><td><b>${esc(f.tarea)}</b><br><span class="mut">${esc(f.lugar)} · ${esc(f.frecuencia)}</span></td>${celdas}</tr>`;
     }).join("");
-    return `<div class="sede"><h2>${esc(sede.nombre)}</h2><span>${r.tareas} tarea(s) · ${r.ejecutadas} ejecutada(s) de ${r.programadas} · cumplimiento ${pct(r)}</span></div>
+    return `<div class="sede"><h2>${esc(sede.nombre)}</h2><span>${r.tareas} tarea(s) del año · ${r.ejecutadas} ejecutada(s) · cumplimiento ${pct(r)}</span></div>
       <table><thead><tr><th>Tarea y ubicación</th>${cabMeses}</tr></thead><tbody>${cuerpo}</tbody></table>`;
   }).join("");
 
@@ -7689,9 +7685,9 @@ thead th:first-child{text-align:left;width:190px}
 </div>
 
 <div class="res">
-  <div><span>Tareas del plan</span><b>${tot.tareas}</b><i>cada plan en cada ubicación</i></div>
-  <div><span>Ejecutadas</span><b style="color:#2E7D5B">${tot.ejecutadas}</b><i>de ${tot.programadas} programadas en ${anio}</i></div>
-  <div><span>Cumplimiento</span><b style="color:#ED5B23">${pct(tot)}</b><i>${tot.cumplidas} de ${tot.tocaban} que tocaban a la fecha</i></div>
+  <div><span>Tareas del año</span><b>${tot.tareas}</b><i>total del plan en ${anio}</i></div>
+  <div><span>Ejecutadas</span><b style="color:#2E7D5B">${tot.ejecutadas}</b><i>${tot.pendientes} por ejecutar</i></div>
+  <div><span>Cumplimiento</span><b style="color:#ED5B23">${pct(tot)}</b><i>${tot.ejecutadas} de ${tot.tareas} tareas del año</i></div>
 </div>
 
 ${secciones || `<p>Sin planes preventivos para este año.</p>`}
