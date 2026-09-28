@@ -5642,6 +5642,11 @@ function TarjetaAgenda({ act, data, onEditar, ocultarCosto }) {
           <Info size={13} color={COLORS.slate} />
         </span>
       </div>
+      {CRITICIDAD[act.criticidad] && (
+        <div className="mt-1.5">
+          <Chip color={CRITICIDAD[act.criticidad].color}>Criticidad: {CRITICIDAD[act.criticidad].label}</Chip>
+        </div>
+      )}
       <p className="text-xs font-semibold mt-1" style={cChar}>{act.tarea}</p>
       <p className="text-[10px] mt-0.5" style={cSlate}>{ubicacionTexto(data.sedes, act)}</p>
       {minutosDe(act) > 0 && (
@@ -5683,7 +5688,7 @@ function cargaTexto(min) {
 
 /* Calendario mensual de la agenda. Se puede acotar a un grupo de sedes
    (técnico) y preseleccionar un responsable para que vea primero lo suyo. */
-function Calendario({ data, sedes, tecnicoDefault, onEditar, ocultarCosto }) {
+function Calendario({ data, sedes, tecnicoDefault, onEditar, ocultarCosto, fCrit = "todas", onFCrit }) {
   const sedesVista = sedes || data.sedes;
   const sedeIds = sedesVista.map((s) => s.id);
 
@@ -5712,7 +5717,8 @@ function Calendario({ data, sedes, tecnicoDefault, onEditar, ocultarCosto }) {
   const filtrada = agenda.filter((a) =>
     (fSede === "todas" || a.sedeId === fSede) &&
     (fTecnico === "todos" || a.tipo === "servicio" || a.tecnicoId === fTecnico) &&
-    (fTipo === "todos" || a.tipo === fTipo)
+    (fTipo === "todos" || a.tipo === fTipo) &&
+    pasaCriticidad(fCrit)(a)
   );
 
   const porFecha = useMemo(() => {
@@ -5803,6 +5809,7 @@ function Calendario({ data, sedes, tecnicoDefault, onEditar, ocultarCosto }) {
           {tecnicoDefault && <option value={tecnicoDefault}>Solo mis actividades</option>}
           {tecnicos.filter((t) => t.id !== tecnicoDefault).map((t) => <option key={t.id} value={t.id}>{t.nombre}</option>)}
         </select>
+        {onFCrit && <FiltroCriticidad value={fCrit} onChange={onFCrit} />}
       </div>
 
       <div>
@@ -5891,18 +5898,35 @@ function Calendario({ data, sedes, tecnicoDefault, onEditar, ocultarCosto }) {
   );
 }
 
+/* La criticidad solo existe en los correctivos: al elegir una, quedan solo
+   los correctivos con esa criticidad, tanto en la lista como en el calendario. */
+const pasaCriticidad = (fCrit) => (a) => fCrit === "todas" || a.criticidad === fCrit;
+
+function FiltroCriticidad({ value, onChange }) {
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}
+      className="border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} title="Filtrar por criticidad">
+      <option value="todas">Toda criticidad</option>
+      {CRITICIDAD_IDS.map((c) => <option key={c} value={c}>{CRITICIDAD[c].label}</option>)}
+    </select>
+  );
+}
+
 function PanelProgramacion({ data, sedes, pendientes, onActivar, tecnicoDefault, nota, onEditar, ocultarCosto }) {
+  const [fCrit, setFCrit] = useState("todas");
+  const pendientesVista = pendientes.filter(pasaCriticidad(fCrit));
   return (
     <div className="mt-4 flex flex-col lg:flex-row gap-4">
       <div className="w-full lg:w-1/3 xl:w-1/4">
-        <SectionTitle count={pendientes.length}>Actividades por sede</SectionTitle>
+        <SectionTitle count={pendientesVista.length}>Actividades por sede</SectionTitle>
         <p className="text-[10px] mb-2" style={cSlate}>{nota}</p>
         <ArbolPendientes sedes={sedes} todosLosSedes={data.sedes} usuarios={data.usuarios}
-          pendientes={pendientes} onActivar={onActivar} ocultarCosto={ocultarCosto} />
+          pendientes={pendientesVista} onActivar={onActivar} ocultarCosto={ocultarCosto} />
       </div>
       <div className="w-full lg:w-2/3 xl:w-3/4">
         <SectionTitle>Calendario de programación</SectionTitle>
-        <Calendario data={data} sedes={sedes} tecnicoDefault={tecnicoDefault} onEditar={onEditar} ocultarCosto={ocultarCosto} />
+        <Calendario data={data} sedes={sedes} tecnicoDefault={tecnicoDefault} onEditar={onEditar} ocultarCosto={ocultarCosto}
+          fCrit={fCrit} onFCrit={setFCrit} />
       </div>
     </div>
   );
@@ -7385,15 +7409,26 @@ function VistaPlanAnual({ data, sedes }) {
     if (!pop) return;
     const cerrar = () => setPop(null);
     const fuera = (e) => { if (!e.target.closest?.("[data-pop-plan]")) setPop(null); };
+    /* En el celular la barra de direcciones aparece y desaparece al tocar y
+       eso dispara "resize" aunque la pantalla no cambie de ancho: solo se
+       cierra si de verdad cambió el ancho (giro del teléfono, ventana). */
+    const ancho = window.innerWidth;
+    const alRedimensionar = () => { if (window.innerWidth !== ancho) setPop(null); };
     window.addEventListener("scroll", cerrar, true);
-    window.addEventListener("resize", cerrar);
+    window.addEventListener("resize", alRedimensionar);
     document.addEventListener("pointerdown", fuera);
     return () => {
       window.removeEventListener("scroll", cerrar, true);
-      window.removeEventListener("resize", cerrar);
+      window.removeEventListener("resize", alRedimensionar);
       document.removeEventListener("pointerdown", fuera);
     };
   }, [pop]);
+
+  /* Tipo del último puntero que tocó una celda. Se toma del pointerdown, que
+     todos los navegadores reportan bien; el "click" no sirve para esto
+     porque Safari en iPhone puede entregarlo marcado como "mouse" aunque
+     venga de un toque, y entonces el toque no abría nada. */
+  const ultimoPuntero = useRef("");
 
   const abrirPop = (e, tipo, f, i = null) => {
     const r = e.currentTarget.getBoundingClientRect();
@@ -7409,10 +7444,13 @@ function VistaPlanAnual({ data, sedes }) {
      teclado, y alterna abrir/cerrar. */
   const disparadores = (tipo, f, i = null) => ({
     "data-pop-plan": true,
+    onPointerDown: (e) => { ultimoPuntero.current = e.pointerType; },
     onPointerEnter: (e) => { if (e.pointerType === "mouse") abrirPop(e, tipo, f, i); },
     onPointerLeave: (e) => { if (e.pointerType === "mouse") setPop(null); },
     onClick: (e) => {
-      if (e.nativeEvent.pointerType === "mouse") return;
+      // Con mouse ya se abrió al pasar por encima; con toque o teclado, alterna
+      if (ultimoPuntero.current === "mouse") return;
+      ultimoPuntero.current = "";
       if (esAbierto(tipo, f, i)) setPop(null); else abrirPop(e, tipo, f, i);
     },
   });
