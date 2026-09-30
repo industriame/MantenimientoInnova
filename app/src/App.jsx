@@ -82,7 +82,13 @@ const ESTADOS = {
   en_proceso: { label: "En proceso", color: COLORS.orange },
   espera: { label: "En espera", color: "#3B6EA5" },
   completada: { label: "Completada", color: COLORS.verde },
+  // Correctivo que resultó ser una obra mayor y pasó al módulo Servicios
+  derivada: { label: "Derivada a servicio", color: "#7B5EA7" },
 };
+/* Un correctivo derivado a servicio conserva su registro, pero ya no cuenta
+   como correctivo: sale de MTBF, MTTR, satisfacción, conteos, pendientes,
+   calendario y ejecución. Su consumo de bodega sí sigue en el presupuesto. */
+const esCorrectivoVigente = (s) => s.estado !== "derivada";
 const ESTADOS_EJECUCION = ["programada", "en_proceso", "espera", "completada"];
 // Estados en los que la actividad sigue viva (ya activada, aún sin cerrar)
 const ESTADOS_ABIERTOS = ["programada", "en_proceso", "espera"];
@@ -595,7 +601,7 @@ function presupuestoGlobalMes(data, mes) {
    costo/estudiante = (preventivo + correctivo + servicios) ÷ estudiantes --- */
 function indicadoresMes(data, sedeIds, mes) {
   const enMes = (f) => mesKey(f) === mes;
-  const correctivos = (data.solicitudes || []).filter((s) => sedeIds.includes(s.sedeId) && enMes(s.fecha));
+  const correctivos = (data.solicitudes || []).filter((s) => sedeIds.includes(s.sedeId) && enMes(s.fecha) && esCorrectivoVigente(s));
 
   // Días de exposición: si es el mes en curso, solo los días transcurridos
   const hoy = new Date();
@@ -1000,7 +1006,7 @@ function actividadesDeTecnico(data, tecnicoId) {
     .filter((o) => o.tecnicoId === tecnicoId)
     .map((o) => ({ ...o, tipo: "preventivo" }));
   const cor = (data.solicitudes || [])
-    .filter((s) => s.tecnicoId === tecnicoId)
+    .filter((s) => s.tecnicoId === tecnicoId && esCorrectivoVigente(s))
     .map((s) => ({ ...s, tipo: "correctivo", tarea: s.descripcion }));
   const rank = { en_proceso: 0, programada: 1, pendiente: 2, completada: 3 };
   return [...pre, ...cor].sort(
@@ -1413,6 +1419,57 @@ function useAcciones(data, persist, usuario) {
       }
       marcarBorrado("solicitudes", item.id);
       return persist((d) => ({ ...d, solicitudes: d.solicitudes.filter((x) => x.id !== item.id) }));
+    },
+    /* --- Paso de un correctivo a servicio -------------------------------
+       El técnico lo solicita con un motivo; el supervisor lo confirma
+       creando el servicio (queda "por aprobar" para el cliente) o lo
+       descarta. El supervisor también puede derivar directamente. */
+    solicitarDerivacion: (item, motivo) => {
+      const sello = `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
+      const derivacion = { estado: "solicitada", motivo, solicitadaPor: usuario?.id || "", solicitadaEn: sello };
+      const log = { id: uid("log"), titulo: "Solicitud de paso a servicio", detalle: motivo, usuarioId: usuario?.id || "", sello };
+      return persist((d) => ({
+        ...d,
+        solicitudes: d.solicitudes.map((x) => (x.id === item.id ? { ...x, derivacion, log: [...(x.log || []), log] } : x)),
+      }));
+    },
+    descartarDerivacion: (item) => {
+      const sello = `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
+      const log = { id: uid("log"), titulo: "Paso a servicio descartado", detalle: item.derivacion?.motivo || "", usuarioId: usuario?.id || "", sello };
+      return persist((d) => ({
+        ...d,
+        solicitudes: d.solicitudes.map((x) => (x.id === item.id ? { ...x, derivacion: null, log: [...(x.log || []), log] } : x)),
+      }));
+    },
+    derivarAServicio: (item, form) => {
+      const sello = `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
+      return persist((d) => {
+        const n = d.srvCounter || 1;
+        const codigo = `SRV-${String(n).padStart(4, "0")}`;
+        const servicio = {
+          id: uid("srv"), codigo, ...form,
+          proveedor: "", presupuestoAprobado: null, fecha: "", estado: "por_aprobar",
+          observaciones: "", resolucion: "", motivoRechazo: "",
+          fechaCompletada: "", horaCompletada: "", reprogramaciones: [],
+          createdAt: fmtDate(new Date()),
+          // Trazabilidad: de qué correctivo salió
+          origenSolicitudId: item.id, origenCodigo: item.codigo,
+        };
+        const derivacion = {
+          ...(item.derivacion || {}), estado: "confirmada",
+          servicioId: servicio.id, servicioCodigo: codigo,
+          confirmadaPor: usuario?.id || "", confirmadaEn: sello,
+        };
+        const log = { id: uid("log"), titulo: "Derivada a servicio", detalle: `${ESTADOS[item.estado]?.label || item.estado} → ${codigo}`, usuarioId: usuario?.id || "", sello };
+        return {
+          ...d,
+          servicios: [servicio, ...(d.servicios || [])],
+          srvCounter: n + 1,
+          solicitudes: d.solicitudes.map((x) => (x.id === item.id
+            ? { ...x, estado: "derivada", estadoPrevioDerivacion: x.estado, derivacion, log: [...(x.log || []), log] }
+            : x)),
+        };
+      });
     },
     updateActividad: (item, patch, opciones = {}) => {
       /* Cada guardado deja rastro: se comparan los campos seguidos y se anexan
@@ -3030,7 +3087,7 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
     }
   };
 
-  const solicitudes = data.solicitudes.filter((s) => sedeIds.includes(s.sedeId) && (!sedeFiltro || s.sedeId === sedeFiltro));
+  const solicitudes = data.solicitudes.filter((s) => sedeIds.includes(s.sedeId) && (!sedeFiltro || s.sedeId === sedeFiltro) && esCorrectivoVigente(s));
   const ordenes = data.ordenes.filter((o) => sedeIds.includes(o.sedeId) && (!sedeFiltro || o.sedeId === sedeFiltro));
   const serviciosDash = (data.servicios || []).filter((s) => sedeIds.includes(s.sedeId) && (!sedeFiltro || s.sedeId === sedeFiltro));
 
@@ -3084,7 +3141,7 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
   const porSede = sedes.map((s) => ({
     id: s.id,
     nombre: s.nombre.length > 10 ? s.nombre.slice(0, 9) + "…" : s.nombre,
-    correctivos: data.solicitudes.filter((x) => x.sedeId === s.id).length,
+    correctivos: data.solicitudes.filter((x) => x.sedeId === s.id && esCorrectivoVigente(x)).length,
     preventivos: data.ordenes.filter((x) => x.sedeId === s.id).length,
   }));
 
@@ -3318,6 +3375,7 @@ const FILTROS_SOLICITUD = [
   { id: "curso", label: "En curso", estados: ["programada", "en_proceso", "espera"], color: COLORS.orange },
   { id: "completada", label: "Resueltas", estados: ["completada"], color: COLORS.verde },
   { id: "calificar", label: "Por calificar", estados: ["completada"], color: COLORS.ambar, sinCalificar: true },
+  { id: "derivada", label: "Derivadas a servicio", estados: ["derivada"], color: "#7B5EA7" },
 ];
 
 /* "Por calificar" comparte estado con "Resueltas", así que necesita su propia
@@ -3337,7 +3395,9 @@ function TarjetaSolicitudMia({ s, data, onCalificar, onActualizar }) {
   const porCalificar = s.estado === "completada" && !s.calificacion;
   // Mientras la novedad no esté cerrada, el solicitante puede sumar o
   // cambiar su foto — sirve cuando se le olvidó adjuntarla al reportarla.
-  const puedeEditarFoto = !!onActualizar && s.estado !== "completada";
+  const puedeEditarFoto = !!onActualizar && s.estado !== "completada" && s.estado !== "derivada";
+  const srvDerivado = s.estado === "derivada"
+    ? (data.servicios || []).find((x) => x.id === s.derivacion?.servicioId) : null;
 
   return (
     <div className="border rounded-md" style={{ ...cardStyle, borderLeft: `3px solid ${ESTADOS[s.estado]?.color || COLORS.line}` }}>
@@ -3364,6 +3424,13 @@ function TarjetaSolicitudMia({ s, data, onCalificar, onActualizar }) {
           </div>
         </div>
         <p className="text-[10px] mt-1" style={cSlate}>{s.fecha} · {s.hora}</p>
+        {s.estado === "derivada" && (
+          <p className="text-[11px] mt-1.5 rounded-md px-2 py-1.5" style={{ background: "#7B5EA712", color: COLORS.charcoal }}>
+            Tu solicitud requiere un trabajo mayor y pasó a servicio
+            <b> {s.derivacion?.servicioCodigo || ""}</b>
+            {srvDerivado ? <> · {ESTADOS[srvDerivado.estado]?.label || srvDerivado.estado}</> : null}.
+          </p>
+        )}
       </div>
 
       {abierta && (
@@ -4120,6 +4187,106 @@ function ArbolPendientes({ sedes, todosLosSedes, usuarios, pendientes, onActivar
   );
 }
 
+/* Paso de un correctivo a servicio, dentro de la tarjeta de la actividad.
+   - Técnico: pide el paso con un motivo (queda a la espera del supervisor).
+   - Supervisor: confirma lo pedido o deriva directo; se crea el servicio
+     "por aprobar" con la ubicación, descripción y foto del correctivo.
+   - Ya derivada: solo informa a qué servicio pasó. */
+function PasoAServicio({ item, rol, data, acciones }) {
+  const [pidiendo, setPidiendo] = useState(false);
+  const [motivo, setMotivo] = useState("");
+  const [formulario, setFormulario] = useState(false);
+  const der = item.derivacion;
+  const morado = "#7B5EA7";
+  const quien = (id) => usuarioNombre(data.usuarios, id);
+
+  if (item.estado === "derivada") {
+    const srv = (data.servicios || []).find((x) => x.id === der?.servicioId);
+    return (
+      <div className="rounded-md p-2.5 text-xs" style={{ background: `${morado}12`, color: COLORS.charcoal }}>
+        <p className="font-semibold" style={{ color: morado }}>Derivada a servicio {der?.servicioCodigo || ""}</p>
+        {srv && <p className="mt-0.5">Estado del servicio: <b>{ESTADOS[srv.estado]?.label || srv.estado}</b></p>}
+        {der?.motivo && <p className="mt-0.5" style={cSlate}>Motivo: {der.motivo}</p>}
+        <p className="text-[10px] mt-1" style={cSlate}>
+          Ya no cuenta en los indicadores de correctivos. El consumo de bodega registrado se mantiene en el presupuesto.
+        </p>
+      </div>
+    );
+  }
+  if (item.estado === "completada") return null;
+
+  const esAdmin = rol === "admin";
+  const inicial = {
+    sedeId: item.sedeId, faseId: item.faseId || "", activoId: item.activoId || "",
+    trabajo: (item.descripcion || item.tarea || "").slice(0, 90),
+    detalle: [der?.motivo, item.descripcion || item.tarea].filter(Boolean).join("\n\n"),
+    foto: item.fotoSolicitante || item.foto || "",
+  };
+
+  return (
+    <div>
+      {der?.estado === "solicitada" && (
+        <div className="rounded-md p-2.5 text-xs" style={{ background: `${morado}12`, color: COLORS.charcoal }}>
+          <p className="font-semibold" style={{ color: morado }}>
+            {esAdmin ? "El técnico pide pasar esta actividad a servicio" : "Pediste pasar esta actividad a servicio"}
+          </p>
+          <p className="mt-0.5">{der.motivo}</p>
+          <p className="text-[10px] mt-0.5" style={cSlate}>{quien(der.solicitadaPor)} · {der.solicitadaEn}</p>
+          {esAdmin ? (
+            <div className="flex gap-1.5 mt-2">
+              <button onClick={() => setFormulario(true)} className="flex-1 py-1.5 rounded-md text-[11px] font-semibold text-white" style={{ background: morado }}>
+                Crear servicio
+              </button>
+              <button onClick={() => acciones.descartarDerivacion(item)} className="flex-1 py-1.5 rounded-md text-[11px] font-semibold border"
+                style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+                Descartar
+              </button>
+            </div>
+          ) : (
+            <p className="text-[10px] mt-1" style={cSlate}>Queda a la espera de que el supervisor lo confirme.</p>
+          )}
+        </div>
+      )}
+
+      {!der?.estado && !pidiendo && (
+        <button onClick={() => (esAdmin ? setFormulario(true) : setPidiendo(true))}
+          className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2 rounded-md border"
+          style={{ borderColor: morado, color: morado, background: "white" }}>
+          <Wrench size={13} /> {esAdmin ? "Derivar a servicio" : "Solicitar paso a servicio"}
+        </button>
+      )}
+
+      {pidiendo && (
+        <div className="rounded-md p-2.5 border" style={{ borderColor: morado }}>
+          <Field label="¿Por qué requiere un servicio?" hint="Ej. requiere obra civil mayor, material especial o un proveedor externo. El supervisor lo revisa antes de crear el servicio.">
+            <textarea autoFocus value={motivo} onChange={(e) => setMotivo(e.target.value)} rows={3}
+              className={`${inputCls} resize-none`} style={inputStyle} />
+          </Field>
+          <div className="flex gap-1.5 mt-2">
+            <button onClick={() => { setPidiendo(false); setMotivo(""); }} className="flex-1 py-1.5 rounded-md text-[11px] font-semibold border"
+              style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+              Cancelar
+            </button>
+            <button disabled={!motivo.trim()} onClick={() => { acciones.solicitarDerivacion(item, motivo.trim()); setPidiendo(false); setMotivo(""); }}
+              className="flex-1 py-1.5 rounded-md text-[11px] font-semibold text-white disabled:opacity-40" style={{ background: morado }}>
+              Enviar al supervisor
+            </button>
+          </div>
+        </div>
+      )}
+
+      {formulario && (
+        <Modal title={`Derivar ${item.codigo} a servicio`} onClose={() => setFormulario(false)} wide>
+          <FormServicio data={data} initial={inicial} onClose={() => setFormulario(false)}
+            textoBoton="Crear servicio y derivar"
+            aviso={`Se crea el servicio "por aprobar" para el cliente y ${item.codigo} queda como "Derivada a servicio": deja de contar en los indicadores de correctivos. Si el cliente rechaza el servicio, queda como rechazado.`}
+            onSave={(form) => acciones.derivarAServicio(item, form)} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicial, permitirReasignar }) {
   const [open, setOpen] = useState(!!abiertoInicial);
   const [estado, setEstado] = useState(item.estado);
@@ -4626,6 +4793,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             </div>
           )}
 
+          {esCorr && <PasoAServicio item={item} rol={rol} data={data} acciones={acciones} />}
+
           <div className="flex items-center justify-between gap-2">
             <BotonHistorial item={item} data={data} />
             {corrige && !confirmarBorrado && (
@@ -5107,7 +5276,7 @@ function AdminSedes({ data, persist, editable = true }) {
   const resumen = (sedeId, faseId, activoId) => {
     const match = (x) => x.sedeId === sedeId && (!faseId || x.faseId === faseId) && (!activoId || x.activoId === activoId);
     const prev = data.planes.filter((p) => (p.aplicaciones || []).some(match)).length;
-    const cor = data.solicitudes.filter(match);
+    const cor = data.solicitudes.filter((x) => match(x) && esCorrectivoVigente(x));
     return { prev, cor: cor.length, abiertas: cor.filter((c) => c.estado === "pendiente").length };
   };
 
@@ -5701,7 +5870,7 @@ function Calendario({ data, sedes, tecnicoDefault, onEditar, ocultarCosto, fCrit
   const agenda = useMemo(() => {
     const enAlcance = (x) => sedeIds.includes(x.sedeId);
     const pre = data.ordenes.filter(enAlcance).map((o) => ({ ...o, tipo: "preventivo" }));
-    const cor = data.solicitudes.filter((s) => s.fechaProgramada && enAlcance(s)).map((s) => ({ ...s, tipo: "correctivo", tarea: s.descripcion }));
+    const cor = data.solicitudes.filter((s) => s.fechaProgramada && enAlcance(s) && esCorrectivoVigente(s)).map((s) => ({ ...s, tipo: "correctivo", tarea: s.descripcion }));
     // Los servicios externos se agendan por su fecha programada
     const srv = (data.servicios || []).filter((x) => x.fecha && enAlcance(x)).map((x) => ({
       ...x, tipo: "servicio", tarea: x.trabajo, fechaProgramada: x.fecha, tecnicoId: "",
@@ -6097,6 +6266,7 @@ function TecnicoServicios({ data, servicios }) {
             <span className="text-[10px] font-bold" style={cChar}>{srv.codigo}</span>
             <EstadoChip estado={srv.estado} />
             {srv.tipoProveedor && <Chip>{srv.tipoProveedor}</Chip>}
+            {srv.origenCodigo && <Chip color="#7B5EA7">Desde {srv.origenCodigo}</Chip>}
           </div>
           <p className="text-sm font-semibold mt-1" style={cChar}>{srv.trabajo}</p>
           <p className="text-xs" style={cSlate}>{ubicacionTexto(data.sedes, srv)}</p>
@@ -6142,7 +6312,7 @@ function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
   const enSede = (x) => fSede === "todas" || x.sedeId === fSede;
 
   const misOrdenes = data.ordenes.filter((o) => o.tecnicoId === user.id && enSede(o));
-  const misSolicitudes = data.solicitudes.filter((s) => s.tecnicoId === user.id && enSede(s));
+  const misSolicitudes = data.solicitudes.filter((s) => s.tecnicoId === user.id && enSede(s) && esCorrectivoVigente(s));
   const misServicios = (data.servicios || []).filter((s) => misSedeIds.includes(s.sedeId) && enSede(s));
 
   const subs = [
@@ -6228,6 +6398,10 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
   const finalizadas = visibles.filter((s) => s.estado === "completada")
     .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
+  // Paso a servicio: lo que el técnico pidió y lo ya derivado
+  const pedidasServicio = visibles.filter((s) => s.derivacion?.estado === "solicitada" && esCorrectivoVigente(s));
+  const derivadas = visibles.filter((s) => s.estado === "derivada")
+    .sort((a, b) => (b.derivacion?.confirmadaEn || "").localeCompare(a.derivacion?.confirmadaEn || ""));
 
   const tarjetaAct = (sol) => (
     <TarjetaActividad key={sol.id} rol="admin" data={data} acciones={acciones}
@@ -6261,6 +6435,13 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
           onSubmit={crearCorrectivo} onClose={() => setNuevo(false)} />
       )}
 
+      {pedidasServicio.length > 0 && (
+        <SeccionPlegable titulo="Piden pasar a servicio" count={pedidasServicio.length} color="#7B5EA7" defaultOpen
+          nota="El técnico considera que requieren un servicio. Ábrelas para crear el servicio o descartar el pedido.">
+          {pedidasServicio.map(tarjetaAct)}
+        </SeccionPlegable>
+      )}
+
       <SeccionPlegable titulo="Sin Programar" count={sinProgramar.length} color={COLORS.slate}
         nota="Reportadas, aún sin técnico ni fecha. Se programan desde Programación.">
         {sinProgramar.map(tarjetaAct)}
@@ -6277,6 +6458,12 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
         {enEjecucion.length === 0 && <Empty>Sin correctivos en ejecución.</Empty>}
       </SeccionPlegable>
 
+
+      <SeccionPlegable titulo="Derivadas a servicio" count={derivadas.length} color="#7B5EA7" defaultOpen={false}
+        nota="Correctivos que pasaron al módulo Servicios. No cuentan en los indicadores de correctivos.">
+        {derivadas.map(tarjetaAct)}
+        {derivadas.length === 0 && <Empty>Ningún correctivo derivado a servicio.</Empty>}
+      </SeccionPlegable>
 
       <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
         {finalizadas.slice(0, 5).map(tarjetaAct)}
@@ -6462,7 +6649,7 @@ const ESTADOS_SERVICIO = ["programada", "en_proceso", "completada"];
    el valor final y la fecha, con lo que pasa a programada.
    ========================================================================= */
 
-function FormServicio({ data, initial, onSave, onClose }) {
+function FormServicio({ data, initial, onSave, onClose, textoBoton, aviso }) {
   const flat = flattenActivos(data.sedes);
   const [sedeId, setSedeId] = useState(initial?.sedeId || data.sedes[0]?.id || "");
   const [faseId, setFaseId] = useState(initial?.faseId || "");
@@ -6531,7 +6718,7 @@ function FormServicio({ data, initial, onSave, onClose }) {
       <FotoUploader foto={foto} onChange={setFoto} carpeta="servicios" />
 
       <p className="text-[11px] rounded-md p-2.5" style={{ background: `${COLORS.ambar}15`, color: COLORS.charcoal }}>
-        Al guardar, la solicitud se envía al cliente para su aprobación. El proveedor y la fecha se definen después.
+        {aviso || "Al guardar, la solicitud se envía al cliente para su aprobación. El proveedor y la fecha se definen después."}
       </p>
 
       <button disabled={!valido}
@@ -6543,7 +6730,7 @@ function FormServicio({ data, initial, onSave, onClose }) {
           onClose();
         }}
         className="w-full py-2.5 rounded-md font-semibold text-sm text-white disabled:opacity-40" style={{ background: COLORS.orange }}>
-        {initial ? "Guardar cambios" : "Enviar a aprobación"}
+        {textoBoton || (initial ? "Guardar cambios" : "Enviar a aprobación")}
       </button>
     </div>
   );
@@ -6642,6 +6829,7 @@ function AdminServicios({ data, persist, user }) {
             <span className="text-[10px] font-bold" style={cChar}>{srv.codigo}</span>
             <EstadoChip estado={srv.estado} />
             {srv.tipoProveedor && <Chip>{srv.tipoProveedor}</Chip>}
+            {srv.origenCodigo && <Chip color="#7B5EA7">Desde {srv.origenCodigo}</Chip>}
           </div>
           <p className="text-sm font-semibold mt-1" style={cChar}>{srv.trabajo}</p>
           {srv.detalle && <p className="text-xs mt-0.5" style={cSlate}>{srv.detalle.length > 110 ? srv.detalle.slice(0, 108) + "…" : srv.detalle}</p>}
@@ -6924,6 +7112,7 @@ function TarjetaServicioCliente({ srv, data, onDecidir }) {
         <TipoChip tipo="servicio" />
         <span className="text-[10px] font-bold" style={cChar}>{srv.codigo}</span>
         {srv.tipoProveedor && <Chip>{srv.tipoProveedor}</Chip>}
+            {srv.origenCodigo && <Chip color="#7B5EA7">Desde {srv.origenCodigo}</Chip>}
       </div>
 
       <p className="text-sm font-semibold" style={cChar}>{srv.trabajo}</p>
@@ -7008,7 +7197,7 @@ function AdminActividades({ data, persist, persistYa, user }) {
 
   const nPrev = getPendientes(data).filter((p) => p.tipo === "preventivo").length +
     data.ordenes.filter((o) => ESTADOS_ABIERTOS.includes(o.estado)).length;
-  const nCorr = data.solicitudes.filter((s) => s.estado !== "completada").length;
+  const nCorr = data.solicitudes.filter((s) => s.estado !== "completada" && esCorrectivoVigente(s)).length;
   const nServ = (data.servicios || []).filter((s) => s.estado !== "completada").length;
   const atrasados = data.ordenes.filter((o) => ESTADOS_ABIERTOS.includes(o.estado) && o.fechaProgramada && o.fechaProgramada < hoy).length;
 
@@ -8329,14 +8518,14 @@ function construirReporteMensualHTML(data, mes) {
 
   // Actividades del mes, de los tres tipos
   const ordMes = data.ordenes.filter((o) => mesContable(o) === mes);
-  const solMes = data.solicitudes.filter((s) => mesContable(s) === mes);
+  const solMes = data.solicitudes.filter((s) => mesContable(s) === mes && esCorrectivoVigente(s));
   const srvMes = (data.servicios || []).filter((s) => mesKey(s.fecha) === mes);
   const totalAct = ordMes.length + solMes.length + srvMes.length;
 
   const porSede = sedes.map((s) => ({
     nombre: s.nombre,
     prev: data.ordenes.filter((o) => o.sedeId === s.id && mesContable(o) === mes).length,
-    corr: data.solicitudes.filter((x) => x.sedeId === s.id && mesContable(x) === mes).length,
+    corr: data.solicitudes.filter((x) => x.sedeId === s.id && mesContable(x) === mes && esCorrectivoVigente(x)).length,
     serv: (data.servicios || []).filter((x) => x.sedeId === s.id && mesKey(x.fecha) === mes).length,
   }));
 
@@ -8360,7 +8549,7 @@ function construirReporteMensualHTML(data, mes) {
     const nota = resumen.vinetas.find((v) => v.nombre === s.nombre);
     const acts = [
       ...data.ordenes.filter((o) => o.sedeId === s.id && mesContable(o) === mes).map((o) => ({ ...o, tipo: "preventivo" })),
-      ...data.solicitudes.filter((x) => x.sedeId === s.id && mesContable(x) === mes).map((x) => ({ ...x, tipo: "correctivo", tarea: x.descripcion })),
+      ...data.solicitudes.filter((x) => x.sedeId === s.id && mesContable(x) === mes && esCorrectivoVigente(x)).map((x) => ({ ...x, tipo: "correctivo", tarea: x.descripcion })),
       ...(data.servicios || []).filter((x) => x.sedeId === s.id && mesKey(x.fecha) === mes).map((x) => ({ ...x, tipo: "servicio", tarea: x.trabajo })),
     ].sort((x, y) => (x.fechaProgramada || x.fecha || "").localeCompare(y.fechaProgramada || y.fecha || ""));
 
