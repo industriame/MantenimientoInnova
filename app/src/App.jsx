@@ -3235,8 +3235,9 @@ function TarjetaResumenMes({ data, persist, sedes, mes }) {
       {!guardado ? (
         <div className="text-center py-2">
           <p className="text-xs mb-3" style={cSlate}>
-            Genera un resumen ejecutivo con los indicadores del mes, el remanente de presupuesto y, por sede,
-            recurrencias de correctivos, servicios que subieron el costo y el costo por estudiante.
+            Genera un resumen en lenguaje simple con las solicitudes resueltas, el cumplimiento de preventivos,
+            el tiempo de atención por criticidad, el uso del presupuesto de materiales, la satisfacción y lo que
+            queda pendiente; y, por sede, sus cifras, los servicios por aprobar y las fallas que se repiten.
             Actívalo cuando ya tengas suficiente información del periodo — al inicio del mes los datos suelen ser parciales.
           </p>
           <button onClick={generar} disabled={generando}
@@ -8552,87 +8553,193 @@ function exportarCSV(filas, data) {
    tarjeta del Dashboard y para el reporte impreso, así siempre coinciden.
    ========================================================================= */
 
-/* Activos con 2 o más correctivos en la ventana de meses reciente: la señal
-   de que algo se sigue dañando en vez de resolverse de fondo. */
-function recurrenciasCorrectivos(data, sedeIds, mesFinal, ventanaMeses = 3) {
+/* Grupos de falla para detectar recurrencias leyendo la descripción de las
+   solicitudes (sin mayúsculas ni tildes). Es provisional: cuando exista el
+   campo "categoría de falla" en la solicitud, este listado se reemplaza por
+   ese campo en grupoDeFalla(). Una solicitud puede caer en varios grupos. */
+const GRUPOS_FALLA = [
+  { id: "fugas", nombre: "fugas de agua", palabras: ["fuga", "gotea", "desborda", "tapado", "se va el agua", "pierde agua", "filtra", "no descarga"] },
+  { id: "chapas", nombre: "chapas y cerraduras", palabras: ["chapa", "cerradura", "manija", "pestillo", "tranca", "cerradero"] },
+  { id: "puertas", nombre: "puertas descuadradas o topes", palabras: ["descuadrada", "tope", "roza", "no cierra", "no engancha"] },
+  { id: "vidrios", nombre: "vidrios y espejos", palabras: ["vidrio", "espejo"] },
+  { id: "electricidad", nombre: "electricidad", palabras: ["breaker", "braker", "lampara", "energia", "tablero", "electrico", "sensor", "luz"] },
+  { id: "sanitarios", nombre: "llaves y sanitarios", palabras: ["llave", "grifo", "lavamanos", "inodoro", "urinario", "bebedero"] },
+];
+
+/* Ids de los grupos de falla en los que cae una solicitud. */
+function gruposDeFalla(sol) {
+  const texto = sinTildes(sol.descripcion);
+  return GRUPOS_FALLA.filter((g) => g.palabras.some((w) => texto.includes(sinTildes(w)))).map((g) => g.id);
+}
+
+/* Recurrencia de una sede: solicitudes de los últimos 3 meses (incluido el
+   elegido) por grupo de falla. Devuelve el grupo con más solicitudes si
+   llega a 3, o null. */
+function recurrenciaPorGrupo(data, sedeId, mesFinal, ventanaMeses = 3, minimo = 3) {
   const [y, m] = mesFinal.split("-").map(Number);
   const claves = new Set();
   for (let i = 0; i < ventanaMeses; i++) {
     const d = new Date(y, m - 1 - i, 1);
     claves.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
   }
-  const activos = flattenActivos(data.sedes);
-  const enVentana = (data.solicitudes || []).filter(
-    (s) => sedeIds.includes(s.sedeId) && claves.has(mesKey(s.fecha))
-  );
+  const enVentana = (data.solicitudes || []).filter((s) => s.sedeId === sedeId && s.fecha && claves.has(mesKey(s.fecha)));
 
-  const porActivo = {};
-  enVentana.forEach((s) => {
-    const k = `${s.sedeId}|${s.activoId}`;
-    (porActivo[k] = porActivo[k] || { sedeId: s.sedeId, activoId: s.activoId, count: 0 }).count++;
-  });
+  const porGrupo = {};
+  enVentana.forEach((s) => gruposDeFalla(s).forEach((g) => (porGrupo[g] = porGrupo[g] || []).push(s)));
 
-  return Object.values(porActivo)
-    .filter((x) => x.count >= 2)
-    .map((x) => ({
-      ...x,
-      nombre: activos.find((a) => a.activoId === x.activoId)?.activoNombre || "un activo",
-      sede: sedeNombre(data.sedes, x.sedeId),
-    }))
-    .sort((a, b) => b.count - a.count);
+  // El de más solicitudes; en empate, el que aparece primero en GRUPOS_FALLA
+  const ganador = GRUPOS_FALLA
+    .map((g) => ({ grupo: g, sols: porGrupo[g.id] || [] }))
+    .reduce((mejor, x) => (x.sols.length > (mejor?.sols.length || 0) ? x : mejor), null);
+  if (!ganador || ganador.sols.length < minimo) return null;
+
+  const primera = ganador.sols.map((s) => s.fecha).sort()[0];
+  return {
+    grupo: ganador.grupo,
+    count: ganador.sols.length,
+    desde: mesKey(primera),
+    conFuga: ganador.grupo.id === "sanitarios" ? ganador.sols.filter((s) => gruposDeFalla(s).includes("fugas")).length : 0,
+  };
 }
 
-/* Resumen ejecutivo único del mes: un párrafo general (con los indicadores
-   clave y el remanente de presupuesto en negrita) más una viñeta corta por
-   sede, enfocada solo en recurrencias, servicios que subieron el costo y el
-   costo por estudiante. Devuelve datos estructurados, no HTML ni JSX, para
-   que la tarjeta (React) y el reporte (HTML impreso) lo rendericen cada uno
-   a su manera con el mismo contenido. Tope ~200 palabras.
+/* Resumen del mes: un párrafo general en lenguaje simple (cifras clave en
+   negrita) y una viñeta por sede. Devuelve datos, no HTML ni JSX, para que
+   la tarjeta (React) y el reporte impreso muestren el mismo contenido.
    ========================================================================= */
 function generarResumenUnificado(data, sedes, mes) {
   const sedeIds = sedes.map((s) => s.id);
-  const kpi = indicadoresMes(data, sedeIds, mes);
-  const sat = satisfaccion(data, sedeIds);
-  const avance = avancePlan(data, sedeIds, mes);
-  const presu = sedeIds.length > 1 ? presupuestoGlobalMes(data, mes) : { ...presupuestoSedeMes(data, sedeIds[0], mes) };
-  const ambito = sedes.length > 1 ? "el conjunto de sedes" : sedes[0]?.nombre || "la sede";
+  const plural = (n, uno, varios) => (n === 1 ? uno : varios);
+  const dinero = (n) => `$${(Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const corto = (t, max = 40) => (t.length > max ? `${t.slice(0, max - 1).trim()}…` : t);
+  const lista = (xs) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} y ${xs[xs.length - 1]}`);
+  const nombreMes = (key) => {
+    const [yy, mm] = key.split("-").map(Number);
+    return `${MESES[mm - 1]}${yy !== Number(mes.slice(0, 4)) ? ` ${yy}` : ""}`;
+  };
+  const tiempo = (dias) => {
+    const h = dias * 24;
+    if (h < 24) { const r = Math.max(1, Math.round(h)); return `${r} ${plural(r, "hora", "horas")}`; }
+    return `${dias.toFixed(1)} días`;
+  };
 
-  // --- Párrafo general: texto plano + tramos en negrita (indicadores y remanente) ---
+  // Solicitudes del mes (por fecha de reporte) y servicios esperando al cliente
+  const solicitudesDe = (ids) => (data.solicitudes || []).filter((s) => ids.includes(s.sedeId) && s.fecha && mesKey(s.fecha) === mes);
+  const porAprobarDe = (ids) => (data.servicios || []).filter((x) => ids.includes(x.sedeId) && x.estado === "por_aprobar");
+  const montoServicio = (x) => Number(x.presupuesto) || 0;
+
+  const kpi = indicadoresMes(data, sedeIds, mes);
+  const avance = avancePlan(data, sedeIds, mes);
+  const presuSedes = sedes.map((s) => presupuestoSedeMes(data, s.id, mes));
+  const presupuesto = presuSedes.reduce((a, x) => a + x.presupuesto, 0);
+  const gastado = presuSedes.reduce((a, x) => a + x.gastado, 0);
+  const delMes = solicitudesDe(sedeIds);
+  const resueltas = delMes.filter((s) => s.estado === "completada").length;
+  const abiertas = delMes.length - resueltas;
+  const sat = satisfaccion({ ...data, solicitudes: delMes }, sedeIds);
+  const porAprobar = porAprobarDe(sedeIds);
+  const montoPorAprobar = porAprobar.reduce((a, x) => a + montoServicio(x), 0);
+
+  // --- Párrafo general ---
   const p = [];
   const txt = (t) => p.push({ t, b: false });
   const neg = (t) => p.push({ t, b: true });
+  const etiqueta = mesLabel(mes);
 
-  txt(`En ${mesLabel(mes)}, ${ambito} registró `);
-  neg(`${kpi.nFallas} correctivo${kpi.nFallas === 1 ? "" : "s"} (${kpi.cerrados} cerrado${kpi.cerrados === 1 ? "" : "s"})`);
-  txt(avance.total > 0 ? " y un cumplimiento del plan preventivo de " : ". ");
-  if (avance.total > 0) { neg(`${avance.cumplimiento.toFixed(0)}%`); txt(". "); }
-  if (kpi.mtbf !== null) { txt("El tiempo medio entre fallas fue de "); neg(`${kpi.mtbf.toFixed(1)} días`); txt(kpi.mttr !== null ? " y el de respuesta de " : ". "); }
-  if (kpi.mtbf !== null && kpi.mttr !== null) { neg(duracionTexto(kpi.mttr)); txt(". "); }
-  txt("El presupuesto de materiales cerró con ");
-  neg(`${money(Math.max(0, presu.disponible))} disponibles`);
-  txt(` de ${money(presu.presupuesto)}. `);
-  if (sat.promedio !== null) { txt("La satisfacción promedio fue de "); neg(`${sat.promedio.toFixed(1)}/5`); txt("."); }
+  // 1. Solicitudes y preventivos
+  txt(`${etiqueta.charAt(0).toUpperCase()}${etiqueta.slice(1)}. `);
+  if (delMes.length > 0) {
+    txt(plural(resueltas, "Se resolvió ", "Se resolvieron "));
+    neg(`${resueltas} de ${plural(delMes.length, "1 solicitud recibida", `las ${delMes.length} solicitudes recibidas`)}`);
+  } else {
+    txt("No se recibieron solicitudes");
+  }
+  if (avance.total > 0) {
+    txt(plural(avance.completadas, " y se cumplió ", " y se cumplieron "));
+    neg(`${avance.completadas} de ${plural(avance.total, "1 preventivo programado", `los ${avance.total} preventivos programados`)}`);
+    txt(" (");
+    neg(`${avance.cumplimiento.toFixed(0)}%`);
+    txt(")");
+  }
+  txt(". ");
 
-  // --- Viñetas por sede: solo recurrencias, servicios que subieron el costo, costo/estudiante ---
+  // 2. Tiempo de atención por criticidad (sin criticidad cuenta como media)
+  const NOMBRE_CRIT = { critico: "las críticas", alta: "las altas", media: "las medias", baja: "las bajas" };
+  const tiempos = kpi.porCriticidad.filter((c) => c.mttr !== null);
+  if (tiempos.length > 0) {
+    txt("Las solicitudes se atendieron en ");
+    tiempos.forEach((c, i) => {
+      if (i > 0) txt(i === tiempos.length - 1 ? " y en " : ", en ");
+      neg(tiempo(c.mttr));
+      txt(`${i === 0 ? " en promedio" : ""} ${NOMBRE_CRIT[c.id]}`);
+    });
+    txt(". ");
+  }
+
+  // 3. Presupuesto de materiales (se muestra el exceso, no se recorta a cero)
+  txt("Se usó ");
+  neg(dinero(gastado));
+  if (presupuesto > 0) {
+    txt(" del presupuesto de materiales de ");
+    neg(dinero(presupuesto));
+    if (gastado > presupuesto) { txt(" (superó el presupuesto en "); neg(dinero(gastado - presupuesto)); txt(")"); }
+  } else {
+    txt(" en materiales (sin presupuesto cargado)");
+  }
+  txt(". ");
+
+  // 4. Satisfacción, solo con las solicitudes del mes
+  if (sat.promedio !== null) {
+    txt("La satisfacción de los usuarios fue de ");
+    neg(`${sat.promedio.toFixed(1)} sobre 5`);
+    txt(` (${sat.total} ${plural(sat.total, "calificación", "calificaciones")}). `);
+  }
+
+  // 5. Pendientes
+  if (abiertas === 0 && porAprobar.length === 0) {
+    txt("No quedan pendientes.");
+  } else {
+    txt("Quedan pendientes ");
+    if (abiertas > 0) neg(`${abiertas} ${plural(abiertas, "solicitud abierta", "solicitudes abiertas")}`);
+    if (abiertas > 0 && porAprobar.length > 0) txt(" y ");
+    if (porAprobar.length > 0) {
+      neg(`${porAprobar.length} ${plural(porAprobar.length, "servicio", "servicios")} por ${dinero(montoPorAprobar)}`);
+      txt(` que ${plural(porAprobar.length, "espera", "esperan")} su aprobación`);
+    }
+    txt(".");
+  }
+
+  // --- Una viñeta por sede, siempre en el mismo orden ---
   const vinetas = sedes.map((s) => {
-    const recurr = recurrenciasCorrectivos(data, [s.id], mes);
-    const serviciosMes = (data.servicios || []).filter((x) => x.sedeId === s.id && mesServicio(x) === mes && costoServicio(x) > 0);
-    const kSede = indicadoresMes(data, [s.id], mes);
-
     const partes = [];
-    partes.push(
-      recurr.length > 0
-        ? `falla recurrente en ${recurr[0].nombre} (${recurr[0].count}×)`
-        : "sin fallas recurrentes"
-    );
-    partes.push(
-      serviciosMes.length > 0
-        ? `${serviciosMes.length > 1 ? `${serviciosMes.length} servicios externos, el mayor` : "servicio externo"} ${tituloServicio(serviciosMes[0]).length > 28 ? tituloServicio(serviciosMes[0]).slice(0, 26) + "…" : tituloServicio(serviciosMes[0])} (${money(costoServicio(serviciosMes[0]))}) subió el costo`
-        : "sin servicios externos este mes"
-    );
-    partes.push(
-      kSede.costoPorEstudiante !== null ? `${money(kSede.costoPorEstudiante)}/estudiante` : "sin estudiantes registrados"
-    );
+    const sols = solicitudesDe([s.id]);
+    const res = sols.filter((x) => x.estado === "completada").length;
+    const abiertasSede = sols.length - res;
+    partes.push(sols.length > 0
+      ? `${res} de ${sols.length} ${plural(sols.length, "solicitud resuelta", "solicitudes resueltas")}${abiertasSede > 0 ? ` (${abiertasSede} ${plural(abiertasSede, "abierta", "abiertas")})` : ""}`
+      : "sin solicitudes");
+
+    const av = avancePlan(data, [s.id], mes);
+    if (av.total > 0) {
+      partes.push(`${av.completadas} de ${av.total} ${plural(av.total, "preventivo", "preventivos")}${av.sinProgramar > 0 ? ` (${av.sinProgramar} sin programar)` : ""}`);
+    }
+
+    const ps = presupuestoSedeMes(data, s.id, mes);
+    partes.push(ps.presupuesto > 0
+      ? `${dinero(ps.gastado)} de ${dinero(ps.presupuesto)} en materiales${ps.gastado > ps.presupuesto ? " (superó el presupuesto)" : ""}`
+      : `${dinero(ps.gastado)} en materiales`);
+
+    const srv = porAprobarDe([s.id]);
+    if (srv.length === 1) {
+      partes.push(`Servicio de ${dinero(montoServicio(srv[0]))} por aprobar (${corto(tituloServicio(srv[0]))})`);
+    } else if (srv.length > 1) {
+      const total = srv.reduce((a, x) => a + montoServicio(x), 0);
+      partes.push(`${srv.length} servicios por aprobar por ${dinero(total)} (${lista(srv.map((x) => corto(tituloServicio(x), 30)))})`);
+    }
+
+    const rec = recurrenciaPorGrupo(data, s.id, mes);
+    if (rec) {
+      partes.push(`Alerta: ${rec.count} solicitudes por ${rec.grupo.nombre} desde ${nombreMes(rec.desde)}${rec.conFuga > 0 ? ` (${rec.conFuga} con fuga de agua)` : ""}`);
+    }
 
     return { sedeId: s.id, nombre: s.nombre, texto: partes.join(" · ") };
   });
