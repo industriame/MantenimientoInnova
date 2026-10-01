@@ -3301,29 +3301,15 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
   const ordenes = data.ordenes.filter((o) => sedeIds.includes(o.sedeId) && (!sedeFiltro || o.sedeId === sedeFiltro));
   const serviciosDash = (data.servicios || []).filter((s) => sedeIds.includes(s.sedeId) && (!sedeFiltro || s.sedeId === sedeFiltro));
 
-  // Solo cuentan si su fecha programada (o de cierre) cae en el mes elegido
-  // arriba — antes no se filtraba por mes y por eso aparecían actividades
-  // de otros meses mezcladas en los conteos del mes en curso.
-  const enMes = (fecha) => mesKey(fecha) === mes;
-
-  const sinProgramar = getPendientes(data)
-    .filter((p) => sedeIds.includes(p.sedeId) && (!sedeFiltro || p.sedeId === sedeFiltro)).length;
-
-  const programadas =
-    solicitudes.filter((s) => s.estado === "programada" && enMes(s.fechaProgramada)).length +
-    ordenes.filter((o) => o.estado === "programada" && enMes(o.fechaProgramada)).length +
-    serviciosDash.filter((s) => s.estado === "programada" && enMes(s.fecha)).length;
-
-  // "En Ejecución" junta en_proceso + espera (pausada, pero ya arrancada)
-  const enProceso =
-    solicitudes.filter((s) => ["en_proceso", "espera"].includes(s.estado) && enMes(s.fechaProgramada)).length +
-    ordenes.filter((o) => ["en_proceso", "espera"].includes(o.estado) && enMes(o.fechaProgramada)).length +
-    serviciosDash.filter((s) => ["en_proceso", "espera"].includes(s.estado) && enMes(s.fecha)).length;
-
-  const completadas =
-    solicitudes.filter((s) => s.estado === "completada" && enMes(s.fechaCompletada)).length +
-    ordenes.filter((o) => o.estado === "completada" && enMes(o.fechaCompletada)).length +
-    serviciosDash.filter((s) => s.estado === "completada" && enMes(s.fechaCompletada)).length;
+  /* Actividades del mes con el mismo criterio que el reporte PDF: órdenes y
+     solicitudes por su mes contable (cierre, si no la fecha programada, si
+     no la del reporte) y servicios por su fecha programada. */
+  const solMes = solicitudes.filter((x) => mesContable(x) === mes);
+  const ordMes = ordenes.filter((x) => mesContable(x) === mes);
+  const srvMes = serviciosDash.filter((x) => mesKey(x.fecha) === mes);
+  const hechas = (xs) => xs.filter((x) => x.estado === "completada").length;
+  const totalMes = solMes.length + ordMes.length + srvMes.length;
+  const completadasMes = hechas(solMes) + hechas(ordMes) + hechas(srvMes);
 
   const alcance = sedeFiltro ? [sedeFiltro] : sedeIds;
   const kpi = useMemo(() => indicadoresMes(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
@@ -3351,8 +3337,9 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
   const porSede = sedes.map((s) => ({
     id: s.id,
     nombre: s.nombre.length > 10 ? s.nombre.slice(0, 9) + "…" : s.nombre,
-    correctivos: data.solicitudes.filter((x) => x.sedeId === s.id).length,
-    preventivos: data.ordenes.filter((x) => x.sedeId === s.id).length,
+    correctivos: data.solicitudes.filter((x) => x.sedeId === s.id && mesContable(x) === mes).length,
+    preventivos: data.ordenes.filter((x) => x.sedeId === s.id && mesContable(x) === mes).length,
+    servicios: (data.servicios || []).filter((x) => x.sedeId === s.id && mesKey(x.fecha) === mes).length,
   }));
 
   const sedeSel = sedeFiltro ? sedes.find((s) => s.id === sedeFiltro) : null;
@@ -3399,10 +3386,10 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
       )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <Stat label="Sin Programar" value={sinProgramar} icon={<AlertTriangle size={14} />} color={COLORS.rojo} sub="Preventivos, correctivos y servicios" />
-        <Stat label="Programadas" value={programadas} icon={<CalendarDays size={14} />} color={COLORS.ambar} />
-        <Stat label="En Ejecución" value={enProceso} icon={<Clock size={14} />} color={COLORS.orange} />
-        <Stat label="Completadas" value={completadas} icon={<CheckCircle2 size={14} />} color={COLORS.verde} />
+        <Stat label="Correctivas del mes" value={solMes.length} icon={<AlertTriangle size={14} />} color={COLORS.charcoal} sub={`${hechas(solMes)} completadas`} />
+        <Stat label="Preventivas del mes" value={ordMes.length} icon={<ClipboardList size={14} />} color={COLORS.orange} sub={`${hechas(ordMes)} completadas`} />
+        <Stat label="Servicios del mes" value={srvMes.length} icon={<Wrench size={14} />} color="#3B6EA5" sub={`${hechas(srvMes)} completados`} />
+        <Stat label="Total completadas" value={completadasMes} icon={<CheckCircle2 size={14} />} color={COLORS.verde} sub={`de ${totalMes} actividades del mes`} />
       </div>
 
       {/* Actividades por sede + avance del plan preventivo */}
@@ -3418,6 +3405,7 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
               <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
               <Bar dataKey="preventivos" name="Preventivos" fill={COLORS.orange} radius={[4, 4, 0, 0]} />
               <Bar dataKey="correctivos" name="Correctivos" fill={COLORS.charcoal} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="servicios" name="Servicios" fill="#3B6EA5" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
