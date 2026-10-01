@@ -1384,7 +1384,9 @@ function solicitudAServicio(sol, { detalle = "", log = null, pasadaPor = "", pas
     detalle,
     fechaReporte: sol.fecha || "", horaReporte: sol.hora || "",
     fecha: "", fechaProgramada: "", horaCompletada: "", fechaCompletada: "",
-    foto: sol.fotoSolicitante || sol.foto || "",
+    // "foto" queda como la imagen de la solicitud; la evidencia del técnico sigue en "fotos"
+    foto: sol.fotoSolicitante || "",
+    fotos: fotosDe(sol),
     tipoProveedor: "", proveedor: "", presupuesto: 0, presupuestoAprobado: null,
     motivoRechazo: "", resolucion: sol.resolucion || "",
     estado: "por_definir",
@@ -2029,6 +2031,85 @@ function FotoUploader({ foto, onChange, readOnly, label = "Foto", carpeta = "gen
   );
 }
 
+/* Fotos de evidencia del técnico. Antes era una sola (campo "foto"); ahora
+   se guardan en "fotos". En un servicio que viene de una solicitud, "foto"
+   es la imagen de la solicitud, así que no cuenta como evidencia. */
+function fotosDe(item) {
+  if (Array.isArray(item?.fotos)) return item.fotos.filter(Boolean);
+  if (item?.tipo === "servicio" || item?.esServicio || item?.trabajo !== undefined) {
+    return item.desdeSolicitud || !item.foto ? [] : [item.foto];
+  }
+  return item?.foto ? [item.foto] : [];
+}
+
+/* Imagen que trae la solicitud (en servicios migrados quedó en "foto"). */
+function fotoSolicitudDe(item) {
+  return item?.fotoSolicitante || (item?.desdeSolicitud ? item.foto : "") || "";
+}
+
+/* Patch para guardar la evidencia: en órdenes y solicitudes "foto" sigue
+   siendo la primera, para los reportes y registros anteriores. */
+function patchFotos(item, fotos) {
+  const esServ = item?.tipo === "servicio";
+  return esServ ? { fotos } : { fotos, foto: fotos[0] || "" };
+}
+
+/* Varias fotos de evidencia: miniaturas que se amplían, se quitan y se suman. */
+function FotosEvidencia({ fotos = [], onChange, readOnly, label = "Evidencia del técnico", carpeta = "general" }) {
+  const inputRef = useRef(null);
+  const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState("");
+  const [ampliada, setAmpliada] = useState(null);
+
+  if (readOnly && !fotos.length) return null;
+
+  return (
+    <Field label={fotos.length > 1 ? `${label} (${fotos.length})` : label}>
+      <div className="flex flex-wrap gap-2 items-start">
+        {fotos.map((f, i) => (
+          <div key={f + i} className="relative">
+            <img src={f} alt={`Evidencia ${i + 1}`} onClick={() => setAmpliada(f)}
+              className="rounded-md h-24 w-24 object-cover border cursor-zoom-in" style={bLine} />
+            {!readOnly && (
+              <button onClick={() => onChange(fotos.filter((_, j) => j !== i))} title="Quitar foto"
+                className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-white border flex items-center justify-center" style={bLine}>
+                <X size={11} color={COLORS.rojo} />
+              </button>
+            )}
+          </div>
+        ))}
+        {!readOnly && (
+          <button onClick={() => inputRef.current?.click()} disabled={cargando}
+            className="h-24 w-24 text-[11px] font-semibold rounded-md border border-dashed flex flex-col items-center justify-center gap-1 disabled:opacity-50"
+            style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+            <Camera size={16} /> {cargando ? "Subiendo…" : fotos.length ? "Agregar otra" : "Adjuntar foto"}
+          </button>
+        )}
+      </div>
+      {error && <p className="text-[10px] mt-1" style={{ color: COLORS.rojo }}>{error}</p>}
+      {ampliada && <ImagenAmpliada src={ampliada} onClose={() => setAmpliada(null)} />}
+      <input ref={inputRef} type="file" accept="image/*" multiple className="hidden"
+        onChange={async (e) => {
+          const files = [...(e.target.files || [])];
+          e.target.value = "";
+          if (!files.length) return;
+          setError(""); setCargando(true);
+          try {
+            const nuevas = [];
+            for (const file of files) {
+              const blob = await comprimirImagen(file);
+              nuevas.push(await uploadFile(`${carpeta}/${uid("foto")}.jpg`, blob));
+            }
+            onChange([...fotos, ...nuevas]);
+          } catch (err) {
+            console.error("[fotos]", err);
+            setError("No se pudo subir alguna imagen. Intenta de nuevo o revisa tu conexión.");
+          } finally { setCargando(false); }
+        }} />
+    </Field>
+  );
+}
+
 /* Satisfacción del servicio: promedio de estrellas y su distribución. */
 function TarjetaSatisfaccion({ sat }) {
   const color = sat.promedio === null ? COLORS.slate
@@ -2124,33 +2205,35 @@ function DetalleActividad({ item, data, onClose }) {
   const costoCon = costoConsumos(item);
   const costo = esServ ? costoServicio(item) : costoCon;
   const matInfo = MAT_ESTADO[item.materialesEstado];
-  const [progPdf, setProgPdf] = useState("");
 
-  // Cotización del servicio en PDF (solo desde el módulo Servicios)
-  const pdfCotizacion = async () => {
-    setProgPdf("Preparando…");
-    try {
-      const blob = await generarPDF(construirCotizacionHTML(item, data), { onProgreso: setProgPdf });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = `cotizacion-${item.codigo || "servicio"}.pdf`;
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error("[pdf cotización]", e);
-    } finally { setProgPdf(""); }
-  };
+  // Los servicios se ven igual para todos: misma ficha, con o sin montos
+  if (esServ) {
+    const conCostos = !item.ocultarCosto;
+    return (
+      <div className="space-y-3">
+        <FichaServicio srv={item} data={data} costos={conCostos} />
+        {conCostos && (item.consumos || []).length > 0 && (
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Consumo de bodega</p>
+              <Chip color={COLORS.orange}>{money(costoCon)}</Chip>
+            </div>
+            <div className="space-y-1">
+              {item.consumos.map((c) => (
+                <div key={c.id} className="flex items-center justify-between text-xs border rounded-md px-2 py-1.5" style={bLine}>
+                  <span style={cChar}>{c.nombre} · {c.cantidad} {c.unidad}</span>
+                  <span className="font-semibold" style={cOrange}>{money(c.cantidad * c.costoUnitario)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-3">
-      {esServ && item.cotizable && (
-        <button onClick={pdfCotizacion} disabled={!!progPdf}
-          className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2 rounded-md text-white disabled:opacity-60"
-          style={{ background: COLORS.orange }}>
-          <FileText size={13} /> {progPdf || "Generar PDF · cotización"}
-        </button>
-      )}
-
       {/* Cabecera */}
       <div className="rounded-md p-3" style={{ background: COLORS.cream, borderLeft: `3px solid ${tipoMeta(item.tipo).color}` }}>
         <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -2285,11 +2368,95 @@ function DetalleActividad({ item, data, onClose }) {
         </Field>
       )}
 
-      {item.foto && (
-        <Field label="Evidencia del técnico">
-          <img src={item.foto} alt="Evidencia del técnico" className="rounded-md max-h-56 border w-full object-contain" style={bLine} />
+      <FotosEvidencia fotos={fotosDe(item)} readOnly />
+    </div>
+  );
+}
+
+/* Ficha de un servicio, la misma para supervisor, cliente, técnico y
+   solicitante. "costos" decide si se muestran montos (el técnico y el
+   solicitante no los ven). srv es el servicio tal como se guarda: "fecha"
+   es la fecha programada y el reporte está en fechaReporte/horaReporte. */
+function FichaServicio({ srv, data, costos = true }) {
+  const [prog, setProg] = useState("");
+  const [ampliada, setAmpliada] = useState(false);
+  const novedad = novedadServicio(srv);
+  const fotoSol = fotoSolicitudDe(srv);
+  const aprobado = srv.presupuestoAprobado != null && !["por_definir", "por_aprobar"].includes(srv.estado);
+
+  const pdf = async () => {
+    setProg("Preparando…");
+    try {
+      const blob = await generarPDF(construirServicioHTML(srv, data, { costos }), { onProgreso: setProg });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `servicio-${srv.codigo || "servicio"}.pdf`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("[pdf servicio]", e);
+    } finally { setProg(""); }
+  };
+
+  const bloque = (titulo, texto, fondo = COLORS.paper) => texto ? (
+    <div>
+      <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>{titulo}</p>
+      <p className="text-xs whitespace-pre-wrap rounded-md p-2.5" style={{ background: fondo, color: COLORS.charcoal }}>{texto}</p>
+    </div>
+  ) : null;
+
+  return (
+    <div className="space-y-2.5 text-left">
+      <div className="rounded-md p-3" style={{ background: COLORS.cream, borderLeft: "3px solid #7B5EA7" }}>
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <TipoChip tipo="servicio" />
+            <span className="text-sm font-bold" style={cChar}>{srv.codigo}</span>
+            {srv.criticidad && CRITICIDAD[srv.criticidad] && <Chip color={CRITICIDAD[srv.criticidad].color}>{CRITICIDAD[srv.criticidad].label}</Chip>}
+          </div>
+          <EstadoChip estado={srv.estado} />
+        </div>
+        <p className="text-sm font-semibold mt-2" style={cChar}>{tituloServicio(srv)}</p>
+        <p className="text-xs mt-0.5" style={cSlate}>{ubicacionTexto(data.sedes, srv)}</p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2.5">
+        <Dato label="Sede">{sedeNombre(data.sedes, srv.sedeId)}</Dato>
+        <Dato label="Solicitó">
+          {srv.solicitanteId
+            ? `${usuarioNombre(data.usuarios, srv.solicitanteId)} · ${srv.fechaReporte || srv.createdAt || ""} ${srv.horaReporte || ""}`
+            : (srv.createdAt || "—")}
+        </Dato>
+        <Dato label="Tipo de proveedor">{srv.tipoProveedor || "Por definir"}</Dato>
+        <Dato label="Proveedor">{srv.proveedor || "Se asigna tras la aprobación"}</Dato>
+        <Dato label="Fecha programada">{srv.fecha || "Sin fecha"}</Dato>
+        {srv.fechaCompletada && (
+          <Dato label="Finalizado">{`${srv.fechaCompletada}${srv.horaCompletada ? ` · ${srv.horaCompletada}` : ""}`}</Dato>
+        )}
+        {costos && srv.presupuesto > 0 && <Dato label="Presupuesto estimado">{money(srv.presupuesto)}</Dato>}
+        {costos && aprobado && <Dato label="Valor aprobado">{money(srv.presupuestoAprobado)}</Dato>}
+      </div>
+
+      {bloque("Detalle de novedad", novedad, COLORS.cream)}
+      {bloque("Detalle del trabajo", srv.detalle)}
+      {bloque("Observaciones", srv.observaciones)}
+      {bloque("Novedades del servicio", srv.resolucion)}
+      {srv.motivoRechazo && bloque("Motivo del rechazo", srv.motivoRechazo, `${COLORS.rojo}12`)}
+
+      {fotoSol && (
+        <Field label="Foto de la solicitud">
+          <img src={fotoSol} alt="Foto de la solicitud" onClick={() => setAmpliada(true)}
+            className="rounded-md max-h-48 border w-full object-contain cursor-zoom-in" style={bLine} />
+          {ampliada && <ImagenAmpliada src={fotoSol} onClose={() => setAmpliada(false)} />}
         </Field>
       )}
+      <FotosEvidencia fotos={fotosDe({ ...srv, tipo: "servicio" })} readOnly />
+
+      <button onClick={pdf} disabled={!!prog}
+        className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2 rounded-md text-white disabled:opacity-60"
+        style={{ background: COLORS.orange }}>
+        <FileText size={13} /> {prog || "Generar PDF"}
+      </button>
     </div>
   );
 }
@@ -3475,7 +3642,13 @@ function TarjetaSolicitudMia({ s, data, onCalificar, onActualizar }) {
         )}
       </div>
 
-      {abierta && (
+      {abierta && s.esServicio && (
+        <div className="px-3 pb-3 border-t pt-3" style={bLine}>
+          <FichaServicio srv={(data.servicios || []).find((x) => x.id === s.id) || s} data={data} costos={false} />
+        </div>
+      )}
+
+      {abierta && !s.esServicio && (
         <div className="px-3 pb-3 border-t pt-3 space-y-2" style={bLine}>
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div>
@@ -3506,13 +3679,7 @@ function TarjetaSolicitudMia({ s, data, onCalificar, onActualizar }) {
             </div>
           )}
 
-          {s.foto && (
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Evidencia del técnico</p>
-              <img src={s.foto} alt="Evidencia del técnico"
-                className="rounded-md max-h-48 border w-full object-contain" style={bLine} />
-            </div>
-          )}
+          <FotosEvidencia fotos={fotosDe(s)} readOnly />
 
           {s.resolucion && (
             <p className="text-xs rounded p-2" style={{ background: COLORS.cream, color: COLORS.charcoal }}>
@@ -4072,7 +4239,7 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
       )}
 
       {tab === "programacion" && (
-        <PanelProgramacion data={data} sedes={misSedes} pendientes={pendientes}
+        <PanelProgramacion data={data} sedes={misSedes} pendientes={pendientes} ocultarCosto
           nota="Vista de solo lectura: aquí puedes consultar lo programado en tu sede, pero no puedes activar ni editar nada." />
       )}
 
@@ -4121,7 +4288,7 @@ function TarjetaPendiente({ item, sedes, usuarios, onActivar, ocultarCosto }) {
           {item.codigo && <span className="text-[10px] font-bold" style={cChar}>{item.codigo}</span>}
         </div>
         <span className="flex items-center gap-1.5 shrink-0">
-          <BotonDetalle item={item} size={13} />
+          <BotonDetalle item={ocultarCosto ? { ...item, ocultarCosto: true } : item} size={13} />
           <Semaforo item={item} />
         </span>
       </div>
@@ -4780,8 +4947,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               <img src={item.fotoSolicitante} alt="Reportado por el solicitante" className="rounded-md max-h-40 border" style={bLine} />
             </Field>
           )}
-          <FotoUploader foto={item.foto} onChange={(foto) => acciones.updateActividad(item, { foto })}
-            label="Evidencia del técnico" carpeta={esPrev ? "ordenes" : esServ ? "servicios" : "solicitudes"} />
+          <FotosEvidencia fotos={fotosDe(item)} onChange={(fotos) => acciones.updateActividad(item, patchFotos(item, fotos))}
+            carpeta={esPrev ? "ordenes" : esServ ? "servicios" : "solicitudes"} />
           {/* Consumo de bodega aplica a los tres tipos: cualquier actividad
               puede gastar material que ya existe en la bodega de su sede.
               Antes estaba limitado a preventivas, así que en correctivos y
@@ -5799,7 +5966,7 @@ function TarjetaAgenda({ act, data, onEditar, ocultarCosto }) {
   // El técnico (vista sin costos) consulta los servicios externos, no los edita
   const editable = !!onEditar && !(esServicio && ocultarCosto);
   return (
-    <div onClick={() => ver(act)} title="Ver detalle completo"
+    <div onClick={() => ver(ocultarCosto ? { ...act, ocultarCosto: true } : act)} title="Ver detalle completo"
       className="border rounded-md p-2.5 cursor-pointer hover:shadow-sm transition-shadow"
       style={{ ...cardStyle, borderLeft: `3px solid ${tipoMeta(act.tipo).color}` }}>
       <div className="flex items-center justify-between gap-2">
@@ -6280,7 +6447,7 @@ function TecnicoServicios({ data, servicios }) {
             {srv.proveedor || "Proveedor por definir"}{srv.fecha ? ` · ${srv.fecha}` : " · sin fecha"}
           </p>
         </div>
-        <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }} size={13} />
+        <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha, ocultarCosto: true }} size={13} />
       </div>
     </div>
   );
@@ -6309,14 +6476,42 @@ function TecnicoServicios({ data, servicios }) {
   );
 }
 
+/* Búsqueda general sobre una actividad: código, textos y ubicación. */
+function coincideBusqueda(x, data, q) {
+  const t = (q || "").trim().toLowerCase();
+  if (!t) return true;
+  return [x.codigo, x.tarea, x.descripcion, x.trabajo, x.detalle, x.proveedor, x.tipoProveedor,
+    x.observaciones, x.resolucion, ubicacionTexto(data.sedes, x),
+    x.solicitanteId ? usuarioNombre(data.usuarios, x.solicitanteId) : ""]
+    .some((v) => (v || "").toLowerCase().includes(t));
+}
+
+/* Filtro por sede y búsqueda general, igual que en Preventivos. */
+function FiltroSedeBusqueda({ sedes, fSede, setFSede, q, setQ, todas = "Todas las sedes", placeholder = "Buscar por código, descripción o ubicación…" }) {
+  return (
+    <div className="flex gap-2 flex-wrap">
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={placeholder}
+        className="flex-1 min-w-44 border rounded-md px-3 py-2 text-sm outline-none" style={inputStyle} />
+      {sedes.length > 1 && (
+        <select value={fSede} onChange={(e) => setFSede(e.target.value)}
+          className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
+          <option value="todas">{todas}</option>
+          {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+        </select>
+      )}
+    </div>
+  );
+}
+
 function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
   const acciones = useAcciones(data, persist, user);
   const [sub, setSub] = useState("preventivos");
   const [fSede, setFSede] = useState("todas");
+  const [q, setQ] = useState("");
 
   // Sedes asignadas al técnico, para poder acotar la vista a una sola
   const misSedes = (data.sedes || []).filter((s) => misSedeIds.includes(s.id));
-  const enSede = (x) => fSede === "todas" || x.sedeId === fSede;
+  const enSede = (x) => (fSede === "todas" || x.sedeId === fSede) && coincideBusqueda(x, data, q);
 
   const misOrdenes = data.ordenes.filter((o) => o.tecnicoId === user.id && enSede(o));
   const misSolicitudes = data.solicitudes.filter((s) => s.tecnicoId === user.id && enSede(s));
@@ -6345,13 +6540,9 @@ function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
         ))}
       </div>
 
-      {misSedes.length > 1 && (
-        <select value={fSede} onChange={(e) => setFSede(e.target.value)}
-          className="w-full border rounded-md px-2 py-2 text-sm bg-white mb-3" style={inputStyle}>
-          <option value="todas">Todas mis sedes</option>
-          {misSedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
-        </select>
-      )}
+      <div className="mb-3">
+        <FiltroSedeBusqueda sedes={misSedes} fSede={fSede} setFSede={setFSede} q={q} setQ={setQ} todas="Todas mis sedes" />
+      </div>
 
       {sub === "preventivos" && <TecnicoPreventivos data={data} acciones={acciones} ordenes={misOrdenes} />}
       {sub === "correctivos" && <TecnicoCorrectivos data={data} acciones={acciones} solicitudes={misSolicitudes} />}
@@ -6363,6 +6554,7 @@ function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
 function AdminCorrectivos({ data, persist, persistYa, user }) {
   const acciones = useAcciones(data, persist, user);
   const [fSede, setFSede] = useState("todas");
+  const [q, setQ] = useState("");
   const [nuevo, setNuevo] = useState(false);
   const [msg, setMsg] = useState("");
 
@@ -6396,7 +6588,7 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
 
   /* Mismas etapas que preventivos y servicios, para que las tres pestañas se
      lean igual: sin programar → programadas → en ejecución → resueltas. */
-  const visibles = data.solicitudes.filter((s) => fSede === "todas" || s.sedeId === fSede);
+  const visibles = data.solicitudes.filter((s) => (fSede === "todas" || s.sedeId === fSede) && coincideBusqueda(s, data, q));
   const sinProgramar = visibles.filter((s) => s.estado === "pendiente")
     .sort((a, b) => (CRITICIDAD[b.criticidad]?.nivel || 0) - (CRITICIDAD[a.criticidad]?.nivel || 0));
   const programadas = visibles.filter((s) => s.estado === "programada")
@@ -6424,13 +6616,7 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
         </div>
       )}
 
-      {data.sedes.length > 1 && (
-        <select value={fSede} onChange={(e) => setFSede(e.target.value)}
-          className="w-full border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
-          <option value="todas">Todas las sedes</option>
-          {data.sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
-        </select>
-      )}
+      <FiltroSedeBusqueda sedes={data.sedes} fSede={fSede} setFSede={setFSede} q={q} setQ={setQ} />
 
       {nuevo && (
         <ModalReportarNovedad data={data} sedes={data.sedes} user={user} elegirSolicitante
@@ -6690,6 +6876,156 @@ function FormDefinirServicio({ srv, onSave, onClose, textoBoton }) {
   );
 }
 
+/* Edición completa del servicio por el supervisor: cualquier dato de la
+   ficha, en cualquier etapa. Los cambios quedan en el historial. */
+const ESTADOS_SERVICIO_EDITABLES = ["por_definir", "por_aprobar", "aprobada", "programada", "en_proceso", "completada", "rechazada"];
+
+function FormEditarServicio({ srv, data, onSave, onClose }) {
+  const [f, setF] = useState(() => ({
+    descripcion: srv.descripcion || "",
+    trabajo: srv.trabajo || "",
+    detalle: srv.detalle || "",
+    sedeId: srv.sedeId || data.sedes[0]?.id || "",
+    faseId: srv.faseId || "",
+    activoId: srv.activoId || "",
+    criticidad: srv.criticidad || "",
+    tipoProveedor: srv.tipoProveedor || "",
+    presupuesto: srv.presupuesto || "",
+    proveedor: srv.proveedor || "",
+    presupuestoAprobado: srv.presupuestoAprobado ?? "",
+    fechaReporte: srv.fechaReporte || srv.createdAt || "",
+    horaReporte: srv.horaReporte || "",
+    fecha: srv.fecha || "",
+    estado: srv.estado || "por_definir",
+    fechaCompletada: srv.fechaCompletada || "",
+    horaCompletada: srv.horaCompletada || "",
+    observaciones: srv.observaciones || "",
+    resolucion: srv.resolucion || "",
+    motivoRechazo: srv.motivoRechazo || "",
+    fotoSolicitante: fotoSolicitudDe(srv),
+    fotos: fotosDe({ ...srv, tipo: "servicio" }),
+  }));
+  const set = (patch) => setF((x) => ({ ...x, ...patch }));
+  const sede = data.sedes.find((x) => x.id === f.sedeId);
+  const fase = sede?.fases.find((x) => x.id === f.faseId);
+  const area = (k, label, rows = 3, hint) => (
+    <Field label={label} hint={hint}>
+      <textarea value={f[k]} onChange={(e) => set({ [k]: e.target.value })} rows={rows}
+        className={`${inputCls} resize-none`} style={inputStyle} />
+    </Field>
+  );
+  const sel = "w-full border rounded-md px-2 py-2 text-sm";
+
+  const guardar = () => {
+    const patch = {
+      ...f,
+      trabajo: f.trabajo.trim(), detalle: f.detalle.trim(), descripcion: f.descripcion.trim(),
+      presupuesto: Number(f.presupuesto) || 0,
+      presupuestoAprobado: f.presupuestoAprobado === "" ? null : Number(f.presupuestoAprobado),
+    };
+    if (srv.desdeSolicitud) patch.foto = f.fotoSolicitante;
+    onSave(patch);
+    onClose();
+  };
+
+  return (
+    <div className="space-y-3">
+      <p className="text-[11px] font-semibold uppercase tracking-wide" style={cSlate}>Solicitud</p>
+      {area("descripcion", "Detalle de novedad", 2, srv.desdeSolicitud ? "Heredado de la solicitud." : undefined)}
+      <Field label="Ubicación">
+        <div className="space-y-1.5">
+          <select value={f.sedeId} onChange={(e) => set({ sedeId: e.target.value, faseId: "", activoId: "" })} className={sel} style={inputStyle}>
+            {data.sedes.map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+          </select>
+          <div className="grid grid-cols-2 gap-1.5">
+            <select value={f.faseId} onChange={(e) => set({ faseId: e.target.value, activoId: "" })} className={sel} style={inputStyle}>
+              <option value="">Fase…</option>
+              {(sede?.fases || []).map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+            </select>
+            <select value={f.activoId} onChange={(e) => set({ activoId: e.target.value })} className={sel} style={inputStyle}>
+              <option value="">Activo…</option>
+              {(fase?.activos || []).map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+            </select>
+          </div>
+        </div>
+      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Fecha y hora de solicitud">
+          <div className="flex gap-1.5">
+            <input type="date" value={f.fechaReporte} onChange={(e) => set({ fechaReporte: e.target.value })}
+              className="flex-1 min-w-0 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
+            <input type="time" value={f.horaReporte} onChange={(e) => set({ horaReporte: e.target.value })}
+              className="w-20 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
+          </div>
+        </Field>
+        <Field label="Criticidad">
+          <select value={f.criticidad} onChange={(e) => set({ criticidad: e.target.value })} className={sel} style={inputStyle}>
+            <option value="">Sin definir</option>
+            {CRITICIDAD_IDS.map((c) => <option key={c} value={c}>{CRITICIDAD[c].label}</option>)}
+          </select>
+        </Field>
+      </div>
+      <FotoUploader foto={f.fotoSolicitante} onChange={(v) => set({ fotoSolicitante: v })} label="Foto de la solicitud" carpeta="solicitudes" />
+
+      <p className="text-[11px] font-semibold uppercase tracking-wide pt-2 border-t" style={{ ...cSlate, ...bLine }}>Servicio</p>
+      <Field label="Trabajo a realizar">
+        <input value={f.trabajo} onChange={(e) => set({ trabajo: e.target.value })} className={inputCls} style={inputStyle} />
+      </Field>
+      {area("detalle", "Detalle del trabajo", 4)}
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Tipo de proveedor">
+          <select value={f.tipoProveedor} onChange={(e) => set({ tipoProveedor: e.target.value })} className={sel} style={inputStyle}>
+            <option value="">Sin clasificar</option>
+            {TIPOS_PROVEEDOR.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </Field>
+        <Field label="Presupuesto estimado (USD)">
+          <input type="number" min="0" step="0.01" value={f.presupuesto} onChange={(e) => set({ presupuesto: e.target.value })}
+            className={inputCls} style={inputStyle} />
+        </Field>
+        <Field label="Proveedor">
+          <input value={f.proveedor} onChange={(e) => set({ proveedor: e.target.value })} className={inputCls} style={inputStyle} />
+        </Field>
+        <Field label="Valor aprobado (USD)" hint="Vacío = aún sin aprobar.">
+          <input type="number" min="0" step="0.01" value={f.presupuestoAprobado} onChange={(e) => set({ presupuestoAprobado: e.target.value })}
+            className={inputCls} style={inputStyle} />
+        </Field>
+        <Field label="Estado">
+          <select value={f.estado} onChange={(e) => set({ estado: e.target.value })} className={sel} style={inputStyle}>
+            {ESTADOS_SERVICIO_EDITABLES.map((e) => <option key={e} value={e}>{ESTADOS[e]?.label || e}</option>)}
+          </select>
+        </Field>
+        <Field label="Fecha programada">
+          <input type="date" value={f.fecha}
+            onChange={(e) => {
+              const v = e.target.value;
+              // La fecha arrastra el estado solo entre aprobado y programado
+              set({ fecha: v, ...(v && f.estado === "aprobada" ? { estado: "programada" } : {}),
+                ...(!v && f.estado === "programada" ? { estado: "aprobada" } : {}) });
+            }}
+            className={inputCls} style={inputStyle} />
+        </Field>
+      </div>
+      <Field label="Fecha y hora de finalización">
+        <div className="flex gap-1.5">
+          <input type="date" value={f.fechaCompletada} onChange={(e) => set({ fechaCompletada: e.target.value })}
+            className="flex-1 min-w-0 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
+          <input type="time" value={f.horaCompletada} onChange={(e) => set({ horaCompletada: e.target.value })}
+            className="w-20 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
+        </div>
+      </Field>
+      {area("observaciones", "Observaciones", 2)}
+      {area("resolucion", "Novedades del servicio", 2)}
+      {(f.estado === "rechazada" || f.motivoRechazo) && area("motivoRechazo", "Motivo del rechazo", 2)}
+      <FotosEvidencia fotos={f.fotos} onChange={(v) => set({ fotos: v })} carpeta="servicios" />
+
+      <button onClick={guardar} className="w-full py-2.5 rounded-md font-semibold text-sm text-white" style={{ background: COLORS.orange }}>
+        Guardar cambios
+      </button>
+    </div>
+  );
+}
+
 /* Cierre del servicio aprobado: proveedor, valor final y fecha. */
 function FormCerrarServicio({ srv, onConfirm, onClose }) {
   const [proveedor, setProveedor] = useState(srv.proveedor || "");
@@ -6753,7 +7089,9 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
   const [modal, setModal] = useState(null);     // {srv, enviar} para definir/editar
   const [cerrar, setCerrar] = useState(null);   // servicio aprobado por definir
 
-  const servicios = data.servicios || [];
+  const [fSede, setFSede] = useState("todas");
+  const [q, setQ] = useState("");
+  const servicios = (data.servicios || []).filter((s) => (fSede === "todas" || s.sedeId === fSede) && coincideBusqueda(s, data, q));
   const set = (id, patch) => persist((data) => ({ ...data, servicios: (data.servicios || []).map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
 
   // Agrupación por etapa, en el mismo orden que preventivos y correctivos
@@ -6789,8 +7127,8 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
         </p>
         <div className="flex items-center gap-2 shrink-0">
           <EstadoChip estado={srv.estado} />
-          <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha, cotizable: true }} size={13} />
-          {!esCliente && srv.estado !== "completada" && (
+          <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }} size={13} />
+          {!esCliente && (
             <button onClick={() => setModal({ srv })} title="Editar la ficha del servicio"><Pencil size={12} color={COLORS.slate} /></button>
           )}
           {!esCliente && (
@@ -6844,6 +7182,9 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
           : "Los servicios nacen de una solicitud (\"Pasar a servicio\" en la actividad). Complétalos y envíalos a aprobación; una vez aprobados, asigna el proveedor y la fecha."}
       </p>
 
+      <FiltroSedeBusqueda sedes={data.sedes} fSede={fSede} setFSede={setFSede} q={q} setQ={setQ}
+        placeholder="Buscar por código, trabajo, proveedor o ubicación…" />
+
       <SeccionPlegable titulo={esCliente ? "Por definir (supervisor)" : "Por definir · completar y enviar a aprobación"} count={porDefinir.length}
         color={ESTADOS.por_definir.color} defaultOpen={!esCliente && porDefinir.length > 0}>
         {porDefinir.map((s) => tarjeta(s, !esCliente &&
@@ -6890,9 +7231,14 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
 
       {!esCliente && modal && (
         <Modal title={`${modal.enviar ? "Definir" : "Editar"} ${modal.srv.codigo}`} onClose={() => setModal(null)} wide>
-          <FormDefinirServicio srv={modal.srv} onClose={() => setModal(null)}
-            textoBoton={modal.enviar ? "Enviar a aprobación del cliente" : "Guardar cambios"}
-            onSave={(f) => set(modal.srv.id, modal.enviar ? { ...f, estado: "por_aprobar" } : f)} />
+          {modal.enviar ? (
+            <FormDefinirServicio srv={modal.srv} onClose={() => setModal(null)}
+              textoBoton="Enviar a aprobación del cliente"
+              onSave={(f) => set(modal.srv.id, { ...f, estado: "por_aprobar" })} />
+          ) : (
+            <FormEditarServicio srv={modal.srv} data={data} onClose={() => setModal(null)}
+              onSave={(patch) => acciones.updateActividad({ ...modal.srv, tipo: "servicio" }, patch)} />
+          )}
         </Modal>
       )}
 
@@ -7059,46 +7405,7 @@ function TarjetaServicioCliente({ srv, data, onDecidir }) {
 
   return (
     <div className="border rounded-md p-3" style={{ ...cardStyle, borderLeft: `3px solid #7B5EA7` }}>
-      <div className="flex items-center gap-1.5 flex-wrap mb-1">
-        <TipoChip tipo="servicio" />
-        <span className="text-[10px] font-bold" style={cChar}>{srv.codigo}</span>
-        {srv.tipoProveedor && <Chip>{srv.tipoProveedor}</Chip>}
-      </div>
-
-      <p className="text-sm font-semibold" style={cChar}>{tituloServicio(srv)}</p>
-      <p className="text-xs" style={cSlate}>{ubicacionTexto(data.sedes, srv)}</p>
-
-      {novedadServicio(srv) && (
-        <div className="mt-2">
-          <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Detalle de novedad</p>
-          <p className="text-xs whitespace-pre-wrap rounded-md p-2.5" style={{ background: COLORS.cream, color: COLORS.charcoal }}>
-            {novedadServicio(srv)}
-          </p>
-        </div>
-      )}
-
-      {srv.detalle && (
-        <div className="mt-2">
-          <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Detalle del trabajo</p>
-          <p className="text-xs whitespace-pre-wrap rounded-md p-2.5" style={{ background: COLORS.paper, color: COLORS.charcoal }}>
-            {srv.detalle}
-          </p>
-        </div>
-      )}
-
-      <div className="grid grid-cols-2 gap-2 mt-2">
-        <Dato label="Sede">{sedeNombre(data.sedes, srv.sedeId)}</Dato>
-        <Dato label="Tipo de proveedor">{srv.tipoProveedor || "Sin clasificar"}</Dato>
-        <Dato label="Solicitado el">{srv.createdAt || "—"}</Dato>
-        <Dato label="Proveedor">{srv.proveedor || "Se define al aprobar"}</Dato>
-      </div>
-
-      {srv.foto && (
-        <div className="mt-2">
-          <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Evidencia</p>
-          <img src={srv.foto} alt="Referencia" className="rounded-md max-h-48 border w-full object-contain" style={bLine} />
-        </div>
-      )}
+      <FichaServicio srv={srv} data={data} />
 
       <div className="flex items-center justify-between gap-2 mt-2.5 pt-2.5 border-t" style={bLine}>
         <span className="text-xs" style={cSlate}>Presupuesto solicitado</span>
@@ -7811,19 +8118,20 @@ function VistaPlanAnual({ data, sedes }) {
   );
 }
 
-/* Cotización de un servicio (formato provisional): datos de la solicitud,
-   trabajo a realizar, detalles y valores. */
-function construirCotizacionHTML(srv, data) {
+/* PDF de un servicio (formato provisional): datos de la solicitud, trabajo
+   a realizar, detalles, valores (si se muestran costos) y fotos. */
+function construirServicioHTML(srv, data, { costos = true } = {}) {
   const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
   const novedad = novedadServicio(srv);
-  const foto = srv.foto || srv.fotoSolicitante || "";
+  const foto = fotoSolicitudDe(srv);
+  const evidencias = fotosDe({ ...srv, tipo: "servicio" });
   const dato = (k, v) => (v ? `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>` : "");
   const bloque = (k, v) => (v ? `<h3>${esc(k)}</h3><p class="txt">${esc(v)}</p>` : "");
   const aprobado = srv.presupuestoAprobado != null && srv.estado !== "por_aprobar" && srv.estado !== "por_definir";
 
   return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
-<title>Cotización ${esc(srv.codigo)}</title>
+<title>Servicio ${esc(srv.codigo)}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:9pt;line-height:1.4;padding:6px}
@@ -7845,10 +8153,11 @@ thead th{background:#35383C;color:#fff;font-size:7pt;text-transform:uppercase;te
 td.v{text-align:right;font-weight:700;width:130px}
 tr.tot td{background:#FDEEE7;color:#ED5B23;font-size:10pt}
 .foto{margin-top:6px;max-height:230px;max-width:100%;border:1px solid #E3E0D8}
+.foto.ev{max-height:160px;max-width:48%;margin-right:6px}
 .pie{margin-top:14px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.8pt;color:#8D939B;display:flex;justify-content:space-between}
 </style></head><body>
 <div class="hdr">
-  <div><h1>Cotización de servicio</h1><p class="sub">${esc(srv.codigo)} · ${esc(ESTADOS[srv.estado]?.label || srv.estado)}</p></div>
+  <div><h1>Orden de servicio</h1><p class="sub">${esc(srv.codigo)} · ${esc(ESTADOS[srv.estado]?.label || srv.estado)}</p></div>
   <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div>
 </div>
 <div class="datos">
@@ -7863,12 +8172,16 @@ tr.tot td{background:#FDEEE7;color:#ED5B23;font-size:10pt}
 <h2>${esc(tituloServicio(srv))}</h2>
 ${bloque("Detalle de novedad", novedad)}
 ${bloque("Detalle del trabajo", srv.detalle)}
-<h3>Valores</h3>
+${bloque("Observaciones", srv.observaciones)}
+${bloque("Novedades del servicio", srv.resolucion)}
+${bloque("Motivo del rechazo", srv.motivoRechazo)}
+${costos ? `<h3>Valores</h3>
 <table><thead><tr><th>Concepto</th><th style="text-align:right">Valor (USD)</th></tr></thead><tbody>
   <tr><td>Presupuesto estimado</td><td class="v">${esc(money(srv.presupuesto || 0))}</td></tr>
   ${aprobado ? `<tr class="tot"><td>Valor aprobado</td><td class="v">${esc(money(srv.presupuestoAprobado))}</td></tr>` : ""}
-</tbody></table>
-${foto ? `<h3>Evidencia de la solicitud</h3><img class="foto" src="${esc(foto)}" alt="Evidencia">` : ""}
+</tbody></table>` : ""}
+${foto ? `<h3>Foto de la solicitud</h3><img class="foto" src="${esc(foto)}" alt="Foto de la solicitud">` : ""}
+${evidencias.length ? `<h3>Evidencia del técnico</h3><div>${evidencias.map((f) => `<img class="foto ev" src="${esc(f)}" alt="Evidencia">`).join("")}</div>` : ""}
 <div class="pie"><span>Documento generado desde IndustriaMe</span><span>${esc(srv.codigo)}</span></div>
 </body></html>`;
 }
@@ -9023,9 +9336,9 @@ function construirReporteHTML(items, data, meta) {
       </div>
 
       ${checklistHTML(a.checklist)}
-      ${(a.fotoSolicitante || a.foto) ? `<div class="blk"><h4>Registro fotográfico</h4><div class="fotos">
-        ${a.fotoSolicitante ? `<figure><img src="${a.fotoSolicitante}"><figcaption>Reportado por el solicitante</figcaption></figure>` : ""}
-        ${a.foto ? `<figure><img src="${a.foto}"><figcaption>Evidencia del técnico</figcaption></figure>` : ""}
+      ${(fotoSolicitudDe(a) || fotosDe(a).length) ? `<div class="blk"><h4>Registro fotográfico</h4><div class="fotos">
+        ${fotoSolicitudDe(a) ? `<figure><img src="${fotoSolicitudDe(a)}"><figcaption>Reportado por el solicitante</figcaption></figure>` : ""}
+        ${fotosDe(a).map((f, i, arr) => `<figure><img src="${f}"><figcaption>Evidencia del técnico${arr.length > 1 ? ` ${i + 1}` : ""}</figcaption></figure>`).join("")}
       </div></div>` : ""}
       ${(a.reprogramaciones || []).length ? `<div class="blk"><h4>Reprogramaciones (${a.reprogramaciones.length})</h4>${
         a.reprogramaciones.map((r) => `<div class="rep">
