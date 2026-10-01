@@ -543,7 +543,7 @@ function actividadesDeSedeMes(data, sedeId, mes) {
        material gastado mientras era correctivo). Sin fecha programada todavía,
        se ubican por la fecha del reporte o de creación. */
     ...(data.servicios || []).map((x) => ({
-      ...x, tipo: "servicio", tarea: x.trabajo, fechaProgramada: x.fecha || x.fechaReporte || x.createdAt || "",
+      ...x, tipo: "servicio", tarea: tituloServicio(x), fechaProgramada: x.fecha || x.fechaReporte || x.createdAt || "",
     })),
   ];
   return todas.filter((a) => a.sedeId === sedeId && mesContable(a) === mes);
@@ -979,7 +979,7 @@ function getPendientes(data) {
       key: `srv|${sv.id}`,
       tipo: "servicio",
       servicioId: sv.id, codigo: sv.codigo,
-      tarea: sv.trabajo, proveedor: sv.proveedor,
+      tarea: tituloServicio(sv), proveedor: sv.proveedor,
       presupuesto: sv.presupuesto, fecha: sv.fecha, estadoServicio: sv.estado,
       sedeId: sv.sedeId, faseId: sv.faseId, activoId: sv.activoId,
     });
@@ -1094,7 +1094,7 @@ function normalizeData(raw) {
     proveedor: x.proveedor || "",
     presupuesto: Number(x.presupuesto) || 0,
     // Valor con el que el cliente aprobó; si no hay, se asume el solicitado
-    presupuestoAprobado: x.presupuestoAprobado === undefined || x.presupuestoAprobado === ""
+    presupuestoAprobado: x.presupuestoAprobado == null || x.presupuestoAprobado === ""
       ? null : Number(x.presupuestoAprobado),
     foto: x.foto || "",
     observaciones: x.observaciones || "",
@@ -1378,7 +1378,9 @@ function useSystemData() {
 function solicitudAServicio(sol, { detalle = "", log = null, pasadaPor = "", pasadaEn = "" } = {}) {
   return {
     ...sol,
-    trabajo: sol.descripcion || "",
+    // El título lo pone el supervisor; la descripción de la solicitud queda
+    // como "Detalle de novedad" (heredado) y el técnico aporta el detalle.
+    trabajo: "",
     detalle,
     fechaReporte: sol.fecha || "", horaReporte: sol.hora || "",
     fecha: "", fechaProgramada: "", horaCompletada: "", fechaCompletada: "",
@@ -1390,6 +1392,17 @@ function solicitudAServicio(sol, { detalle = "", log = null, pasadaPor = "", pas
     desdeSolicitud: true, pasadaPor, pasadaEn,
     log: log ? [...(sol.log || []), log] : (sol.log || []),
   };
+}
+
+/* Título visible del servicio: el "Trabajo a realizar" que define el
+   supervisor o, mientras no lo haya, la novedad que trae la solicitud. */
+function tituloServicio(s) {
+  return s.trabajo || s.descripcion || "Servicio por definir";
+}
+
+/* Descripción heredada de la solicitud que originó el servicio. */
+function novedadServicio(s) {
+  return s.desdeSolicitud ? (s.descripcion || "") : "";
 }
 
 function useAcciones(data, persist, usuario) {
@@ -2111,9 +2124,33 @@ function DetalleActividad({ item, data, onClose }) {
   const costoCon = costoConsumos(item);
   const costo = esServ ? costoServicio(item) : costoCon;
   const matInfo = MAT_ESTADO[item.materialesEstado];
+  const [progPdf, setProgPdf] = useState("");
+
+  // Cotización del servicio en PDF (solo desde el módulo Servicios)
+  const pdfCotizacion = async () => {
+    setProgPdf("Preparando…");
+    try {
+      const blob = await generarPDF(construirCotizacionHTML(item, data), { onProgreso: setProgPdf });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `cotizacion-${item.codigo || "servicio"}.pdf`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("[pdf cotización]", e);
+    } finally { setProgPdf(""); }
+  };
 
   return (
     <div className="space-y-3">
+      {esServ && item.cotizable && (
+        <button onClick={pdfCotizacion} disabled={!!progPdf}
+          className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2 rounded-md text-white disabled:opacity-60"
+          style={{ background: COLORS.orange }}>
+          <FileText size={13} /> {progPdf || "Generar PDF · cotización"}
+        </button>
+      )}
+
       {/* Cabecera */}
       <div className="rounded-md p-3" style={{ background: COLORS.cream, borderLeft: `3px solid ${tipoMeta(item.tipo).color}` }}>
         <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -2149,7 +2186,7 @@ function DetalleActividad({ item, data, onClose }) {
           <Dato label="Fecha de inicio">{item.fechaInicial}</Dato>
         )}
         {item.solicitanteId && (
-          <Dato label="Solicitó">{`${usuarioNombre(data.usuarios, item.solicitanteId)} · ${item.fecha || ""} ${item.hora || ""}`}</Dato>
+          <Dato label="Solicitó">{`${usuarioNombre(data.usuarios, item.solicitanteId)} · ${(esServ ? item.fechaReporte : item.fecha) || ""} ${(esServ ? item.horaReporte : item.hora) || ""}`}</Dato>
         )}
         {esPrev && item.frecuencia && <Dato label="Frecuencia">{item.frecuencia}</Dato>}
         {item.categoria && <Dato label="Categoría">{item.categoria}</Dato>}
@@ -2161,6 +2198,13 @@ function DetalleActividad({ item, data, onClose }) {
       </div>
 
       {/* Procedimiento */}
+      {esServ && novedadServicio(item) && (
+        <Field label="Detalle de novedad">
+          <p className="text-xs whitespace-pre-wrap rounded-md p-2.5" style={{ background: COLORS.paper, color: COLORS.charcoal }}>
+            {novedadServicio(item)}
+          </p>
+        </Field>
+      )}
       {item.detalle && (
         <Field label="Detalle del trabajo">
           <p className="text-xs whitespace-pre-wrap rounded-md p-2.5" style={{ background: COLORS.paper, color: COLORS.charcoal }}>
@@ -3909,7 +3953,7 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
   const misSolicitudes = [
     ...data.solicitudes.filter((s) => s.solicitanteId === user.id),
     ...(data.servicios || []).filter((x) => x.desdeSolicitud && x.solicitanteId === user.id).map((x) => ({
-      ...x, esServicio: true, descripcion: x.trabajo,
+      ...x, esServicio: true, descripcion: x.descripcion || x.trabajo,
       fecha: x.fechaReporte || x.createdAt || "", hora: x.horaReporte || "",
       fechaProgramada: x.fecha || "",
     })),
@@ -4262,8 +4306,9 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   const [sedeId, setSedeId] = useState(item.sedeId || "");
   const [faseId, setFaseId] = useState(item.faseId || "");
   const [activoId, setActivoId] = useState(item.activoId || "");
-  const [fecha, setFecha] = useState(item.fecha || "");
-  const [hora, setHora] = useState(item.hora || "");
+  // En un servicio "fecha" es la programada; el reporte está en fechaReporte/horaReporte
+  const [fecha, setFecha] = useState((esServ ? item.fechaReporte : item.fecha) || "");
+  const [hora, setHora] = useState((esServ ? item.horaReporte : item.hora) || "");
   const [fProg, setFProg] = useState((esServ ? item.fecha : item.fechaProgramada) || "");
   const [fCompl, setFCompl] = useState(item.fechaCompletada || "");
   const [hCompl, setHCompl] = useState(item.horaCompletada || "");
@@ -4293,7 +4338,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
     setCriticidad(item.criticidad || "");
     setSolicitanteId(item.solicitanteId || "");
     setSedeId(item.sedeId || ""); setFaseId(item.faseId || ""); setActivoId(item.activoId || "");
-    setFecha(item.fecha || ""); setHora(item.hora || "");
+    setFecha((esServ ? item.fechaReporte : item.fecha) || ""); setHora((esServ ? item.horaReporte : item.hora) || "");
     setFProg((esServ ? item.fecha : item.fechaProgramada) || "");
     setFCompl(item.fechaCompletada || ""); setHCompl(item.horaCompletada || "");
     setProveedor(item.proveedor || ""); setPresu(item.presupuesto ?? "");
@@ -4340,6 +4385,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
         patch.presupuesto = Number(presu) || 0;
         patch.presupuestoAprobado = presuAp === "" ? null : Number(presuAp);
         patch.fecha = fProg;
+        patch.fechaReporte = fecha; patch.horaReporte = hora;
       } else if (esPrev) {
         patch.tarea = txt;
         patch.fechaProgramada = fProg;
@@ -4423,8 +4469,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
       dif(sedeId, item.sedeId) ||
       dif(faseId, item.faseId) ||
       dif(activoId, item.activoId) ||
-      dif(fecha, item.fecha) ||
-      dif(hora, item.hora) ||
+      dif(fecha, esServ ? item.fechaReporte : item.fecha) ||
+      dif(hora, esServ ? item.horaReporte : item.hora) ||
       dif(fProg, esServ ? item.fecha : item.fechaProgramada) ||
       dif(fCompl, item.fechaCompletada) ||
       dif(hCompl, item.horaCompletada) ||
@@ -4611,6 +4657,11 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
 
           {corrige ? (
             <>
+              {esServ && novedadServicio(item) && (
+                <Field label="Detalle de novedad" hint="Heredado de la solicitud.">
+                  <ReadOnly>{novedadServicio(item)}</ReadOnly>
+                </Field>
+              )}
               <Field label={esServ ? "Trabajo a realizar" : esPrev ? "Tarea" : "Descripción de la solicitud"}>
                 {esPrev || esServ ? (
                   <input value={txt} onChange={(e) => setTxt(e.target.value)} className={inputCls} style={inputStyle} />
@@ -4657,7 +4708,12 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               )}
             </>
           ) : (
-            !esPrev && <Field label="Descripción de la solicitud"><ReadOnly>{item.descripcion}</ReadOnly></Field>
+            esServ ? (
+              <>
+                {novedadServicio(item) && <Field label="Detalle de novedad"><ReadOnly>{novedadServicio(item)}</ReadOnly></Field>}
+                {item.detalle && <Field label="Detalle del trabajo"><ReadOnly>{item.detalle}</ReadOnly></Field>}
+              </>
+            ) : !esPrev && <Field label="Descripción de la solicitud"><ReadOnly>{item.descripcion}</ReadOnly></Field>
           )}
 
           {corrige && esCorr && (
@@ -5823,7 +5879,7 @@ function Calendario({ data, sedes, tecnicoDefault, onEditar, ocultarCosto, fCrit
     const cor = data.solicitudes.filter((s) => s.fechaProgramada && enAlcance(s)).map((s) => ({ ...s, tipo: "correctivo", tarea: s.descripcion }));
     // Los servicios externos se agendan por su fecha programada
     const srv = (data.servicios || []).filter((x) => x.fecha && enAlcance(x)).map((x) => ({
-      ...x, tipo: "servicio", tarea: x.trabajo, fechaProgramada: x.fecha, tecnicoId: "",
+      ...x, tipo: "servicio", tarea: tituloServicio(x), fechaProgramada: x.fecha, tecnicoId: "",
     }));
     return [...pre, ...cor, ...srv];
   }, [data.ordenes, data.solicitudes, data.servicios, sedeIds.join(",")]);
@@ -6218,13 +6274,13 @@ function TecnicoServicios({ data, servicios }) {
             <EstadoChip estado={srv.estado} />
             {srv.tipoProveedor && <Chip>{srv.tipoProveedor}</Chip>}
           </div>
-          <p className="text-sm font-semibold mt-1" style={cChar}>{srv.trabajo}</p>
+          <p className="text-sm font-semibold mt-1" style={cChar}>{tituloServicio(srv)}</p>
           <p className="text-xs" style={cSlate}>{ubicacionTexto(data.sedes, srv)}</p>
           <p className="text-[11px] mt-1" style={cSlate}>
             {srv.proveedor || "Proveedor por definir"}{srv.fecha ? ` · ${srv.fecha}` : " · sin fecha"}
           </p>
         </div>
-        <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: srv.trabajo, fechaProgramada: srv.fecha }} size={13} />
+        <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }} size={13} />
       </div>
     </div>
   );
@@ -6593,12 +6649,20 @@ function FormDefinirServicio({ srv, onSave, onClose, textoBoton }) {
   const [presupuesto, setPresupuesto] = useState(srv.presupuesto || "");
   const valido = trabajo.trim() && detalle.trim() && Number(presupuesto) > 0;
 
+  const novedad = novedadServicio(srv);
+
   return (
     <div className="space-y-3">
-      <Field label="Trabajo a realizar" hint="Título corto que identifica el servicio.">
-        <input value={trabajo} onChange={(e) => setTrabajo(e.target.value)} className={inputCls} style={inputStyle} />
+      {novedad && (
+        <div className="rounded-md p-2.5" style={{ background: COLORS.cream }}>
+          <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Detalle de novedad · de la solicitud</p>
+          <p className="text-xs whitespace-pre-wrap" style={cChar}>{novedad}</p>
+        </div>
+      )}
+      <Field label="Trabajo a realizar" hint="Título corto que identifica el servicio. Lo define el supervisor.">
+        <input autoFocus={!trabajo} value={trabajo} onChange={(e) => setTrabajo(e.target.value)} className={inputCls} style={inputStyle} />
       </Field>
-      <Field label="Detalle del trabajo" hint="Alcance completo. Es lo que el cliente lee para decidir.">
+      <Field label="Detalle del trabajo" hint="Lo registró quien pasó la solicitud a servicio. Ajústalo si hace falta: es lo que el cliente lee para decidir.">
         <textarea value={detalle} onChange={(e) => setDetalle(e.target.value)} rows={5}
           className={`${inputCls} resize-none`} style={inputStyle} />
       </Field>
@@ -6635,7 +6699,7 @@ function FormCerrarServicio({ srv, onConfirm, onClose }) {
   return (
     <div className="space-y-3">
       <div className="rounded-md p-2.5" style={{ background: COLORS.cream }}>
-        <p className="text-xs font-semibold" style={cChar}>{srv.trabajo}</p>
+        <p className="text-xs font-semibold" style={cChar}>{tituloServicio(srv)}</p>
         <p className="text-[11px] mt-1" style={cSlate}>
           Aprobado por el cliente en <span className="font-semibold" style={cChar}>{money(srv.presupuestoAprobado ?? srv.presupuesto)}</span>
         </p>
@@ -6701,51 +6765,44 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
   const finalizados = servicios.filter((s) => s.estado === "completada");
   const rechazados = servicios.filter((s) => s.estado === "rechazada");
 
+  const [gestionar, setGestionar] = useState(null);   // id del servicio en curso desplegado
+
+  /* Fila compacta: código, estado, título y monto en una línea; ubicación,
+     proveedor y fecha en la segunda. El detalle completo se abre con (i). */
   const tarjeta = (srv, extra) => (
-    <div key={srv.id} className="border rounded-md p-3" style={{ ...cardStyle, borderLeft: `3px solid ${ESTADOS[srv.estado]?.color || COLORS.line}` }}>
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-[10px] font-bold" style={cChar}>{srv.codigo}</span>
-            <EstadoChip estado={srv.estado} />
-            {srv.tipoProveedor && <Chip>{srv.tipoProveedor}</Chip>}
-          </div>
-          <p className="text-sm font-semibold mt-1" style={cChar}>{srv.trabajo}</p>
-          {srv.detalle && <p className="text-xs mt-0.5" style={cSlate}>{srv.detalle.length > 110 ? srv.detalle.slice(0, 108) + "…" : srv.detalle}</p>}
-          <p className="text-xs" style={cSlate}>{ubicacionTexto(data.sedes, srv)}</p>
-          <p className="text-[11px] mt-1" style={cSlate}>
-            {srv.proveedor || "Proveedor por definir"}
-            {srv.fecha ? ` · ${srv.fecha}` : " · sin fecha"}
-          </p>
-          {srv.solicitanteId && (
-            <p className="text-[10px]" style={cSlate}>
-              Solicitó {usuarioNombre(data.usuarios, srv.solicitanteId)}{srv.fechaReporte ? ` el ${srv.fechaReporte}` : ""}
-            </p>
+    <div key={srv.id} className="border rounded-md px-2.5 py-2 text-left" style={{ ...cardStyle, borderLeft: `3px solid ${ESTADOS[srv.estado]?.color || COLORS.line}` }}>
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] font-bold shrink-0" style={cChar}>{srv.codigo}</span>
+        <p className="text-xs font-semibold truncate flex-1 min-w-0" style={cChar} title={tituloServicio(srv)}>{tituloServicio(srv)}</p>
+        <span className="text-xs font-bold shrink-0" style={cOrange}>
+          {!srv.presupuesto && !srv.presupuestoAprobado ? "—"
+            : ["por_definir", "por_aprobar", "rechazada"].includes(srv.estado) ? money(srv.presupuesto)
+            : money(srv.presupuestoAprobado ?? srv.presupuesto)}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 mt-1">
+        <p className="text-[10px] truncate flex-1 min-w-0" style={cSlate}>
+          {sedeNombre(data.sedes, srv.sedeId)}
+          {srv.tipoProveedor ? ` · ${srv.tipoProveedor}` : ""}
+          {srv.proveedor ? ` · ${srv.proveedor}` : ""}
+          {srv.fecha ? ` · ${srv.fecha}` : ""}
+        </p>
+        <div className="flex items-center gap-2 shrink-0">
+          <EstadoChip estado={srv.estado} />
+          <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha, cotizable: true }} size={13} />
+          {!esCliente && srv.estado !== "completada" && (
+            <button onClick={() => setModal({ srv })} title="Editar la ficha del servicio"><Pencil size={12} color={COLORS.slate} /></button>
           )}
-        </div>
-        <div className="flex flex-col items-end gap-1.5 shrink-0">
-          <span className="text-sm font-bold" style={cOrange}>
-            {srv.estado === "por_definir" && !srv.presupuesto ? "—" : money(srv.presupuestoAprobado ?? srv.presupuesto)}
-          </span>
-          {srv.presupuestoAprobado != null && srv.presupuestoAprobado !== srv.presupuesto && (
-            <span className="text-[10px]" style={cSlate}>solicitado {money(srv.presupuesto)}</span>
+          {!esCliente && (
+            <DeleteBtn onConfirm={() => {
+              marcarBorrado("servicios", srv.id);
+              persist((data) => ({ ...data, servicios: (data.servicios || []).filter((x) => x.id !== srv.id) }));
+            }} />
           )}
-          <div className="flex items-center gap-1.5">
-            <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: srv.trabajo, fechaProgramada: srv.fecha }} size={13} />
-            {!esCliente && srv.estado !== "completada" && (
-              <button onClick={() => setModal({ srv })} title="Editar la ficha del servicio"><Pencil size={13} color={COLORS.slate} /></button>
-            )}
-            {!esCliente && (
-              <DeleteBtn onConfirm={() => {
-                marcarBorrado("servicios", srv.id);
-                persist((data) => ({ ...data, servicios: (data.servicios || []).filter((x) => x.id !== srv.id) }));
-              }} />
-            )}
-          </div>
         </div>
       </div>
       {srv.motivoRechazo && (
-        <p className="text-[11px] mt-2 rounded p-2" style={{ background: `${COLORS.rojo}12`, color: COLORS.charcoal }}>
+        <p className="text-[10px] mt-1.5 rounded px-2 py-1" style={{ background: `${COLORS.rojo}12`, color: COLORS.charcoal }}>
           <b>Rechazado:</b> {srv.motivoRechazo}
         </p>
       )}
@@ -6753,22 +6810,34 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
     </div>
   );
 
-  // Programados y en ejecución: el supervisor los trabaja en la tarjeta; el cliente solo los consulta
-  const enCurso = (srv) => esCliente ? tarjeta(srv) : (
-    <div key={srv.id}>
-      <div className="flex justify-end mb-1">
-        <button onClick={() => setModal({ srv })} className="flex items-center gap-1 text-[10px] font-semibold" style={cSlate}>
-          <Pencil size={10} /> Editar ficha
-        </button>
-      </div>
-      <TarjetaActividad
-        item={{ ...srv, tipo: "servicio", tarea: srv.trabajo, fechaProgramada: srv.fecha }}
-        data={data} acciones={acciones} rol="admin" />
-    </div>
+  const botonAccion = (texto, color, onClick) => (
+    <button onClick={onClick} className="w-full mt-1.5 text-[11px] font-semibold py-1.5 rounded text-white" style={{ background: color }}>
+      {texto}
+    </button>
   );
 
+  // Programados y en ejecución: el supervisor los despliega para trabajarlos; el cliente solo los consulta
+  const enCurso = (srv) => tarjeta(srv, !esCliente && (
+    gestionar === srv.id ? (
+      <div className="mt-2">
+        <TarjetaActividad
+          item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }}
+          data={data} acciones={acciones} rol="admin" abiertoInicial />
+        <button onClick={() => setGestionar(null)} className="w-full mt-1 text-[10px] font-semibold" style={cSlate}>Ocultar</button>
+      </div>
+    ) : botonAccion("Gestionar", COLORS.slate, () => setGestionar(srv.id))
+  ));
+
+  // El cliente revisa la ficha completa solo al desplegarla para decidir
+  const enAprobacion = (srv) => !esCliente ? tarjeta(srv) : gestionar === srv.id ? (
+    <div key={srv.id}>
+      <TarjetaServicioCliente srv={srv} data={data} onDecidir={(patch) => { set(srv.id, patch); setGestionar(null); }} />
+      <button onClick={() => setGestionar(null)} className="w-full mt-1 text-[10px] font-semibold" style={cSlate}>Ocultar</button>
+    </div>
+  ) : tarjeta(srv, botonAccion("Revisar y decidir", ESTADOS.por_aprobar.color, () => setGestionar(srv.id)));
+
   return (
-    <div className="mt-4 space-y-5">
+    <div className="mt-4 space-y-3">
       <p className="text-xs" style={cSlate}>
         {esCliente
           ? "Servicios externos por etapa. En \"En aprobación\" decides si se autorizan; el resto es para consulta."
@@ -6777,32 +6846,20 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
 
       <SeccionPlegable titulo={esCliente ? "Por definir (supervisor)" : "Por definir · completar y enviar a aprobación"} count={porDefinir.length}
         color={ESTADOS.por_definir.color} defaultOpen={!esCliente && porDefinir.length > 0}>
-        {porDefinir.map((s) => tarjeta(s, !esCliente && (
-          <button onClick={() => setModal({ srv: s, enviar: true })}
-            className="w-full mt-2 text-xs font-semibold py-2 rounded-md text-white"
-            style={{ background: ESTADOS.por_definir.color }}>
-            Completar y enviar a aprobación
-          </button>
-        )))}
+        {porDefinir.map((s) => tarjeta(s, !esCliente &&
+          botonAccion("Completar y enviar a aprobación", ESTADOS.por_definir.color, () => setModal({ srv: s, enviar: true }))))}
         {porDefinir.length === 0 && <Empty>Nada por definir.</Empty>}
       </SeccionPlegable>
 
       <SeccionPlegable titulo={esCliente ? "En aprobación · tu decisión" : "En espera de aprobación del cliente"} count={porAprobar.length}
         color={ESTADOS.por_aprobar.color} defaultOpen={esCliente}>
-        {porAprobar.map((s) => esCliente ? (
-          <TarjetaServicioCliente key={s.id} srv={s} data={data} onDecidir={(patch) => set(s.id, patch)} />
-        ) : tarjeta(s))}
+        {porAprobar.map(enAprobacion)}
         {porAprobar.length === 0 && <Empty>Sin servicios esperando aprobación.</Empty>}
       </SeccionPlegable>
 
       <SeccionPlegable titulo="Aprobados · por definir proveedor y fecha" count={aprobados.length} color={ESTADOS.aprobada.color}>
-        {aprobados.map((s) => tarjeta(s, !esCliente && (
-          <button onClick={() => setCerrar(s)}
-            className="w-full mt-2 text-xs font-semibold py-2 rounded-md text-white"
-            style={{ background: COLORS.orange }}>
-            Definir proveedor y fecha
-          </button>
-        )))}
+        {aprobados.map((s) => tarjeta(s, !esCliente &&
+          botonAccion("Definir proveedor y fecha", COLORS.orange, () => setCerrar(s))))}
         {aprobados.length === 0 && <Empty>Nada aprobado pendiente de programar.</Empty>}
       </SeccionPlegable>
 
@@ -7008,8 +7065,17 @@ function TarjetaServicioCliente({ srv, data, onDecidir }) {
         {srv.tipoProveedor && <Chip>{srv.tipoProveedor}</Chip>}
       </div>
 
-      <p className="text-sm font-semibold" style={cChar}>{srv.trabajo}</p>
+      <p className="text-sm font-semibold" style={cChar}>{tituloServicio(srv)}</p>
       <p className="text-xs" style={cSlate}>{ubicacionTexto(data.sedes, srv)}</p>
+
+      {novedadServicio(srv) && (
+        <div className="mt-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Detalle de novedad</p>
+          <p className="text-xs whitespace-pre-wrap rounded-md p-2.5" style={{ background: COLORS.cream, color: COLORS.charcoal }}>
+            {novedadServicio(srv)}
+          </p>
+        </div>
+      )}
 
       {srv.detalle && (
         <div className="mt-2">
@@ -7745,6 +7811,68 @@ function VistaPlanAnual({ data, sedes }) {
   );
 }
 
+/* Cotización de un servicio (formato provisional): datos de la solicitud,
+   trabajo a realizar, detalles y valores. */
+function construirCotizacionHTML(srv, data) {
+  const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
+  const novedad = novedadServicio(srv);
+  const foto = srv.foto || srv.fotoSolicitante || "";
+  const dato = (k, v) => (v ? `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>` : "");
+  const bloque = (k, v) => (v ? `<h3>${esc(k)}</h3><p class="txt">${esc(v)}</p>` : "");
+  const aprobado = srv.presupuestoAprobado != null && srv.estado !== "por_aprobar" && srv.estado !== "por_definir";
+
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Cotización ${esc(srv.codigo)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:9pt;line-height:1.4;padding:6px}
+.hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #35383C;padding-bottom:8px;margin-bottom:12px}
+.hdr h1{font-size:15pt;text-transform:uppercase;letter-spacing:.02em}
+.hdr .sub{font-size:9pt;color:#787D85;margin-top:2px}
+.marca{text-align:right;font-size:7.5pt;color:#787D85}
+.marca b{display:block;font-size:11pt;color:#ED5B23;letter-spacing:.06em}
+.marca img{max-height:34px;margin-bottom:3px}
+.datos{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;margin-bottom:12px}
+.datos span{display:block;font-size:6.8pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B}
+.datos b{font-size:9pt}
+h2{font-size:11pt;border-left:3px solid #ED5B23;padding:3px 8px;background:#FAF8F4;margin:12px 0 6px}
+h3{font-size:7pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B;margin:10px 0 3px}
+.txt{white-space:pre-wrap;border:1px solid #E3E0D8;border-radius:2px;padding:6px 8px}
+table{width:100%;border-collapse:collapse;margin-top:6px}
+th,td{padding:5px 7px;border:1px solid #E3E0D8}
+thead th{background:#35383C;color:#fff;font-size:7pt;text-transform:uppercase;text-align:left}
+td.v{text-align:right;font-weight:700;width:130px}
+tr.tot td{background:#FDEEE7;color:#ED5B23;font-size:10pt}
+.foto{margin-top:6px;max-height:230px;max-width:100%;border:1px solid #E3E0D8}
+.pie{margin-top:14px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.8pt;color:#8D939B;display:flex;justify-content:space-between}
+</style></head><body>
+<div class="hdr">
+  <div><h1>Cotización de servicio</h1><p class="sub">${esc(srv.codigo)} · ${esc(ESTADOS[srv.estado]?.label || srv.estado)}</p></div>
+  <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div>
+</div>
+<div class="datos">
+  ${dato("Sede", sedeNombre(data.sedes, srv.sedeId))}
+  ${dato("Ubicación", ubicacionTexto(data.sedes, srv))}
+  ${dato("Solicitó", srv.solicitanteId ? usuarioNombre(data.usuarios, srv.solicitanteId) : "")}
+  ${dato("Fecha de solicitud", [srv.fechaReporte || srv.createdAt, srv.horaReporte].filter(Boolean).join(" "))}
+  ${dato("Tipo de proveedor", srv.tipoProveedor)}
+  ${dato("Proveedor", srv.proveedor)}
+  ${dato("Fecha programada", srv.fecha)}
+</div>
+<h2>${esc(tituloServicio(srv))}</h2>
+${bloque("Detalle de novedad", novedad)}
+${bloque("Detalle del trabajo", srv.detalle)}
+<h3>Valores</h3>
+<table><thead><tr><th>Concepto</th><th style="text-align:right">Valor (USD)</th></tr></thead><tbody>
+  <tr><td>Presupuesto estimado</td><td class="v">${esc(money(srv.presupuesto || 0))}</td></tr>
+  ${aprobado ? `<tr class="tot"><td>Valor aprobado</td><td class="v">${esc(money(srv.presupuestoAprobado))}</td></tr>` : ""}
+</tbody></table>
+${foto ? `<h3>Evidencia de la solicitud</h3><img class="foto" src="${esc(foto)}" alt="Evidencia">` : ""}
+<div class="pie"><span>Documento generado desde IndustriaMe</span><span>${esc(srv.codigo)}</span></div>
+</body></html>`;
+}
+
 /* PDF del cronograma del año consultado: una sección por sede. */
 function construirPlanAnualHTML(grupos, anio, nombreSede) {
   const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -8186,7 +8314,7 @@ function generarResumenUnificado(data, sedes, mes) {
     );
     partes.push(
       serviciosMes.length > 0
-        ? `${serviciosMes.length > 1 ? `${serviciosMes.length} servicios externos, el mayor` : "servicio externo"} ${serviciosMes[0].trabajo.length > 28 ? serviciosMes[0].trabajo.slice(0, 26) + "…" : serviciosMes[0].trabajo} (${money(costoServicio(serviciosMes[0]))}) subió el costo`
+        ? `${serviciosMes.length > 1 ? `${serviciosMes.length} servicios externos, el mayor` : "servicio externo"} ${tituloServicio(serviciosMes[0]).length > 28 ? tituloServicio(serviciosMes[0]).slice(0, 26) + "…" : tituloServicio(serviciosMes[0])} (${money(costoServicio(serviciosMes[0]))}) subió el costo`
         : "sin servicios externos este mes"
     );
     partes.push(
@@ -8443,7 +8571,7 @@ function construirReporteMensualHTML(data, mes) {
     const acts = [
       ...data.ordenes.filter((o) => o.sedeId === s.id && mesContable(o) === mes).map((o) => ({ ...o, tipo: "preventivo" })),
       ...data.solicitudes.filter((x) => x.sedeId === s.id && mesContable(x) === mes).map((x) => ({ ...x, tipo: "correctivo", tarea: x.descripcion })),
-      ...(data.servicios || []).filter((x) => x.sedeId === s.id && mesKey(x.fecha) === mes).map((x) => ({ ...x, tipo: "servicio", tarea: x.trabajo })),
+      ...(data.servicios || []).filter((x) => x.sedeId === s.id && mesKey(x.fecha) === mes).map((x) => ({ ...x, tipo: "servicio", tarea: tituloServicio(x) })),
     ].sort((x, y) => (x.fechaProgramada || x.fecha || "").localeCompare(y.fechaProgramada || y.fecha || ""));
 
     const filas = acts.map((x) => `<tr>
@@ -8595,7 +8723,7 @@ function actividadesReporte(data, sedeIds) {
   const cor = (data.solicitudes || []).filter((s) => dentro(s) && s.estado !== "pendiente")
     .map((s) => ({ ...s, tipo: "correctivo", tarea: s.descripcion }));
   const srv = (data.servicios || []).filter(dentro)
-    .map((s) => ({ ...s, tipo: "servicio", tarea: s.trabajo, fechaProgramada: s.fecha }));
+    .map((s) => ({ ...s, tipo: "servicio", tarea: tituloServicio(s), fechaProgramada: s.fecha }));
   return [...pre, ...cor, ...srv];
 }
 
@@ -8621,7 +8749,7 @@ function tiempoActividad(a) {
 /* Costo de un servicio: manda el valor con el que el cliente aprobó.
    Un servicio rechazado no cuesta nada. */
 const costoServicio = (s) =>
-  s.estado === "rechazada" || s.estado === "por_aprobar" ? 0
+  ["rechazada", "por_aprobar", "por_definir"].includes(s.estado) ? 0
     : Number(s.presupuestoAprobado ?? s.presupuesto) || 0;
 
 const costoActividad = (a) =>
