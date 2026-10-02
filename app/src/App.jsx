@@ -5060,10 +5060,16 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
   // Al tocar una notificación de solicitud nueva, se salta a Programación
   const destinoNotif = React.useContext(NotifCtx)?.destino;
   const [destinoAplicado, setDestinoAplicado] = useState(null);
-  if (destinoNotif && destinoNotif.ts !== destinoAplicado) { setDestinoAplicado(destinoNotif.ts); setTab(destinoNotif.tab); }
   const [hallazgo, setHallazgo] = useState(false);
   const [activar, setActivar] = useState(null);
   const [ejecutar, setEjecutar] = useState(null);   // actividad abierta desde el calendario
+  if (destinoNotif && destinoNotif.ts !== destinoAplicado) {
+    setDestinoAplicado(destinoNotif.ts);
+    setTab(destinoNotif.tab);
+    const foco = focoProgramacion(data, destinoNotif.id);
+    if (foco?.activar) setActivar(foco.activar);
+    if (foco?.ejecutar) setEjecutar(foco.ejecutar);
+  }
   const [msg, setMsg] = useState("");
 
   const misSedes = sedesVisibles(data, user);
@@ -6268,9 +6274,17 @@ function PanelProgramacion({ data, sedes, pendientes, onActivar, tecnicoDefault,
   );
 }
 
-function AdminProgramacion({ data, persist, user }) {
+function AdminProgramacion({ data, persist, user, foco }) {
   const [activar, setActivar] = useState(null);
   const [ejecutar, setEjecutar] = useState(null);   // orden abierta para ejecutar/editar
+  // Solicitud que llega desde una notificación: se abre una sola vez
+  const [focoAplicado, setFocoAplicado] = useState(null);
+  if (foco && foco.ts !== focoAplicado) {
+    setFocoAplicado(foco.ts);
+    const f = focoProgramacion(data, foco.id);
+    if (f?.activar) setActivar(f.activar);
+    if (f?.ejecutar) setEjecutar(f.ejecutar);
+  }
   const acciones = useAcciones(data, persist, user);
   const pendientes = getPendientes(data);
 
@@ -10317,7 +10331,13 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
   // Al tocar una notificación de solicitud nueva, se salta a Programación
   const destinoNotif = React.useContext(NotifCtx)?.destino;
   const [destinoAplicado, setDestinoAplicado] = useState(null);
-  if (destinoNotif && destinoNotif.ts !== destinoAplicado) { setDestinoAplicado(destinoNotif.ts); setTab(destinoNotif.tab); }
+  const [focoProg, setFocoProg] = useState(null);   // solicitud a abrir al llegar a Programación
+  if (destinoNotif && destinoNotif.ts !== destinoAplicado) {
+    setDestinoAplicado(destinoNotif.ts);
+    setTab(destinoNotif.tab);
+    setFocoProg(destinoNotif);
+  }
+  const cambiarTab = (t) => { setTab(t); setFocoProg(null); };
 
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
@@ -10338,12 +10358,12 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
    <ProveedorDetalle data={data}>
     <div className="max-w-6xl mx-auto px-4 pb-16">
       <AppHeader user={user} onLogout={onLogout} ultimaSync={ultimaSync} sedesTexto="Todas las sedes" />
-      <Tabs tabs={tabs} active={tab} onChange={setTab} />
+      <Tabs tabs={tabs} active={tab} onChange={cambiarTab} />
 
       {tab === "dashboard" && <Dashboard data={data} persist={persist} sedes={data.sedes} mes={mes} onMesChange={setMes} mostrarPresupuesto mostrarCosto mostrarSatisfaccion />}
       {tab === "presupuesto" && <VistaPresupuesto data={data} mes={mes} onMesChange={setMes} />}
       {tab === "sedes" && <AdminSedes data={data} persist={persist} />}
-      {tab === "programacion" && <AdminProgramacion data={data} persist={persist} user={user} />}
+      {tab === "programacion" && <AdminProgramacion data={data} persist={persist} user={user} foco={focoProg} />}
       {tab === "actividades" && <AdminActividades data={data} persist={persist} persistYa={persistYa} user={user} />}
       {tab === "planual" && <VistaPlanAnual data={data} sedes={data.sedes} />}
       {tab === "monitoreo" && <VistaMonitoreo data={data} />}
@@ -10479,6 +10499,19 @@ function notifVistasIniciales(data, user) {
   return iniciales;
 }
 
+/* Qué abrir en Programación para una solicitud notificada: la activación si
+   sigue sin programar, o su ficha de ejecución si ya tiene fecha. Las que
+   pasaron a servicio solo llevan a la pestaña. */
+function focoProgramacion(data, id) {
+  const sol = (data.solicitudes || []).find((s) => s.id === id);
+  if (!sol) return null;
+  if (sol.estado === "pendiente") {
+    const pend = getPendientes(data).find((p) => p.key === `sol|${id}`);
+    return pend ? { activar: pend } : null;
+  }
+  return { ejecutar: { tipo: "correctivo", id } };
+}
+
 /* Campana con el número de notificaciones sin leer; abre el panel. */
 function BotonNotificaciones() {
   const notif = React.useContext(NotifCtx);
@@ -10522,7 +10555,7 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
     marcar([n.id]);
     if (esSolicitante) { setDetalle(n); return; }
     setAbierto(false);
-    setDestino((d) => ({ tab: "programacion", ts: (d?.ts || 0) + 1 }));
+    setDestino((d) => ({ tab: "programacion", ts: (d?.ts || 0) + 1, id: n.id }));
   };
   const calificar = (id, patch) =>
     persist((data) => ({ ...data, solicitudes: data.solicitudes.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
