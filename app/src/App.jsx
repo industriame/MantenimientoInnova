@@ -15,7 +15,7 @@ import {
   QrCode, Wrench, ClipboardList, BarChart3, Plus, X, ChevronRight, ChevronDown,
   ChevronLeft, ChevronUp, AlertTriangle, CheckCircle2, Clock, DollarSign, Building2, Layers,
   Users, ShieldCheck, ArrowLeft, Download, Send, Trash2, Pencil, CalendarDays,
-  Filter, KeyRound, Eye, EyeOff, Camera, LogOut, TrendingUp, Wallet, Star, Info, RefreshCw, FileText, Search
+  Filter, KeyRound, Eye, EyeOff, Camera, LogOut, TrendingUp, Wallet, Star, Info, RefreshCw, FileText, Search, Bell
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, ReferenceLine, XAxis, YAxis, CartesianGrid,
@@ -1892,6 +1892,7 @@ function AppHeader({ user, onLogout, sedesTexto, ultimaSync }) {
       </div>
       <img src={logoCliente} alt="Innova Schools" className="hidden sm:block h-9 w-auto object-contain shrink-0" />
       <SyncBadge ultimaSync={ultimaSync} />
+      <BotonNotificaciones />
       <button onClick={onLogout} className="w-8 h-8 rounded-md border flex items-center justify-center shrink-0" style={bLine} title="Cerrar sesión">
         <LogOut size={14} color={COLORS.charcoal} />
       </button>
@@ -2277,7 +2278,7 @@ function DetalleActividad({ item, data, onClose }) {
         {item.fechaCompletada && (
           <Dato label="Cierre">{`${item.fechaCompletada}${item.horaCompletada ? ` · ${item.horaCompletada}` : ""}`}</Dato>
         )}
-        {costo > 0 && <Dato label="Costo">{money(costo)}</Dato>}
+        {costo > 0 && !item.ocultarCosto && <Dato label="Costo">{money(costo)}</Dato>}
       </div>
 
       {/* Procedimiento */}
@@ -2304,7 +2305,7 @@ function DetalleActividad({ item, data, onClose }) {
       {item.resolucion && <Field label="Resolución"><ReadOnly>{item.resolucion}</ReadOnly></Field>}
 
       {/* Consumo de bodega */}
-      {(item.consumos || []).length > 0 && (
+      {!item.ocultarCosto && (item.consumos || []).length > 0 && (
         <div>
           <div className="flex items-center justify-between mb-1">
             <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Consumo de bodega</p>
@@ -2343,7 +2344,7 @@ function DetalleActividad({ item, data, onClose }) {
       )}
 
       {/* Calificación del solicitante */}
-      {item.calificacion > 0 && (
+      {item.calificacion > 0 && !item.sinCalificacion && (
         <div className="rounded-md p-2.5" style={{ background: `${COLORS.ambar}12` }}>
           <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Calificación del solicitante</p>
           <div className="flex items-center gap-2 flex-wrap">
@@ -5056,9 +5057,19 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
   const acciones = useAcciones(data, persist, user);
   const [tab, setTab] = useState("dashboard");
   const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
+  // Al tocar una notificación de solicitud nueva, se salta a Programación
+  const destinoNotif = React.useContext(NotifCtx)?.destino;
+  const [destinoAplicado, setDestinoAplicado] = useState(null);
   const [hallazgo, setHallazgo] = useState(false);
   const [activar, setActivar] = useState(null);
   const [ejecutar, setEjecutar] = useState(null);   // actividad abierta desde el calendario
+  if (destinoNotif && destinoNotif.ts !== destinoAplicado) {
+    setDestinoAplicado(destinoNotif.ts);
+    setTab(destinoNotif.tab);
+    const foco = focoProgramacion(data, destinoNotif.id);
+    if (foco?.activar) setActivar(foco.activar);
+    if (foco?.ejecutar) setEjecutar(foco.ejecutar);
+  }
   const [msg, setMsg] = useState("");
 
   const misSedes = sedesVisibles(data, user);
@@ -6263,9 +6274,17 @@ function PanelProgramacion({ data, sedes, pendientes, onActivar, tecnicoDefault,
   );
 }
 
-function AdminProgramacion({ data, persist, user }) {
+function AdminProgramacion({ data, persist, user, foco }) {
   const [activar, setActivar] = useState(null);
   const [ejecutar, setEjecutar] = useState(null);   // orden abierta para ejecutar/editar
+  // Solicitud que llega desde una notificación: se abre una sola vez
+  const [focoAplicado, setFocoAplicado] = useState(null);
+  if (foco && foco.ts !== focoAplicado) {
+    setFocoAplicado(foco.ts);
+    const f = focoProgramacion(data, foco.id);
+    if (f?.activar) setActivar(f.activar);
+    if (f?.ejecutar) setEjecutar(f.ejecutar);
+  }
   const acciones = useAcciones(data, persist, user);
   const pendientes = getPendientes(data);
 
@@ -10309,6 +10328,16 @@ function SedeMonitoreo({ bloque, mesesAbiertos, onToggleMes, abierta, onToggle }
 function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
   const [tab, setTab] = useState("dashboard");
   const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
+  // Al tocar una notificación de solicitud nueva, se salta a Programación
+  const destinoNotif = React.useContext(NotifCtx)?.destino;
+  const [destinoAplicado, setDestinoAplicado] = useState(null);
+  const [focoProg, setFocoProg] = useState(null);   // solicitud a abrir al llegar a Programación
+  if (destinoNotif && destinoNotif.ts !== destinoAplicado) {
+    setDestinoAplicado(destinoNotif.ts);
+    setTab(destinoNotif.tab);
+    setFocoProg(destinoNotif);
+  }
+  const cambiarTab = (t) => { setTab(t); setFocoProg(null); };
 
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
@@ -10329,12 +10358,12 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
    <ProveedorDetalle data={data}>
     <div className="max-w-6xl mx-auto px-4 pb-16">
       <AppHeader user={user} onLogout={onLogout} ultimaSync={ultimaSync} sedesTexto="Todas las sedes" />
-      <Tabs tabs={tabs} active={tab} onChange={setTab} />
+      <Tabs tabs={tabs} active={tab} onChange={cambiarTab} />
 
       {tab === "dashboard" && <Dashboard data={data} persist={persist} sedes={data.sedes} mes={mes} onMesChange={setMes} mostrarPresupuesto mostrarCosto mostrarSatisfaccion />}
       {tab === "presupuesto" && <VistaPresupuesto data={data} mes={mes} onMesChange={setMes} />}
       {tab === "sedes" && <AdminSedes data={data} persist={persist} />}
-      {tab === "programacion" && <AdminProgramacion data={data} persist={persist} user={user} />}
+      {tab === "programacion" && <AdminProgramacion data={data} persist={persist} user={user} foco={focoProg} />}
       {tab === "actividades" && <AdminActividades data={data} persist={persist} persistYa={persistYa} user={user} />}
       {tab === "planual" && <VistaPlanAnual data={data} sedes={data.sedes} />}
       {tab === "monitoreo" && <VistaMonitoreo data={data} />}
@@ -10404,17 +10433,20 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
    ========================================================================= */
 
 /* ============================================================================
-   NOTIFICACIONES AL INICIAR SESIÓN
+   NOTIFICACIONES (campana del encabezado)
    Supervisor y técnico: solicitudes nuevas (el técnico, solo de sus sedes).
    Solicitante: sus solicitudes finalizadas (incluidas las pasadas a servicio).
-   Lo ya visto se recuerda por usuario en este dispositivo (lista de ids), así
+   Lo leído se recuerda por usuario en este dispositivo (lista de ids), así
    una solicitud que llega tarde por la sincronización no se pierde. La
-   primera vez solo se muestran los últimos 7 días.
+   primera vez solo quedan sin leer las de los últimos 7 días.
    ========================================================================= */
 const NOTIF_DIAS_PRIMERA_VEZ = 7;
 const NOTIF_DIAS_VENTANA = 45;   // más atrás no se notifica ni se guarda
 
+const NotifCtx = React.createContext(null);
 const notifClave = (user) => `notif_vistas_${user.id}`;
+const haceDias = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return fmtDate(d); };
+
 function notifLeer(user) {
   try {
     const v = JSON.parse(localStorage.getItem(notifClave(user)) || "null");
@@ -10425,104 +10457,192 @@ function notifGuardar(user, ids) {
   try { localStorage.setItem(notifClave(user), JSON.stringify([...ids])); } catch { /* sin almacenamiento */ }
 }
 
+/* Notificaciones posibles del usuario dentro de la ventana, más recientes primero. */
 function notificacionesDe(data, user) {
-  const haceDias = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return fmtDate(d); };
-  const vistas = notifLeer(user);
-  const desde = haceDias(vistas ? NOTIF_DIAS_VENTANA : NOTIF_DIAS_PRIMERA_VEZ);
   const ventana = haceDias(NOTIF_DIAS_VENTANA);
-  let candidatos = [];
-
+  let lista = [];
   if (user.rol === "solicitante") {
-    const mias = [
+    lista = [
       ...(data.solicitudes || []).filter((s) => s.solicitanteId === user.id),
-      ...(data.servicios || []).filter((x) => x.desdeSolicitud && x.solicitanteId === user.id)
-        .map((x) => ({ ...x, esServicio: true })),
-    ];
-    candidatos = mias
+      ...(data.servicios || []).filter((x) => x.desdeSolicitud && x.solicitanteId === user.id).map((x) => ({ ...x, esServicio: true })),
+    ]
       .filter((s) => s.estado === "completada" && s.fechaCompletada && s.fechaCompletada >= ventana)
       .map((s) => ({
-        id: s.id, codigo: s.codigo, sedeId: s.sedeId, esServicio: s.esServicio,
+        id: s.id, codigo: s.codigo, sedeId: s.sedeId, esServicio: !!s.esServicio,
         texto: s.descripcion || tituloServicio(s), fecha: s.fechaCompletada, hora: s.horaCompletada || "",
         nota: s.resolucion || "",
       }));
   } else if (user.rol === "admin" || user.rol === "tecnico") {
     const sedes = user.rol === "tecnico" ? (user.sedeIds || []) : null;
-    candidatos = (data.solicitudes || [])
-      .filter((s) => (!sedes || sedes.includes(s.sedeId)) && s.solicitanteId !== user.id && s.fecha && s.fecha >= ventana)
+    lista = [
+      ...(data.solicitudes || []).map((s) => ({ ...s, f: s.fecha, h: s.hora })),
+      // Las que ya pasaron a servicio también fueron solicitudes nuevas
+      ...(data.servicios || []).filter((x) => x.desdeSolicitud)
+        .map((x) => ({ ...x, esServicio: true, f: x.fechaReporte || x.createdAt, h: x.horaReporte })),
+    ]
+      .filter((s) => (!sedes || sedes.includes(s.sedeId)) && s.solicitanteId !== user.id && s.f && s.f >= ventana)
       .map((s) => ({
-        id: s.id, codigo: s.codigo, sedeId: s.sedeId, criticidad: s.criticidad,
-        texto: s.descripcion || "", fecha: s.fecha, hora: s.hora || "", estado: s.estado,
+        id: s.id, codigo: s.codigo, sedeId: s.sedeId, criticidad: s.criticidad, esServicio: !!s.esServicio,
+        texto: s.descripcion || "", fecha: s.f, hora: s.h || "",
       }));
   }
-
-  const nuevas = candidatos
-    .filter((c) => (vistas ? !vistas.has(c.id) : true) && c.fecha >= desde)
-    .sort((a, b) => `${b.fecha} ${b.hora}`.localeCompare(`${a.fecha} ${a.hora}`));
-  return { nuevas, idsVentana: candidatos.map((c) => c.id) };
+  return lista.sort((a, b) => `${b.fecha} ${b.hora}`.localeCompare(`${a.fecha} ${a.hora}`));
 }
 
-function NotificacionesInicio({ data, user }) {
-  // Se calcula una sola vez al entrar: la lista no cambia mientras está abierta
-  const [estado] = useState(() => notificacionesDe(data, user));
-  const [abierto, setAbierto] = useState(estado.nuevas.length > 0);
-  const [verTodas, setVerTodas] = useState(false);
-  if (!abierto) return null;
+/* Leídas al entrar por primera vez en este dispositivo: todo lo anterior a 7 días. */
+function notifVistasIniciales(data, user) {
+  const guardadas = notifLeer(user);
+  if (guardadas) return guardadas;
+  const corte = haceDias(NOTIF_DIAS_PRIMERA_VEZ);
+  const iniciales = new Set(notificacionesDe(data, user).filter((n) => n.fecha < corte).map((n) => n.id));
+  notifGuardar(user, iniciales);
+  return iniciales;
+}
 
+/* Qué abrir en Programación para una solicitud notificada: la activación si
+   sigue sin programar, o su ficha de ejecución si ya tiene fecha. Las que
+   pasaron a servicio solo llevan a la pestaña. */
+function focoProgramacion(data, id) {
+  const sol = (data.solicitudes || []).find((s) => s.id === id);
+  if (!sol) return null;
+  if (sol.estado === "pendiente") {
+    const pend = getPendientes(data).find((p) => p.key === `sol|${id}`);
+    return pend ? { activar: pend } : null;
+  }
+  return { ejecutar: { tipo: "correctivo", id } };
+}
+
+/* Campana con el número de notificaciones sin leer; abre el panel. */
+function BotonNotificaciones() {
+  const notif = React.useContext(NotifCtx);
+  if (!notif) return null;
+  return (
+    <button onClick={notif.abrir} title="Notificaciones"
+      className="relative w-8 h-8 rounded-md border flex items-center justify-center shrink-0" style={bLine}>
+      <Bell size={14} color={COLORS.charcoal} />
+      {notif.sinLeer > 0 && (
+        <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full text-[9px] font-bold text-white flex items-center justify-center"
+          style={{ background: COLORS.rojo }}>
+          {notif.sinLeer > 99 ? "99+" : notif.sinLeer}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function ProveedorNotificaciones({ data, persist, user, children }) {
+  const habilitado = ["admin", "tecnico", "solicitante"].includes(user.rol);
+  const [vistas, setVistas] = useState(() => (habilitado ? notifVistasIniciales(data, user) : new Set()));
+  const [abierto, setAbierto] = useState(false);
+  const [detalle, setDetalle] = useState(null);
+  const [destino, setDestino] = useState(null);   // pestaña a la que debe saltar la vista
+  const todas = useMemo(() => (habilitado ? notificacionesDe(data, user) : []), [data, user, habilitado]);
+  const sinLeer = todas.filter((n) => !vistas.has(n.id));
+  const leidas = todas.filter((n) => vistas.has(n.id)).slice(0, 10);
   const esSolicitante = user.rol === "solicitante";
-  const cerrar = () => {
-    // Se guardan solo los ids que siguen en la ventana, para que la lista no crezca
-    const previas = notifLeer(user) || new Set();
-    const enVentana = new Set(estado.idsVentana);
-    notifGuardar(user, new Set([...[...previas].filter((id) => enVentana.has(id)), ...estado.idsVentana]));
-    setAbierto(false);
+  const verCostos = user.rol === "admin";
+
+  const marcar = (ids) => {
+    // Solo se conservan los ids que siguen en la ventana, para que la lista no crezca
+    const enVentana = new Set(todas.map((n) => n.id));
+    const nuevas = new Set([...vistas, ...ids].filter((id) => enVentana.has(id)));
+    notifGuardar(user, nuevas);
+    setVistas(nuevas);
   };
-  const LIMITE = 30;
-  const lista = verTodas ? estado.nuevas : estado.nuevas.slice(0, LIMITE);
-  const n = estado.nuevas.length;
+  /* Solicitante: ve el detalle (y califica si está completada).
+     Supervisor y técnico: van directo a Programación. */
+  const abrirDetalle = (n) => {
+    marcar([n.id]);
+    if (esSolicitante) { setDetalle(n); return; }
+    setAbierto(false);
+    setDestino((d) => ({ tab: "programacion", ts: (d?.ts || 0) + 1, id: n.id }));
+  };
+  const calificar = (id, patch) =>
+    persist((data) => ({ ...data, solicitudes: data.solicitudes.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
+
+  // Lo que se abre al tocar una notificación: la solicitud o el servicio en que se convirtió
+  const solicitud = detalle && (data.solicitudes || []).find((s) => s.id === detalle.id);
+  const servicio = detalle && !solicitud && (data.servicios || []).find((s) => s.id === detalle.id);
+
+  const fila = (x, leida) => (
+    <button key={x.id} onClick={() => abrirDetalle(x)}
+      className="w-full text-left border rounded-md p-2.5 hover:shadow-sm transition-shadow"
+      style={{ ...cardStyle, opacity: leida ? 0.65 : 1, borderLeft: `3px solid ${esSolicitante ? COLORS.verde : (CRITICIDAD[x.criticidad]?.color || COLORS.slate)}` }}>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {!leida && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: COLORS.rojo }} />}
+          <span className="text-[11px] font-bold" style={cOrange}>{x.codigo}</span>
+          {x.esServicio && <TipoChip tipo="servicio" />}
+          {!esSolicitante && x.criticidad && CRITICIDAD[x.criticidad] && (
+            <Chip color={CRITICIDAD[x.criticidad].color}>{CRITICIDAD[x.criticidad].label}</Chip>
+          )}
+          <span className="text-[11px] font-semibold" style={cChar}>{sedeNombre(data.sedes, x.sedeId)}</span>
+        </div>
+        <span className="text-[10px]" style={cSlate}>
+          {esSolicitante ? "Finalizada el " : ""}{x.fecha}{x.hora ? ` · ${x.hora}` : ""}
+        </span>
+      </div>
+      <p className="text-xs mt-1" style={cChar}>{x.texto.length > 140 ? `${x.texto.slice(0, 138)}…` : x.texto}</p>
+      {esSolicitante && x.nota && (
+        <p className="text-[11px] mt-1" style={cSlate}><b>Resuelto:</b> {x.nota.length > 120 ? `${x.nota.slice(0, 118)}…` : x.nota}</p>
+      )}
+    </button>
+  );
 
   return (
-    <Modal title={esSolicitante
-      ? `${n} solicitud${n === 1 ? "" : "es"} finalizada${n === 1 ? "" : "s"}`
-      : `${n} solicitud${n === 1 ? "" : "es"} nueva${n === 1 ? "" : "s"}`} onClose={cerrar} wide>
-      <p className="text-xs mb-3" style={cSlate}>
-        {esSolicitante
-          ? "Desde tu último ingreso se finalizaron estas solicitudes que reportaste."
-          : user.rol === "tecnico"
-            ? "Desde tu último ingreso se reportaron estas solicitudes en tus sedes."
-            : "Desde tu último ingreso se reportaron estas solicitudes."}
-      </p>
-      <div className="space-y-2 text-left">
-        {lista.map((x) => (
-          <div key={x.id} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${esSolicitante ? COLORS.verde : (CRITICIDAD[x.criticidad]?.color || COLORS.slate)}` }}>
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="text-[11px] font-bold" style={cOrange}>{x.codigo}</span>
-                {x.esServicio && <TipoChip tipo="servicio" />}
-                {!esSolicitante && x.criticidad && CRITICIDAD[x.criticidad] && (
-                  <Chip color={CRITICIDAD[x.criticidad].color}>{CRITICIDAD[x.criticidad].label}</Chip>
-                )}
-                <span className="text-[11px] font-semibold" style={cChar}>{sedeNombre(data.sedes, x.sedeId)}</span>
-              </div>
-              <span className="text-[10px]" style={cSlate}>
-                {esSolicitante ? "Finalizada el " : ""}{x.fecha}{x.hora ? ` · ${x.hora}` : ""}
-              </span>
-            </div>
-            <p className="text-xs mt-1" style={cChar}>{x.texto.length > 140 ? `${x.texto.slice(0, 138)}…` : x.texto}</p>
-            {esSolicitante && x.nota && (
-              <p className="text-[11px] mt-1" style={cSlate}><b>Resuelto:</b> {x.nota.length > 120 ? `${x.nota.slice(0, 118)}…` : x.nota}</p>
+    <NotifCtx.Provider value={habilitado ? { sinLeer: sinLeer.length, abrir: () => setAbierto(true), destino } : null}>
+      {children}
+
+      {abierto && !detalle && (
+        <Modal title={esSolicitante ? "Solicitudes finalizadas" : "Solicitudes nuevas"} onClose={() => setAbierto(false)} wide>
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <p className="text-xs" style={cSlate}>
+              {sinLeer.length === 0
+                ? "No tienes notificaciones sin leer."
+                : `${sinLeer.length} sin leer. ${esSolicitante ? "Toca una para ver el detalle y calificarla." : "Toca una para ir a Programación."}`}
+            </p>
+            {sinLeer.length > 0 && (
+              <button onClick={() => marcar(sinLeer.map((n) => n.id))} className="text-[11px] font-semibold shrink-0" style={cOrange}>
+                Marcar todas como leídas
+              </button>
             )}
           </div>
-        ))}
-      </div>
-      {n > LIMITE && !verTodas && (
-        <button onClick={() => setVerTodas(true)} className="w-full mt-2 text-[11px] font-semibold" style={cOrange}>
-          Ver las {n - LIMITE} restantes
-        </button>
+          <div className="space-y-2">{sinLeer.map((x) => fila(x, false))}</div>
+          {leidas.length > 0 && (
+            <>
+              <p className="text-[10px] font-semibold uppercase tracking-wide mt-4 mb-2" style={cSlate}>Anteriores</p>
+              <div className="space-y-2">{leidas.map((x) => fila(x, true))}</div>
+            </>
+          )}
+        </Modal>
       )}
-      <button onClick={cerrar} className="w-full mt-3 py-2.5 rounded-md font-semibold text-sm text-white" style={{ background: COLORS.orange }}>
-        Entendido
-      </button>
-    </Modal>
+
+      {detalle && (
+        <Modal title={detalle.codigo} onClose={() => setDetalle(null)} wide>
+          <div className="text-left">
+            {solicitud ? (
+              <>
+                {esSolicitante && solicitud.estado === "completada" && (
+                  <div className="mb-3">
+                    <BloqueCalificacion solicitud={solicitud} onCalificar={(patch) => calificar(solicitud.id, patch)} />
+                  </div>
+                )}
+                <DetalleActividad data={data} onClose={() => setDetalle(null)}
+                  item={{ ...solicitud, tipo: "correctivo", tarea: solicitud.descripcion, ocultarCosto: !verCostos, sinCalificacion: esSolicitante }} />
+              </>
+            ) : servicio ? (
+              <FichaServicio srv={servicio} data={data} costos={verCostos} />
+            ) : (
+              <Empty>Esta solicitud ya no está disponible.</Empty>
+            )}
+          </div>
+          <button onClick={() => setDetalle(null)} className="w-full mt-3 text-xs font-semibold py-2 rounded-md border"
+            style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+            Volver a las notificaciones
+          </button>
+        </Modal>
+      )}
+    </NotifCtx.Provider>
   );
 }
 
@@ -10555,10 +10675,9 @@ export default function App() {
       ) : !user ? (
         <Login usuarios={data.usuarios} onLogin={setUser} />
       ) : (
-        <>
+        <ProveedorNotificaciones key={user.id} data={data} persist={persist} user={user}>
           {vista()}
-          <NotificacionesInicio key={user.id} data={data} user={user} />
-        </>
+        </ProveedorNotificaciones>
       )}
     </div>
   );
