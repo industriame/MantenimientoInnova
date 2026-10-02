@@ -10403,6 +10403,129 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
    18. APP  (una puerta de entrada, el rol decide la vista)
    ========================================================================= */
 
+/* ============================================================================
+   NOTIFICACIONES AL INICIAR SESIÓN
+   Supervisor y técnico: solicitudes nuevas (el técnico, solo de sus sedes).
+   Solicitante: sus solicitudes finalizadas (incluidas las pasadas a servicio).
+   Lo ya visto se recuerda por usuario en este dispositivo (lista de ids), así
+   una solicitud que llega tarde por la sincronización no se pierde. La
+   primera vez solo se muestran los últimos 7 días.
+   ========================================================================= */
+const NOTIF_DIAS_PRIMERA_VEZ = 7;
+const NOTIF_DIAS_VENTANA = 45;   // más atrás no se notifica ni se guarda
+
+const notifClave = (user) => `notif_vistas_${user.id}`;
+function notifLeer(user) {
+  try {
+    const v = JSON.parse(localStorage.getItem(notifClave(user)) || "null");
+    return Array.isArray(v) ? new Set(v) : null;
+  } catch { return null; }
+}
+function notifGuardar(user, ids) {
+  try { localStorage.setItem(notifClave(user), JSON.stringify([...ids])); } catch { /* sin almacenamiento */ }
+}
+
+function notificacionesDe(data, user) {
+  const haceDias = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return fmtDate(d); };
+  const vistas = notifLeer(user);
+  const desde = haceDias(vistas ? NOTIF_DIAS_VENTANA : NOTIF_DIAS_PRIMERA_VEZ);
+  const ventana = haceDias(NOTIF_DIAS_VENTANA);
+  let candidatos = [];
+
+  if (user.rol === "solicitante") {
+    const mias = [
+      ...(data.solicitudes || []).filter((s) => s.solicitanteId === user.id),
+      ...(data.servicios || []).filter((x) => x.desdeSolicitud && x.solicitanteId === user.id)
+        .map((x) => ({ ...x, esServicio: true })),
+    ];
+    candidatos = mias
+      .filter((s) => s.estado === "completada" && s.fechaCompletada && s.fechaCompletada >= ventana)
+      .map((s) => ({
+        id: s.id, codigo: s.codigo, sedeId: s.sedeId, esServicio: s.esServicio,
+        texto: s.descripcion || tituloServicio(s), fecha: s.fechaCompletada, hora: s.horaCompletada || "",
+        nota: s.resolucion || "",
+      }));
+  } else if (user.rol === "admin" || user.rol === "tecnico") {
+    const sedes = user.rol === "tecnico" ? (user.sedeIds || []) : null;
+    candidatos = (data.solicitudes || [])
+      .filter((s) => (!sedes || sedes.includes(s.sedeId)) && s.solicitanteId !== user.id && s.fecha && s.fecha >= ventana)
+      .map((s) => ({
+        id: s.id, codigo: s.codigo, sedeId: s.sedeId, criticidad: s.criticidad,
+        texto: s.descripcion || "", fecha: s.fecha, hora: s.hora || "", estado: s.estado,
+      }));
+  }
+
+  const nuevas = candidatos
+    .filter((c) => (vistas ? !vistas.has(c.id) : true) && c.fecha >= desde)
+    .sort((a, b) => `${b.fecha} ${b.hora}`.localeCompare(`${a.fecha} ${a.hora}`));
+  return { nuevas, idsVentana: candidatos.map((c) => c.id) };
+}
+
+function NotificacionesInicio({ data, user }) {
+  // Se calcula una sola vez al entrar: la lista no cambia mientras está abierta
+  const [estado] = useState(() => notificacionesDe(data, user));
+  const [abierto, setAbierto] = useState(estado.nuevas.length > 0);
+  const [verTodas, setVerTodas] = useState(false);
+  if (!abierto) return null;
+
+  const esSolicitante = user.rol === "solicitante";
+  const cerrar = () => {
+    // Se guardan solo los ids que siguen en la ventana, para que la lista no crezca
+    const previas = notifLeer(user) || new Set();
+    const enVentana = new Set(estado.idsVentana);
+    notifGuardar(user, new Set([...[...previas].filter((id) => enVentana.has(id)), ...estado.idsVentana]));
+    setAbierto(false);
+  };
+  const LIMITE = 30;
+  const lista = verTodas ? estado.nuevas : estado.nuevas.slice(0, LIMITE);
+  const n = estado.nuevas.length;
+
+  return (
+    <Modal title={esSolicitante
+      ? `${n} solicitud${n === 1 ? "" : "es"} finalizada${n === 1 ? "" : "s"}`
+      : `${n} solicitud${n === 1 ? "" : "es"} nueva${n === 1 ? "" : "s"}`} onClose={cerrar} wide>
+      <p className="text-xs mb-3" style={cSlate}>
+        {esSolicitante
+          ? "Desde tu último ingreso se finalizaron estas solicitudes que reportaste."
+          : user.rol === "tecnico"
+            ? "Desde tu último ingreso se reportaron estas solicitudes en tus sedes."
+            : "Desde tu último ingreso se reportaron estas solicitudes."}
+      </p>
+      <div className="space-y-2 text-left">
+        {lista.map((x) => (
+          <div key={x.id} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${esSolicitante ? COLORS.verde : (CRITICIDAD[x.criticidad]?.color || COLORS.slate)}` }}>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[11px] font-bold" style={cOrange}>{x.codigo}</span>
+                {x.esServicio && <TipoChip tipo="servicio" />}
+                {!esSolicitante && x.criticidad && CRITICIDAD[x.criticidad] && (
+                  <Chip color={CRITICIDAD[x.criticidad].color}>{CRITICIDAD[x.criticidad].label}</Chip>
+                )}
+                <span className="text-[11px] font-semibold" style={cChar}>{sedeNombre(data.sedes, x.sedeId)}</span>
+              </div>
+              <span className="text-[10px]" style={cSlate}>
+                {esSolicitante ? "Finalizada el " : ""}{x.fecha}{x.hora ? ` · ${x.hora}` : ""}
+              </span>
+            </div>
+            <p className="text-xs mt-1" style={cChar}>{x.texto.length > 140 ? `${x.texto.slice(0, 138)}…` : x.texto}</p>
+            {esSolicitante && x.nota && (
+              <p className="text-[11px] mt-1" style={cSlate}><b>Resuelto:</b> {x.nota.length > 120 ? `${x.nota.slice(0, 118)}…` : x.nota}</p>
+            )}
+          </div>
+        ))}
+      </div>
+      {n > LIMITE && !verTodas && (
+        <button onClick={() => setVerTodas(true)} className="w-full mt-2 text-[11px] font-semibold" style={cOrange}>
+          Ver las {n - LIMITE} restantes
+        </button>
+      )}
+      <button onClick={cerrar} className="w-full mt-3 py-2.5 rounded-md font-semibold text-sm text-white" style={{ background: COLORS.orange }}>
+        Entendido
+      </button>
+    </Modal>
+  );
+}
+
 export default function App() {
   const { data, persist, persistYa, loading, ultimaSync, syncError } = useSystemData();
   const [user, setUser] = useState(null);
@@ -10431,7 +10554,12 @@ export default function App() {
         <div className="flex items-center justify-center h-screen text-sm" style={cSlate}>Cargando sistema…</div>
       ) : !user ? (
         <Login usuarios={data.usuarios} onLogin={setUser} />
-      ) : vista()}
+      ) : (
+        <>
+          {vista()}
+          <NotificacionesInicio key={user.id} data={data} user={user} />
+        </>
+      )}
     </div>
   );
 }
