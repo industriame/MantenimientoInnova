@@ -2344,7 +2344,7 @@ function DetalleActividad({ item, data, onClose }) {
       )}
 
       {/* Calificación del solicitante */}
-      {item.calificacion > 0 && (
+      {item.calificacion > 0 && !item.sinCalificacion && (
         <div className="rounded-md p-2.5" style={{ background: `${COLORS.ambar}12` }}>
           <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Calificación del solicitante</p>
           <div className="flex items-center gap-2 flex-wrap">
@@ -5057,6 +5057,10 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
   const acciones = useAcciones(data, persist, user);
   const [tab, setTab] = useState("dashboard");
   const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
+  // Al tocar una notificación de solicitud nueva, se salta a Programación
+  const destinoNotif = React.useContext(NotifCtx)?.destino;
+  const [destinoAplicado, setDestinoAplicado] = useState(null);
+  if (destinoNotif && destinoNotif.ts !== destinoAplicado) { setDestinoAplicado(destinoNotif.ts); setTab(destinoNotif.tab); }
   const [hallazgo, setHallazgo] = useState(false);
   const [activar, setActivar] = useState(null);
   const [ejecutar, setEjecutar] = useState(null);   // actividad abierta desde el calendario
@@ -10310,6 +10314,10 @@ function SedeMonitoreo({ bloque, mesesAbiertos, onToggleMes, abierta, onToggle }
 function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
   const [tab, setTab] = useState("dashboard");
   const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
+  // Al tocar una notificación de solicitud nueva, se salta a Programación
+  const destinoNotif = React.useContext(NotifCtx)?.destino;
+  const [destinoAplicado, setDestinoAplicado] = useState(null);
+  if (destinoNotif && destinoNotif.ts !== destinoAplicado) { setDestinoAplicado(destinoNotif.ts); setTab(destinoNotif.tab); }
 
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
@@ -10489,11 +10497,12 @@ function BotonNotificaciones() {
   );
 }
 
-function ProveedorNotificaciones({ data, user, children }) {
+function ProveedorNotificaciones({ data, persist, user, children }) {
   const habilitado = ["admin", "tecnico", "solicitante"].includes(user.rol);
   const [vistas, setVistas] = useState(() => (habilitado ? notifVistasIniciales(data, user) : new Set()));
   const [abierto, setAbierto] = useState(false);
   const [detalle, setDetalle] = useState(null);
+  const [destino, setDestino] = useState(null);   // pestaña a la que debe saltar la vista
   const todas = useMemo(() => (habilitado ? notificacionesDe(data, user) : []), [data, user, habilitado]);
   const sinLeer = todas.filter((n) => !vistas.has(n.id));
   const leidas = todas.filter((n) => vistas.has(n.id)).slice(0, 10);
@@ -10507,7 +10516,16 @@ function ProveedorNotificaciones({ data, user, children }) {
     notifGuardar(user, nuevas);
     setVistas(nuevas);
   };
-  const abrirDetalle = (n) => { marcar([n.id]); setDetalle(n); };
+  /* Solicitante: ve el detalle (y califica si está completada).
+     Supervisor y técnico: van directo a Programación. */
+  const abrirDetalle = (n) => {
+    marcar([n.id]);
+    if (esSolicitante) { setDetalle(n); return; }
+    setAbierto(false);
+    setDestino((d) => ({ tab: "programacion", ts: (d?.ts || 0) + 1 }));
+  };
+  const calificar = (id, patch) =>
+    persist((data) => ({ ...data, solicitudes: data.solicitudes.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
 
   // Lo que se abre al tocar una notificación: la solicitud o el servicio en que se convirtió
   const solicitud = detalle && (data.solicitudes || []).find((s) => s.id === detalle.id);
@@ -10539,7 +10557,7 @@ function ProveedorNotificaciones({ data, user, children }) {
   );
 
   return (
-    <NotifCtx.Provider value={habilitado ? { sinLeer: sinLeer.length, abrir: () => setAbierto(true) } : null}>
+    <NotifCtx.Provider value={habilitado ? { sinLeer: sinLeer.length, abrir: () => setAbierto(true), destino } : null}>
       {children}
 
       {abierto && !detalle && (
@@ -10548,7 +10566,7 @@ function ProveedorNotificaciones({ data, user, children }) {
             <p className="text-xs" style={cSlate}>
               {sinLeer.length === 0
                 ? "No tienes notificaciones sin leer."
-                : `${sinLeer.length} sin leer. Toca una para ver ${esSolicitante ? "el resultado" : "la solicitud"}.`}
+                : `${sinLeer.length} sin leer. ${esSolicitante ? "Toca una para ver el detalle y calificarla." : "Toca una para ir a Programación."}`}
             </p>
             {sinLeer.length > 0 && (
               <button onClick={() => marcar(sinLeer.map((n) => n.id))} className="text-[11px] font-semibold shrink-0" style={cOrange}>
@@ -10567,11 +10585,18 @@ function ProveedorNotificaciones({ data, user, children }) {
       )}
 
       {detalle && (
-        <Modal title={`${detalle.codigo} · ${esSolicitante ? "resultado" : "solicitud"}`} onClose={() => setDetalle(null)} wide>
+        <Modal title={detalle.codigo} onClose={() => setDetalle(null)} wide>
           <div className="text-left">
             {solicitud ? (
-              <DetalleActividad data={data} onClose={() => setDetalle(null)}
-                item={{ ...solicitud, tipo: "correctivo", tarea: solicitud.descripcion, ocultarCosto: !verCostos }} />
+              <>
+                {esSolicitante && solicitud.estado === "completada" && (
+                  <div className="mb-3">
+                    <BloqueCalificacion solicitud={solicitud} onCalificar={(patch) => calificar(solicitud.id, patch)} />
+                  </div>
+                )}
+                <DetalleActividad data={data} onClose={() => setDetalle(null)}
+                  item={{ ...solicitud, tipo: "correctivo", tarea: solicitud.descripcion, ocultarCosto: !verCostos, sinCalificacion: esSolicitante }} />
+              </>
             ) : servicio ? (
               <FichaServicio srv={servicio} data={data} costos={verCostos} />
             ) : (
@@ -10617,7 +10642,7 @@ export default function App() {
       ) : !user ? (
         <Login usuarios={data.usuarios} onLogin={setUser} />
       ) : (
-        <ProveedorNotificaciones key={user.id} data={data} user={user}>
+        <ProveedorNotificaciones key={user.id} data={data} persist={persist} user={user}>
           {vista()}
         </ProveedorNotificaciones>
       )}
