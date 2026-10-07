@@ -602,6 +602,14 @@ function presupuestoGlobalMes(data, mes) {
 
 /* --- KPIs: MTBF = días ÷ nº correctivos; MTTR = promedio de días de cierre;
    costo/estudiante = (preventivo + correctivo + servicios) ÷ estudiantes --- */
+/* Mes de cierre de una solicitud (null si sigue abierta). */
+const mesCierre = (s) => (s.estado === "completada" ? mesKey(s.fechaCompletada || s.fechaProgramada || s.fecha) : null);
+
+/* Solicitudes que seguían abiertas al terminar el mes: reportadas hasta ese
+   mes y no cerradas dentro de él. Para el mes en curso son las abiertas hoy. */
+const abiertasAlCierre = (data, sedeIds, mes) => (data.solicitudes || []).filter((s) =>
+  sedeIds.includes(s.sedeId) && s.fecha && mesKey(s.fecha) <= mes && !(mesCierre(s) && mesCierre(s) <= mes));
+
 function indicadoresMes(data, sedeIds, mes) {
   const enMes = (f) => mesKey(f) === mes;
   const correctivos = (data.solicitudes || []).filter((s) => sedeIds.includes(s.sedeId) && enMes(s.fecha));
@@ -616,8 +624,12 @@ function indicadoresMes(data, sedeIds, mes) {
   const nFallas = correctivos.length;
   const mtbf = nFallas > 0 ? diasTranscurridos / nFallas : null;
 
-  // MTTR con precisión de horas: usa fecha+hora de apertura y de cierre
-  const cerrados = correctivos.filter((s) => s.estado === "completada" && s.fechaCompletada && s.fecha);
+  /* MTTR con precisión de horas (fecha+hora de apertura y de cierre). Cuenta
+     las solicitudes cerradas en el mes, aunque se hayan reportado antes: así
+     el trabajo se refleja en el mes en que se hizo y los meses ya cerrados
+     no cambian cuando se finaliza algo atrasado. */
+  const cerradasMes = (data.solicitudes || []).filter((s) => sedeIds.includes(s.sedeId) && mesCierre(s) === mes);
+  const cerrados = cerradasMes.filter((s) => s.fechaCompletada && s.fecha);
   const diasDe = (s) => Math.max(0, horasEntre(s.fecha, s.hora, s.fechaCompletada, s.horaCompletada) / 24);
   const mttr = cerrados.length > 0
     ? cerrados.reduce((acc, s) => acc + diasDe(s), 0) / cerrados.length
@@ -629,7 +641,7 @@ function indicadoresMes(data, sedeIds, mes) {
      que realmente responde en lo urgente. */
   const porCriticidad = CRITICIDAD_IDS.map((id) => {
     const delNivel = correctivos.filter((s) => (s.criticidad || "media") === id);
-    const cerradosNivel = delNivel.filter((s) => s.estado === "completada" && s.fechaCompletada && s.fecha);
+    const cerradosNivel = cerrados.filter((s) => (s.criticidad || "media") === id);
     return {
       id,
       label: CRITICIDAD[id].label,
@@ -8661,10 +8673,14 @@ function generarResumenUnificado(data, sedes, mes) {
   const presuSedes = sedes.map((s) => presupuestoSedeMes(data, s.id, mes));
   const presupuesto = presuSedes.reduce((a, x) => a + x.presupuesto, 0);
   const gastado = presuSedes.reduce((a, x) => a + x.gastado, 0);
+  // Recibidas por mes de reporte; resueltas y satisfacción por mes de cierre
+  const resueltasDe = (ids) => (data.solicitudes || []).filter((s) => ids.includes(s.sedeId) && mesCierre(s) === mes);
+  const anteriores = (xs) => xs.filter((s) => s.fecha && mesKey(s.fecha) < mes).length;
   const delMes = solicitudesDe(sedeIds);
-  const resueltas = delMes.filter((s) => s.estado === "completada").length;
-  const abiertas = delMes.length - resueltas;
-  const sat = satisfaccion({ ...data, solicitudes: delMes }, sedeIds);
+  const resueltasMes = resueltasDe(sedeIds);
+  const resueltas = resueltasMes.length;
+  const abiertas = abiertasAlCierre(data, sedeIds, mes).length;
+  const sat = satisfaccion({ ...data, solicitudes: resueltasMes }, sedeIds);
   const porAprobar = porAprobarDe(sedeIds);
   const montoPorAprobar = porAprobar.reduce((a, x) => a + montoServicio(x), 0);
 
@@ -8676,14 +8692,16 @@ function generarResumenUnificado(data, sedes, mes) {
 
   // 1. Solicitudes y preventivos
   txt(`${etiqueta.charAt(0).toUpperCase()}${etiqueta.slice(1)}. `);
-  if (delMes.length > 0) {
-    txt(plural(resueltas, "Se resolvió ", "Se resolvieron "));
-    neg(`${resueltas} de ${plural(delMes.length, "1 solicitud recibida", `las ${delMes.length} solicitudes recibidas`)}`);
-  } else {
-    txt("No se recibieron solicitudes");
+  txt(delMes.length > 0 ? plural(delMes.length, "Se recibió ", "Se recibieron ") : "No se recibieron solicitudes");
+  if (delMes.length > 0) neg(`${delMes.length} ${plural(delMes.length, "solicitud", "solicitudes")}`);
+  if (resueltas > 0) {
+    txt(plural(resueltas, " y se resolvió ", " y se resolvieron "));
+    neg(`${resueltas}`);
+    const prev = anteriores(resueltasMes);
+    if (prev > 0) txt(` (${prev} ${plural(prev, "venía", "venían")} de meses anteriores)`);
   }
   if (avance.total > 0) {
-    txt(plural(avance.completadas, " y se cumplió ", " y se cumplieron "));
+    txt(plural(avance.completadas, "; se cumplió ", "; se cumplieron "));
     neg(`${avance.completadas} de ${plural(avance.total, "1 preventivo programado", `los ${avance.total} preventivos programados`)}`);
     txt(" (");
     neg(`${avance.cumplimiento.toFixed(0)}%`);
@@ -8728,7 +8746,7 @@ function generarResumenUnificado(data, sedes, mes) {
     txt("No quedan pendientes.");
   } else {
     txt("Quedan pendientes ");
-    if (abiertas > 0) neg(`${abiertas} ${plural(abiertas, "solicitud abierta", "solicitudes abiertas")}`);
+    if (abiertas > 0) neg(`${abiertas} ${plural(abiertas, "solicitud abierta", "solicitudes abiertas")} al cierre del mes`);
     if (abiertas > 0 && porAprobar.length > 0) txt(" y ");
     if (porAprobar.length > 0) {
       neg(`${porAprobar.length} ${plural(porAprobar.length, "servicio", "servicios")} por ${dinero(montoPorAprobar)}`);
@@ -8741,11 +8759,14 @@ function generarResumenUnificado(data, sedes, mes) {
   const vinetas = sedes.map((s) => {
     const partes = [];
     const sols = solicitudesDe([s.id]);
-    const res = sols.filter((x) => x.estado === "completada").length;
-    const abiertasSede = sols.length - res;
-    partes.push(sols.length > 0
-      ? `${res} de ${sols.length} ${plural(sols.length, "solicitud resuelta", "solicitudes resueltas")}${abiertasSede > 0 ? ` (${abiertasSede} ${plural(abiertasSede, "abierta", "abiertas")})` : ""}`
-      : "sin solicitudes");
+    const resSede = resueltasDe([s.id]);
+    const prevSede = anteriores(resSede);
+    const abiertasSede = abiertasAlCierre(data, [s.id], mes).length;
+    partes.push([
+      sols.length > 0 ? `${sols.length} ${plural(sols.length, "solicitud recibida", "solicitudes recibidas")}` : "sin solicitudes nuevas",
+      resSede.length > 0 ? `${resSede.length} ${plural(resSede.length, "resuelta", "resueltas")}${prevSede > 0 ? ` (${prevSede} de meses anteriores)` : ""}` : "",
+      abiertasSede > 0 ? `${abiertasSede} ${plural(abiertasSede, "pendiente", "pendientes")}` : "",
+    ].filter(Boolean).join(", "));
 
     const av = avancePlan(data, [s.id], mes);
     if (av.total > 0) {
@@ -8883,7 +8904,7 @@ function bloqueResumenUnificado(data, sedes, mes) {
 function tablaIndicadoresCriticidad(kpi) {
   const num = (v, suf = " d") => (v === null || v === undefined ? "—" : v.toFixed(1) + suf);
   const filas = (kpi.porCriticidad || [])
-    .filter((d) => d.fallas > 0)
+    .filter((d) => d.fallas > 0 || d.cerrados > 0)
     .map((d) => `<tr>
       <td>${_esc(d.label)}</td>
       <td class="c">${num(d.mtbf)}</td>
@@ -9040,8 +9061,8 @@ function construirReporteMensualHTML(data, mes) {
       </div>
 
       <div class="resumen-sede">
-        <p>Durante ${_esc(mesLabel(mes))} se registraron <b>${k.nFallas}</b> correctivo(s), de los cuales
-        <b>${k.cerrados}</b> quedaron cerrados${a.total ? `, con un cumplimiento del plan preventivo del <b>${a.cumplimiento === null ? "—" : a.cumplimiento.toFixed(0) + "%"}</b>` : ""}.
+        <p>Durante ${_esc(mesLabel(mes))} se registraron <b>${k.nFallas}</b> correctivo(s) y se cerraron
+        <b>${k.cerrados}</b>${a.total ? `, con un cumplimiento del plan preventivo del <b>${a.cumplimiento === null ? "—" : a.cumplimiento.toFixed(0) + "%"}</b>` : ""}.
         El costo del mes fue de <b>${money(k.costoTotal)}</b>${k.costoPorEstudiante !== null ? ` (${money(k.costoPorEstudiante)} por estudiante)` : ""}.
         ${nota ? _esc(nota.texto.charAt(0).toUpperCase() + nota.texto.slice(1)) + "." : ""}</p>
       </div>
