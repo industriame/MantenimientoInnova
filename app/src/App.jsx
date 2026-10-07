@@ -978,9 +978,9 @@ function preventivoPendiente(plan, rel, mes = mesKey(fmtDate(new Date())), ap = 
   /* Si su próxima fecha cae después del mes, no toca aún: aparecerá como
      pendiente cuando llegue el mes en que vence. */
   if (ultimaFecha) {
-    const ciclo = FRECUENCIA_DIAS[plan.frecuencia] || 90;
-    const proxima = new Date(`${ultimaFecha}T00:00:00`);
-    proxima.setDate(proxima.getDate() + ciclo);
+    // Por meses, igual que el plan anual: un semestral de abril toca en octubre
+    const proxima = new Date(`${mesKey(ultimaFecha)}-01T00:00:00`);
+    proxima.setMonth(proxima.getMonth() + (FRECUENCIA_MESES[plan.frecuencia] || 3));
     if (mesKey(fmtDate(proxima)) > mes) return false;
   }
   return { ultima, ultimaFecha };
