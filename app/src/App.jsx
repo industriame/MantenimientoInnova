@@ -3343,12 +3343,13 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
   /* Actividades del mes con el mismo criterio que el reporte PDF: órdenes y
      solicitudes por su mes contable (cierre, si no la fecha programada, si
      no la del reporte) y servicios por su fecha programada. */
-  const solMes = solicitudes.filter((x) => mesContable(x) === mes);
+  // Correctivas: las reportadas en el mes; resueltas: las cerradas en el mes
+  const solMes = solicitudes.filter((x) => mesKey(x.fecha) === mes);
+  const resueltasMes = solicitudes.filter((x) => mesCierre(x) === mes).length;
   const ordMes = ordenes.filter((x) => mesContable(x) === mes);
   const srvMes = serviciosDash.filter((x) => mesKey(x.fecha) === mes);
   const hechas = (xs) => xs.filter((x) => x.estado === "completada").length;
-  const totalMes = solMes.length + ordMes.length + srvMes.length;
-  const completadasMes = hechas(solMes) + hechas(ordMes) + hechas(srvMes);
+  const completadasMes = resueltasMes + hechas(ordMes) + hechas(srvMes);
 
   const alcance = sedeFiltro ? [sedeFiltro] : sedeIds;
   const kpi = useMemo(() => indicadoresMes(data, alcance, mes), [data, sedeFiltro, mes, sedeIds.join(",")]);
@@ -3376,7 +3377,7 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
   const porSede = sedes.map((s) => ({
     id: s.id,
     nombre: s.nombre.length > 10 ? s.nombre.slice(0, 9) + "…" : s.nombre,
-    correctivos: data.solicitudes.filter((x) => x.sedeId === s.id && mesContable(x) === mes).length,
+    correctivos: data.solicitudes.filter((x) => x.sedeId === s.id && mesKey(x.fecha) === mes).length,
     preventivos: data.ordenes.filter((x) => x.sedeId === s.id && mesContable(x) === mes).length,
     servicios: (data.servicios || []).filter((x) => x.sedeId === s.id && mesKey(x.fecha) === mes).length,
   }));
@@ -3425,10 +3426,10 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
       )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <Stat label="Correctivas del mes" value={solMes.length} icon={<AlertTriangle size={14} />} color={COLORS.charcoal} sub={`${hechas(solMes)} completadas`} />
+        <Stat label="Correctivas del mes" value={solMes.length} icon={<AlertTriangle size={14} />} color={COLORS.charcoal} sub={`${resueltasMes} resueltas en el mes`} />
         <Stat label="Preventivas del mes" value={ordMes.length} icon={<ClipboardList size={14} />} color={COLORS.orange} sub={`${hechas(ordMes)} completadas`} />
         <Stat label="Servicios del mes" value={srvMes.length} icon={<Wrench size={14} />} color="#3B6EA5" sub={`${hechas(srvMes)} completados`} />
-        <Stat label="Total completadas" value={completadasMes} icon={<CheckCircle2 size={14} />} color={COLORS.verde} sub={`de ${totalMes} actividades del mes`} />
+        <Stat label="Total completadas" value={completadasMes} icon={<CheckCircle2 size={14} />} color={COLORS.verde} sub="Correctivas, preventivas y servicios cerrados en el mes" />
       </div>
 
       {/* Actividades por sede + avance del plan preventivo */}
@@ -9016,14 +9017,14 @@ function construirReporteMensualHTML(data, mes) {
 
   // Actividades del mes, de los tres tipos
   const ordMes = data.ordenes.filter((o) => mesContable(o) === mes);
-  const solMes = data.solicitudes.filter((s) => mesContable(s) === mes);
+  const solMes = data.solicitudes.filter((s) => mesKey(s.fecha) === mes);   // reportadas en el mes
   const srvMes = (data.servicios || []).filter((s) => mesKey(s.fecha) === mes);
   const totalAct = ordMes.length + solMes.length + srvMes.length;
 
   const porSede = sedes.map((s) => ({
     nombre: s.nombre,
     prev: data.ordenes.filter((o) => o.sedeId === s.id && mesContable(o) === mes).length,
-    corr: data.solicitudes.filter((x) => x.sedeId === s.id && mesContable(x) === mes).length,
+    corr: data.solicitudes.filter((x) => x.sedeId === s.id && mesKey(x.fecha) === mes).length,
     serv: (data.servicios || []).filter((x) => x.sedeId === s.id && mesKey(x.fecha) === mes).length,
   }));
 
