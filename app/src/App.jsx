@@ -854,7 +854,9 @@ function cronogramaAnual(data, anio, sedeIds) {
     (plan.aplicaciones || []).forEach((ap) => {
       if (sedeIds && !sedeIds.includes(ap.sedeId)) return;
       const proyectados = mesesProyectados(plan, ap, anio, inicio, data.ordenes || []);
-      if (!proyectados.length) return;
+      // La fecha cargada en el plan, si ya pasó, es un mantenimiento realizado
+      const inicialEnAnio = fechaInicialRealizada(ap) && Number(ap.fechaInicial.slice(0, 4)) === anio;
+      if (!proyectados.length && !inicialEnAnio) return;
 
       /* Ejecutado: órdenes de ese plan y ubicación cerradas dentro del año,
          agrupadas por mes (índice 0-11) con su fecha y código, para poder
@@ -870,6 +872,11 @@ function cronogramaAnual(data, anio, sedeIds) {
         ejecutados.set(m, [...(ejecutados.get(m) || []), { fecha: f, codigo: o.codigo || "" }]
           .sort((a, b) => a.fecha.localeCompare(b.fecha)));
       });
+      if (inicialEnAnio) {
+        const m = Number(ap.fechaInicial.slice(5, 7)) - 1;
+        ejecutados.set(m, [...(ejecutados.get(m) || []), { fecha: ap.fechaInicial, codigo: "Mantenimiento inicial" }]
+          .sort((a, b) => a.fecha.localeCompare(b.fecha)));
+      }
 
       // Última ejecución (de cualquier año) y la próxima según la frecuencia
       const ultima = (data.ordenes || [])
