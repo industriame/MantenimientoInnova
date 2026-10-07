@@ -792,7 +792,18 @@ function serieConfiabilidad(data, sedeIds, mesFinal, meses = 6) {
    (o se les asignó fecha de creación al editarlos) después de haberse
    ejecutado, y proyectar desde ahí corría el ciclo — un semestral hecho en
    agosto aparecía programado en septiembre. */
+/* La fecha del plan en cada ubicación tiene dos lecturas:
+   - pasada o de hoy: es el último mantenimiento realizado (antes de usar el
+     sistema), así que el próximo toca un ciclo después;
+   - futura: es el día en que arranca el plan. */
+const fechaInicialRealizada = (ap) => !!ap?.fechaInicial && ap.fechaInicial <= fmtDate(new Date());
+
 function inicioAplicacion(plan, ap, inicioServicio, ordenes = []) {
+  if (fechaInicialRealizada(ap)) {
+    const d = new Date(`${ap.fechaInicial}T00:00:00`);
+    d.setMonth(d.getMonth() + (FRECUENCIA_MESES[plan.frecuencia] || 3));
+    return fmtDate(d);
+  }
   if (ap.fechaInicial) return ap.fechaInicial;
   const primera = ordenes
     .filter((o) => o.planId === plan.id && o.sedeId === ap.sedeId && o.estado === "completada"
@@ -852,7 +863,9 @@ function cronogramaAnual(data, anio, sedeIds) {
       const ultima = (data.ordenes || [])
         .filter((o) => o.planId === plan.id && o.sedeId === ap.sedeId && o.estado === "completada"
           && (o.faseId || "") === (ap.faseId || "") && (o.activoId || "") === (ap.activoId || ""))
-        .map((o) => o.fechaCompletada || o.fechaProgramada).filter(Boolean).sort().pop() || "";
+        .map((o) => o.fechaCompletada || o.fechaProgramada)
+        .concat(fechaInicialRealizada(ap) ? [ap.fechaInicial] : [])
+        .filter(Boolean).sort().pop() || "";
       const arranque = inicioAplicacion(plan, ap, inicio, data.ordenes || []);
       let proxima = arranque;
       if (ultima) {
@@ -869,7 +882,7 @@ function cronogramaAnual(data, anio, sedeIds) {
         planId: plan.id, tarea: plan.tarea, categoria: plan.categoria, frecuencia: plan.frecuencia,
         sedeId: ap.sedeId, ubicacion: ubicacionTexto(data.sedes, ap),
         lugar: activo ? `${activo.nombre} · ${fase.nombre}` : fase ? `${fase.nombre} completa` : "Sede completa",
-        inicio: arranque, fechaInicial: ap.fechaInicial || "", ultima, proxima,
+        inicio: arranque, fechaInicial: ap.fechaInicial || "", inicialRealizada: fechaInicialRealizada(ap), ultima, proxima,
         proyectados, ejecutados,
       });
     });
@@ -933,19 +946,25 @@ function preventivoPendiente(plan, rel, mes = mesKey(fmtDate(new Date())), ap = 
     .filter((o) => o.estado === "completada")
     .sort((a, b) => (a.fechaCompletada < b.fechaCompletada ? 1 : -1))[0];
 
-  /* Aún sin ejecutar y con fecha de inicio en un mes posterior: no toca
-     todavía. Aparece como pendiente cuando llega el mes de inicio. */
-  if (!ultima && ap?.fechaInicial && mesKey(ap.fechaInicial) > mes) return false;
+  /* Último mantenimiento: la orden completada más reciente o, si es
+     posterior (o no hay órdenes), la fecha del plan cuando ya pasó: esa
+     fecha cuenta como un mantenimiento realizado antes del sistema. */
+  const inicialHecha = fechaInicialRealizada(ap) ? ap.fechaInicial : "";
+  const ultimaFecha = [ultima?.fechaCompletada || "", inicialHecha].sort().pop();
 
-  /* Si ya se ejecutó y su próxima fecha cae después del mes, no toca aún:
-     aparecerá como pendiente cuando llegue el mes en que vence. */
-  if (ultima?.fechaCompletada) {
+  /* Sin mantenimiento previo y con fecha de inicio futura: no toca todavía.
+     Aparece como pendiente cuando llega el mes de inicio. */
+  if (!ultimaFecha && ap?.fechaInicial && mesKey(ap.fechaInicial) > mes) return false;
+
+  /* Si su próxima fecha cae después del mes, no toca aún: aparecerá como
+     pendiente cuando llegue el mes en que vence. */
+  if (ultimaFecha) {
     const ciclo = FRECUENCIA_DIAS[plan.frecuencia] || 90;
-    const proxima = new Date(`${ultima.fechaCompletada}T00:00:00`);
+    const proxima = new Date(`${ultimaFecha}T00:00:00`);
     proxima.setDate(proxima.getDate() + ciclo);
     if (mesKey(fmtDate(proxima)) > mes) return false;
   }
-  return { ultima };
+  return { ultima, ultimaFecha };
 }
 
 /* --- Pendientes: preventivo sin OT abierta (reaparece tras completarse) +
@@ -957,7 +976,7 @@ function getPendientes(data) {
     (plan.aplicaciones || []).forEach((ap) => {
       const pend = preventivoPendiente(plan, ordenesDeAplicacion(data, plan, ap), undefined, ap);
       if (!pend) return;
-      const { ultima } = pend;
+      const { ultimaFecha } = pend;
 
       items.push({
         key: `${plan.id}|${ap.sedeId}|${ap.faseId}|${ap.activoId}`,
@@ -967,7 +986,7 @@ function getPendientes(data) {
         duracionValor: plan.duracionValor, duracionUnidad: plan.duracionUnidad,
         sedeId: ap.sedeId, faseId: ap.faseId, activoId: ap.activoId,
         fechaInicial: ap.fechaInicial,
-        ultimoMantenimiento: ultima?.fechaCompletada || null,
+        ultimoMantenimiento: ultimaFecha || null,
       });
     });
   });
@@ -2266,7 +2285,7 @@ function DetalleActividad({ item, data, onClose }) {
         {sinActivar && esPrev && (
           <Dato label="Último mantenimiento">{item.ultimoMantenimiento || "Sin registro previo"}</Dato>
         )}
-        {sinActivar && esPrev && item.fechaInicial && (
+        {sinActivar && esPrev && item.fechaInicial && !fechaInicialRealizada(item) && (
           <Dato label="Fecha de inicio">{item.fechaInicial}</Dato>
         )}
         {item.solicitanteId && (
@@ -5677,7 +5696,10 @@ function FilaAplicacion({ row, index, sedes, onChange, onRemove, canRemove }) {
             </select>
           </Field>
         ) : <span />}
-        <Field label="Fecha de inicio (opcional)">
+        <Field label="Último mantenimiento o inicio (opcional)"
+          hint={row.fechaInicial
+            ? (row.fechaInicial <= fmtDate(new Date()) ? "Cuenta como último mantenimiento realizado." : "Fecha futura: el plan arranca ese día.")
+            : "Pasada: último mantenimiento realizado. Futura: día en que arranca."}>
           <input type="date" value={row.fechaInicial} onChange={(e) => onChange(row.id, { fechaInicial: e.target.value })}
             className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
         </Field>
@@ -8114,7 +8136,7 @@ function VistaPlanAnual({ data, sedes }) {
               <>
                 {dato("Frecuencia", f.frecuencia)}
                 {pop.tipo === "tarea" && f.categoria && dato("Categoría", f.categoria)}
-                {dato(f.fechaInicial ? "Fecha de inicio" : "Arranque", fmtDMY(f.inicio))}
+                {!f.inicialRealizada && dato(f.fechaInicial ? "Fecha de inicio" : "Arranque", fmtDMY(f.inicio))}
                 {dato("Última ejecución", fmtDMY(f.ultima))}
                 {pop.tipo === "tarea" && dato("Próxima", fmtDMY(f.proxima))}
               </>
