@@ -1709,8 +1709,8 @@ function Modal({ title, onClose, children, wide, xl }) {
     <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50"
       style={{ overflowY: "auto" }} onClick={onClose}>
       <div
-        className={`bg-white rounded-t-xl sm:rounded-lg shadow-xl w-full ${xl ? "sm:max-w-5xl" : wide ? "sm:max-w-lg" : "sm:max-w-sm"}`}
-        style={{ maxHeight: "92vh", overflowY: "auto", WebkitOverflowScrolling: "touch" }}
+        className={`modal-caja bg-white rounded-t-xl sm:rounded-lg shadow-xl w-full ${xl ? "sm:max-w-5xl" : wide ? "sm:max-w-lg" : "sm:max-w-sm"}`}
+        style={{ overflowY: "auto", WebkitOverflowScrolling: "touch" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b sticky top-0 bg-white z-10" style={bLine}>

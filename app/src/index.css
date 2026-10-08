@@ -110,3 +110,24 @@ code {
   padding: 4px 8px;
   background: var(--code-bg);
 }
+
+/* iPhone / iPad (Safari y Chrome usan el mismo motor): con letra menor a
+   16px, iOS hace zoom automático al tocar un campo y las ventanas quedan
+   desplazadas y difíciles de cerrar. Solo aplica en iOS. */
+@supports (-webkit-touch-callout: none) {
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* Alto de las ventanas emergentes: en Chrome para iOS "vh" incluye la barra
+   del navegador y el pie de la ventana quedaba oculto; "dvh" usa el alto
+   visible real (con "vh" como respaldo en navegadores antiguos). */
+.modal-caja {
+  max-height: 92vh;
+}
+@supports (height: 100dvh) {
+  .modal-caja {
+    max-height: 92dvh;
+  }
+}
