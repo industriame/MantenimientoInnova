@@ -4476,7 +4476,7 @@ function PasoAServicio({ item, rol, acciones }) {
   );
 }
 
-function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicial, permitirReasignar }) {
+function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicial, permitirReasignar, onCompletada }) {
   const [open, setOpen] = useState(!!abiertoInicial);
   const [estado, setEstado] = useState(item.estado);
   const [observaciones, setObservaciones] = useState(item.observaciones || "");
@@ -4633,6 +4633,13 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
        parten del mismo "item" viejo y el segundo pisa al primero — por eso el
        estado "completada" no quedaba guardado al primer intento. */
     await acciones.updateActividad(item, patch, { sinRegistro: corrige });
+    /* Al completarla se sale de la tarea: se cierra la ventana que la
+       contiene o, si está en una lista, se pliega la tarjeta. */
+    if (patch.estado === "completada" && item.estado !== "completada") {
+      setGuardado(null);
+      if (onCompletada) onCompletada(); else setOpen(false);
+      return;
+    }
     setGuardado("ok");
     setTimeout(() => setGuardado(null), 2500);
   };
@@ -5250,7 +5257,7 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
                 : ejecutar.tipo === "servicio" ? enEdicion.trabajo : enEdicion.tarea,
               fechaProgramada: ejecutar.tipo === "servicio" ? enEdicion.fecha : enEdicion.fechaProgramada,
             }}
-            data={data} acciones={acciones} rol="tecnico" abiertoInicial />
+            data={data} acciones={acciones} rol="tecnico" abiertoInicial onCompletada={() => setEjecutar(null)} />
         </Modal>
       )}
 
@@ -6387,7 +6394,7 @@ function AdminProgramacion({ data, persist, user, foco }) {
                 : ejecutar.tipo === "servicio" ? enEdicion.trabajo : enEdicion.tarea,
               fechaProgramada: ejecutar.tipo === "servicio" ? enEdicion.fecha : enEdicion.fechaProgramada,
             }}
-            data={data} acciones={acciones} rol="admin" abiertoInicial permitirReasignar />
+            data={data} acciones={acciones} rol="admin" abiertoInicial permitirReasignar onCompletada={() => setEjecutar(null)} />
         </Modal>
       )}
     </div>
@@ -7210,7 +7217,7 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
       <div className="mt-2">
         <TarjetaActividad
           item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }}
-          data={data} acciones={acciones} rol="admin" abiertoInicial />
+          data={data} acciones={acciones} rol="admin" abiertoInicial onCompletada={() => setGestionar(null)} />
         <button onClick={() => setGestionar(null)} className="w-full mt-1 text-[10px] font-semibold" style={cSlate}>Ocultar</button>
       </div>
     ) : botonAccion("Gestionar", COLORS.slate, () => setGestionar(srv.id))
