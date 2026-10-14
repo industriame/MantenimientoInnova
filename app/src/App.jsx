@@ -901,7 +901,7 @@ function cronogramaAnual(data, anio, sedeIds) {
         planId: plan.id, tarea: plan.tarea, categoria: plan.categoria, frecuencia: plan.frecuencia,
         sedeId: ap.sedeId, ubicacion: ubicacionTexto(data.sedes, ap),
         lugar: activo ? `${activo.nombre} · ${fase.nombre}` : fase ? `${fase.nombre} completa` : "Sede completa",
-        inicio: arranque, fechaInicial: ap.fechaInicial || "", inicialRealizada: fechaInicialRealizada(ap), ultima, proxima,
+        ap, inicio: arranque, fechaInicial: ap.fechaInicial || "", inicialRealizada: fechaInicialRealizada(ap), ultima, proxima,
         proyectados, ejecutados,
       });
     });
@@ -7916,6 +7916,7 @@ function VistaPlanAnual({ data, sedes }) {
      un mes ejecutado, un mes programado o el nombre de la tarea. Va en
      posición fija para que el scroll de la tabla no lo recorte. */
   const [pop, setPop] = useState(null);   // { tipo, key, mes, x, y, arriba, fila }
+  const [detallePlan, setDetallePlan] = useState(null);   // fila abierta al tocar el nombre de la tarea
 
   useEffect(() => {
     if (!pop) return;
@@ -8008,7 +8009,7 @@ function VistaPlanAnual({ data, sedes }) {
     <div className="mt-4 space-y-3">
       <p className="text-xs" style={cSlate}>
         Proyección del plan preventivo, agrupada por sede. Cada tarea arranca en su fecha de inicio (o en su primera
-        ejecución) y se repite según su frecuencia. Pasa el mouse o toca un mes, o el nombre de la tarea, para ver el detalle.
+        ejecución) y se repite según su frecuencia. Pasa el mouse o toca un mes para ver el detalle; toca el nombre de la tarea para ver sus actividades y ejecuciones anteriores.
       </p>
 
       <div className="flex items-center gap-2 flex-wrap">
@@ -8084,8 +8085,9 @@ function VistaPlanAnual({ data, sedes }) {
                       <tr key={f.key}>
                         <td className="sticky left-0 z-10 bg-white px-2 py-1 align-middle"
                           style={{ borderBottom: bd, borderRight: bd, width: tareaW, minWidth: tareaW, maxWidth: tareaW }}>
-                          <button type="button" {...disparadores("tarea", f)} className="text-left w-full"
-                            aria-label={`Ver detalle de ${f.tarea}`}>
+                          <button type="button" {...disparadores("tarea", f)}
+                            onClick={() => { setPop(null); setDetallePlan(f); }}
+                            className="text-left w-full" aria-label={`Ver actividades y ejecuciones de ${f.tarea}`}>
                             <div style={{ fontSize: 10.5, fontWeight: 600, color: COLORS.charcoal, lineHeight: 1.25, wordBreak: "break-word",
                               textDecoration: esAbierto("tarea", f) ? "underline" : "none" }}>{f.tarea}</div>
                             <div style={{ fontSize: 9, color: COLORS.slate }}>{f.lugar} · {f.frecuencia}</div>
@@ -8171,6 +8173,91 @@ function VistaPlanAnual({ data, sedes }) {
           </div>
         );
       })()}
+
+      {detallePlan && (
+        <Modal title={detallePlan.tarea} onClose={() => setDetallePlan(null)} wide>
+          <DetallePlanAnual fila={detallePlan} data={data} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* Ventana del plan anual al tocar una tarea: datos del plan en esa ubicación,
+   los pasos del mantenimiento y las ejecuciones anteriores (cada una se
+   despliega con lo registrado: checklist, observaciones y fotos). */
+function DetallePlanAnual({ fila, data }) {
+  const [abierta, setAbierta] = useState(null);
+  const plan = (data.planes || []).find((p) => p.id === fila.planId);
+  const ejecuciones = (plan ? ordenesDeAplicacion(data, plan, fila.ap) : [])
+    .filter((o) => o.estado === "completada")
+    .sort((a, b) => (b.fechaCompletada || b.fechaProgramada || "").localeCompare(a.fechaCompletada || a.fechaProgramada || ""));
+  const dato = (label, valor) => (
+    <div>
+      <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>{label}</p>
+      <p className="text-xs" style={cChar}>{valor || "—"}</p>
+    </div>
+  );
+
+  return (
+    <div className="space-y-4 text-left">
+      <div className="rounded-md p-3" style={{ background: COLORS.cream }}>
+        <p className="text-xs" style={cSlate}>{fila.lugar} · {sedeNombre(data.sedes, fila.sedeId)}</p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">
+          {dato("Frecuencia", fila.frecuencia)}
+          {dato("Categoría", fila.categoria)}
+          {dato("Última ejecución", fila.ultima ? fmtDMY(fila.ultima) : "")}
+          {dato("Próxima", fila.proxima ? fmtDMY(fila.proxima) : "")}
+        </div>
+      </div>
+
+      <div>
+        <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={cSlate}>Actividades del mantenimiento</p>
+        {(plan?.procedimientoPasos || []).length > 0
+          ? <ChecklistEjecucion items={plan.procedimientoPasos} readOnly compacto />
+          : <Empty>Este plan no tiene pasos registrados.</Empty>}
+      </div>
+
+      <div>
+        <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={cSlate}>
+          Ejecuciones anteriores ({ejecuciones.length + (fila.inicialRealizada ? 1 : 0)})
+        </p>
+        <div className="space-y-1.5">
+          {ejecuciones.map((o) => {
+            const abiertaEsta = abierta === o.id;
+            return (
+              <div key={o.id} className="border rounded-md" style={{ ...cardStyle, borderLeft: `3px solid ${COLORS.verde}` }}>
+                <button onClick={() => setAbierta(abiertaEsta ? null : o.id)}
+                  className="w-full flex items-center justify-between gap-2 px-2.5 py-2 text-left">
+                  <span className="flex items-center gap-2 min-w-0">
+                    {abiertaEsta ? <ChevronDown size={13} color={COLORS.slate} /> : <ChevronRight size={13} color={COLORS.slate} />}
+                    <span className="text-xs font-semibold" style={cChar}>{fmtDMY(o.fechaCompletada || o.fechaProgramada)}</span>
+                    <span className="text-[11px]" style={cSlate}>{o.codigo}</span>
+                  </span>
+                  <span className="text-[11px] truncate" style={cSlate}>{o.tecnicoId ? usuarioNombre(data.usuarios, o.tecnicoId) : ""}</span>
+                </button>
+                {abiertaEsta && (
+                  <div className="px-2.5 pb-2.5 pt-1 space-y-2.5 border-t" style={bLine}>
+                    {(o.checklist || []).length > 0
+                      ? <ChecklistEjecucion items={o.checklist} readOnly compacto />
+                      : <p className="text-[11px]" style={cSlate}>Sin pasos registrados en esta ejecución.</p>}
+                    {o.observaciones && <Field label="Observaciones"><ReadOnly>{o.observaciones}</ReadOnly></Field>}
+                    <FotosEvidencia fotos={fotosDe(o)} readOnly />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {fila.inicialRealizada && (
+            <div className="border rounded-md px-2.5 py-2 flex items-center justify-between gap-2"
+              style={{ ...cardStyle, borderLeft: `3px solid ${COLORS.slate}` }}>
+              <span className="text-xs font-semibold" style={cChar}>{fmtDMY(fila.fechaInicial)}</span>
+              <span className="text-[11px]" style={cSlate}>Mantenimiento inicial (cargado en el plan)</span>
+            </div>
+          )}
+          {ejecuciones.length === 0 && !fila.inicialRealizada && <Empty>Aún no hay ejecuciones registradas.</Empty>}
+        </div>
+      </div>
     </div>
   );
 }
