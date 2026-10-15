@@ -4258,7 +4258,7 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
 
   return (
    <ProveedorDetalle data={data}>
-    <div className="max-w-4xl mx-auto px-4 pb-16">
+    <div className="w-full max-w-6xl mx-auto px-4 lg:px-8 pb-16">
       <AppHeader user={user} onLogout={onLogout} ultimaSync={ultimaSync} sedesTexto={sede.nombre} />
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
 
@@ -5252,7 +5252,7 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
 
   return (
    <ProveedorDetalle data={data}>
-    <div className="max-w-4xl mx-auto px-4 pb-16">
+    <div className="w-full max-w-6xl mx-auto px-4 lg:px-8 pb-16">
       <AppHeader user={user} onLogout={onLogout} ultimaSync={ultimaSync} sedesTexto={`${misSedes.length} sede${misSedes.length === 1 ? "" : "s"}`} />
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
 
@@ -8074,8 +8074,8 @@ function VistaPlanAnual({ data, sedes }) {
     setGenerando(true); setProgreso("Preparando…");
     try {
       const nombreSede = fSede === "todas" ? "Todas las sedes" : sedeNombre(data.sedes, fSede);
-      const blob = await generarPDF(construirPlanAnualHTML(grupos, anio, nombreSede), { onProgreso: setProgreso });
-      const nombre = `plan-anual-preventivo-${anio}.pdf`;
+      const blob = await generarPDF(construirPlanAnualHTML(grupos, anio, nombreSede, data), { onProgreso: setProgreso });
+      const nombre = `reporte-plan-anual-${anio}.pdf`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url; a.download = nombre;
@@ -8111,7 +8111,7 @@ function VistaPlanAnual({ data, sedes }) {
         <button onClick={hacerPDF} disabled={generando || !filas.length}
           className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white disabled:opacity-50 shrink-0"
           style={{ background: COLORS.charcoal }}>
-          <Download size={13} /> {generando ? (progreso || "Generando…") : "PDF del año"}
+          <Download size={13} /> {generando ? (progreso || "Generando…") : "Reporte PDF"}
         </button>
       </div>
 
@@ -8415,33 +8415,134 @@ ${evidencias.length ? `<h3>Evidencia del técnico</h3><div>${evidencias.map((f) 
 }
 
 /* PDF del cronograma del año consultado: una sección por sede. */
-function construirPlanAnualHTML(grupos, anio, nombreSede) {
+/* Ejecuciones cerradas de una fila del plan anual (plan + ubicación) dentro
+   del año, de la más antigua a la más reciente. */
+function ejecucionesFilaAnio(data, f, anio) {
+  return (data.ordenes || []).filter((o) => o.planId === f.planId && o.sedeId === f.sedeId
+    && (o.faseId || "") === (f.ap.faseId || "") && (o.activoId || "") === (f.ap.activoId || "")
+    && o.estado === "completada" && Number((o.fechaCompletada || o.fechaProgramada || "").slice(0, 4)) === anio)
+    .sort((x, y) => (x.fechaCompletada || x.fechaProgramada).localeCompare(y.fechaCompletada || y.fechaProgramada));
+}
+
+/* Reporte del plan anual en tres partes:
+   1. Cronograma anual por sede (una hoja por sede).
+   2. Lista de actividades: título, frecuencia y pasos de cada plan.
+   3. Desglose de actividades de mantenimiento: por sede, los pasos de cada
+      tarea con lo registrado en cada mes, en la misma tabla que Monitoreo. */
+function construirPlanAnualHTML(grupos, anio, nombreSede, data) {
   const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
   const todas = grupos.flatMap((g) => g.filas);
   const tot = resumenPlanAnual(todas);
   const pct = (r) => (r.pct === null ? "—" : `${r.pct}%`);
+  const cabMeses = MESES.map((m) => `<th class="c">${m.slice(0, 3)}</th>`).join("");
+  const cabecera = (titulo, sub) => `<div class="hdr">
+    <div><h1>${esc(titulo)}</h1><p class="sub">${esc(sub)}</p></div>
+    <div class="marca"><img src="${LOGO_ISE}" alt="IndustriaMe"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div>
+  </div>`;
+  const pie = (txt) => `<div class="pie"><span>IndustriaMe S.A.S. · ${esc(txt)}</span><span>Generado el ${esc(emitido)}</span></div>`;
+  const sub = `${anio} · ${nombreSede}`;
 
-  const cabMeses = MESES.map((m) => `<th>${m.slice(0, 3)}</th>`).join("");
-  const secciones = grupos.map(({ sede, filas }) => {
+  // 1. Cronograma anual por sede
+  const cronograma = grupos.map(({ sede, filas }, i) => {
     const r = resumenPlanAnual(filas);
     const cuerpo = filas.map((f) => {
-      const celdas = MESES.map((m, i) => {
-        if (f.ejecutados.has(i)) return `<td class="c ok">✓</td>`;
-        if (f.proyectados.includes(i)) return `<td class="c prog">●</td>`;
+      const celdas = MESES.map((m, k) => {
+        if (f.ejecutados.has(k)) return `<td class="c ok">✓</td>`;
+        if (f.proyectados.includes(k)) return `<td class="c prog">●</td>`;
         return `<td class="c"></td>`;
       }).join("");
       return `<tr><td><b>${esc(f.tarea)}</b><br><span class="mut">${esc(f.lugar)} · ${esc(f.frecuencia)}</span></td>${celdas}</tr>`;
     }).join("");
-    return `<div class="sede"><h2>${esc(sede.nombre)}</h2><span>${r.tareas} tarea(s) del año · ${r.ejecutadas} ejecutada(s) · cumplimiento ${pct(r)}</span></div>
-      <table><thead><tr><th>Tarea y ubicación</th>${cabMeses}</tr></thead><tbody>${cuerpo}</tbody></table>`;
+    const resumen = i === 0 ? `<div class="res">
+      <div><span>Tareas del año</span><b>${tot.tareas}</b><i>total del plan en ${anio}</i></div>
+      <div><span>Ejecutadas</span><b style="color:#2E7D5B">${tot.ejecutadas}</b><i>${tot.pendientes} por ejecutar</i></div>
+      <div><span>Cumplimiento</span><b style="color:#ED5B23">${pct(tot)}</b><i>${tot.ejecutadas} de ${tot.tareas} tareas del año</i></div>
+    </div>` : "";
+    return `<section class="pagina">
+      ${cabecera("1. Plan anual de mantenimiento", sub)}
+      ${resumen}
+      <div class="sede"><h2>${esc(sede.nombre)}</h2><span>${r.tareas} tarea(s) del año · ${r.ejecutadas} ejecutada(s) · cumplimiento ${pct(r)}</span></div>
+      <table><thead><tr><th class="vh">Tarea y ubicación</th>${cabMeses}</tr></thead><tbody>${cuerpo}</tbody></table>
+      <p class="ley">● programado · ✓ ejecutado. Cada tarea arranca en su fecha de inicio (o en su primera ejecución) y se repite según su frecuencia.</p>
+      ${pie(`Cronograma anual ${anio} · ${sede.nombre}`)}
+    </section>`;
+  }).join("");
+
+  // 2. Lista de actividades: un plan una sola vez, aunque aplique en varias sedes
+  const planesVistos = new Map();
+  todas.forEach((f) => {
+    const p = planesVistos.get(f.planId) || { f, sedes: new Set() };
+    p.sedes.add(f.sedeId);
+    planesVistos.set(f.planId, p);
+  });
+  const planes = [...planesVistos.values()].sort((x, y) => x.f.tarea.localeCompare(y.f.tarea, "es"));
+  const listaFilas = planes.map(({ f, sedes }, i) => {
+    const plan = (data.planes || []).find((p) => p.id === f.planId);
+    const pasos = (plan?.procedimientoPasos || []).map((p, k) => `<div>${k + 1}. ${esc(String(p.texto || "").replace(/^\s*\d+\s*[.)-]\s*/, ""))}${p.unidad ? ` <span class="mut">(${esc(p.unidad)})</span>` : ""}</div>`).join("");
+    return `<tr class="plan"><td class="c">${i + 1}</td><td><b>${esc(f.tarea)}</b>${f.categoria ? ` <span class="mut">· ${esc(f.categoria)}</span>` : ""}</td>
+        <td class="c">${esc(f.frecuencia)}</td><td class="c">${sedes.size}</td></tr>
+      ${pasos ? `<tr><td></td><td colspan="3" class="pasos">${pasos}</td></tr>` : ""}`;
+  }).join("");
+  const lista = `<section class="pagina">
+    ${cabecera("2. Lista de actividades", sub)}
+    <table><thead><tr><th class="c" style="width:26px">#</th><th class="vh">Actividad</th><th class="c" style="width:80px">Frecuencia</th><th class="c" style="width:56px">Sedes</th></tr></thead>
+      <tbody>${listaFilas || `<tr><td colspan="4" class="c">Sin planes preventivos para este año.</td></tr>`}</tbody></table>
+    ${pie(`Lista de actividades ${anio}`)}
+  </section>`;
+
+  /* 3. Desglose: por cada tarea, la fecha de ejecución de cada mes y lo
+     registrado en sus pasos (los pasos de solo texto son instrucciones y no
+     llevan dato). Si en un mes hubo dos ejecuciones se muestra la última. */
+  const valorPaso = (it) => {
+    if (it.tipo === "numero") return it.valor === "" || it.valor === undefined ? "" : `<b>${esc(it.valor)}</b>`;
+    const et = etiquetaMonitoreo(it.tipo, it.valor);
+    return `<span style="color:${et.color};font-weight:700">${esc(et.txt)}</span>`;
+  };
+  const desglose = grupos.map(({ sede, filas }) => {
+    const cuerpo = filas.map((f) => {
+      const ejec = ejecucionesFilaAnio(data, f, anio);
+      const porMes = new Map();
+      ejec.forEach((o) => porMes.set(Number((o.fechaCompletada || o.fechaProgramada).slice(5, 7)) - 1, o));
+      const fechas = MESES.map((m, k) => {
+        const o = porMes.get(k);
+        if (o) { const d = o.fechaCompletada || o.fechaProgramada; return `<td class="c ok">${d.slice(8)}/${d.slice(5, 7)}</td>`; }
+        if (f.ejecutados.has(k)) return `<td class="c ok">✓</td>`;   // mantenimiento inicial
+        if (f.proyectados.includes(k)) return `<td class="c prog">●</td>`;
+        return `<td class="c mut">·</td>`;
+      }).join("");
+      // Pasos en el orden del plan, más los que solo aparezcan en ejecuciones viejas
+      const plan = (data.planes || []).find((p) => p.id === f.planId);
+      const textos = [];
+      [...(plan?.procedimientoPasos || []), ...ejec.flatMap((o) => o.checklist || [])].forEach((it) => {
+        if (it.tipo !== "texto" && it.texto && !textos.some((t) => t.texto === it.texto)) textos.push({ texto: it.texto, unidad: it.unidad });
+      });
+      const pasos = textos.map((t) => {
+        const [etq, resto] = partesVariable(t.texto);
+        const celdas = MESES.map((m, k) => {
+          const it = (porMes.get(k)?.checklist || []).find((x) => x.texto === t.texto);
+          return `<td class="c">${it ? valorPaso(it) || `<span class="mut">·</span>` : `<span class="mut">·</span>`}</td>`;
+        }).join("");
+        return `<tr><td class="v">${etq ? `<b>${esc(etq)}</b> ` : ""}${esc(resto)}${t.unidad ? ` <span class="mut">(${esc(t.unidad)})</span>` : ""}</td>${celdas}</tr>`;
+      }).join("");
+      return `<tr><td colspan="13" class="grp">${esc(f.tarea)} <span class="mut">· ${esc(f.lugar)} · ${esc(f.frecuencia)}</span></td></tr>
+        <tr><td class="v"><i>Fecha de ejecución</i></td>${fechas}</tr>${pasos}`;
+    }).join("");
+    return `<section class="pagina">
+      ${cabecera("3. Desglose de actividades de mantenimiento", sub)}
+      <div class="sede"><h2>${esc(sede.nombre)}</h2><span>${filas.length} tarea(s) del plan</span></div>
+      <table><thead><tr><th class="vh">Actividad</th>${cabMeses}</tr></thead><tbody>${cuerpo}</tbody></table>
+      <p class="ley">Fecha (día/mes) = ejecutado · ● programado sin ejecutar · ✓ mantenimiento inicial. En cada paso se muestra lo registrado por el técnico en la ejecución de ese mes.</p>
+      ${pie(`Desglose de actividades ${anio} · ${sede.nombre}`)}
+    </section>`;
   }).join("");
 
   return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
-<title>Plan anual preventivo ${anio}</title>
+<title>Plan anual de mantenimiento ${anio}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:8pt;line-height:1.35}
+.pagina{padding:4px 2px 8px}
 .hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #35383C;padding-bottom:7px;margin-bottom:9px}
 .hdr h1{font-size:13pt;text-transform:uppercase;letter-spacing:.02em}
 .hdr .sub{font-size:8pt;color:#787D85;margin-top:2px}
@@ -8453,36 +8554,26 @@ body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:8pt;l
 .res span{display:block;font-size:6.8pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B}
 .res b{font-size:14pt}
 .res i{display:block;font-style:normal;font-size:6.8pt;color:#8D939B}
-.sede{display:flex;justify-content:space-between;align-items:baseline;border-left:3px solid #ED5B23;padding:3px 8px;margin:10px 0 5px;background:#FAF8F4}
+.sede{display:flex;justify-content:space-between;align-items:baseline;border-left:3px solid #ED5B23;padding:3px 8px;margin:4px 0 6px;background:#FAF8F4}
 .sede h2{font-size:10.5pt}
 .sede span{font-size:7pt;color:#787D85}
 table{width:100%;border-collapse:collapse;font-size:7.5pt}
-th,td{padding:3px 4px;border:1px solid #E3E0D8}
-thead th{background:#35383C;color:#fff;font-size:6.8pt;text-transform:uppercase;text-align:center}
-thead th:first-child{text-align:left;width:190px}
+th,td{padding:4px 5px;border:1px solid #E3E0D8;vertical-align:middle;line-height:1.45}
+thead th{background:#35383C;color:#fff;font-size:6.8pt;text-transform:uppercase}
+th.vh{text-align:left;width:38%}
+td.v{line-height:1.3}
+td.grp{background:#F2EFE9;font-weight:700}
+tr.plan td{background:#FAF8F4}
+td.pasos{font-size:7pt;color:#55595F;padding-left:10px}
 .c{text-align:center}
 .ok{background:#E8F3ED;color:#2E7D5B;font-weight:700}
 .prog{background:#FDEEE7;color:#ED5B23;font-weight:700}
-.mut{color:#8D939B;font-size:6.8pt}
+.mut{color:#8D939B;font-size:6.8pt;font-weight:400}
 .ley{margin-top:8px;font-size:7pt;color:#8D939B}
 .pie{margin-top:10px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.8pt;color:#8D939B;display:flex;justify-content:space-between}
 </style></head><body>
-<div class="hdr">
-  <div><h1>Plan anual de mantenimiento preventivo</h1>
-    <p class="sub">${anio} · ${esc(nombreSede)}</p></div>
-  <div class="marca"><img src="${LOGO_ISE}" alt="IndustriaMe"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div>
-</div>
-
-<div class="res">
-  <div><span>Tareas del año</span><b>${tot.tareas}</b><i>total del plan en ${anio}</i></div>
-  <div><span>Ejecutadas</span><b style="color:#2E7D5B">${tot.ejecutadas}</b><i>${tot.pendientes} por ejecutar</i></div>
-  <div><span>Cumplimiento</span><b style="color:#ED5B23">${pct(tot)}</b><i>${tot.ejecutadas} de ${tot.tareas} tareas del año</i></div>
-</div>
-
-${secciones || `<p>Sin planes preventivos para este año.</p>`}
-
-<p class="ley">● programado · ✓ ejecutado. Cada tarea arranca en su fecha de inicio (o en su primera ejecución) y se repite según su frecuencia; es una referencia de planificación y no reemplaza la programación mensual.</p>
-<div class="pie"><span>IndustriaMe S.A.S. · Plan anual preventivo ${anio}</span><span>Generado el ${esc(emitido)}</span></div>
+${cronograma || `<section class="pagina">${cabecera("Plan anual de mantenimiento", sub)}<p>Sin planes preventivos para este año.</p></section>`}
+${todas.length ? lista + desglose : ""}
 </body></html>`;
 }
 
@@ -8497,96 +8588,151 @@ const ajustarAltura = (el) => {
 
 const FILTROS_BODEGA = [
   ["todos", "Todos"],
+  ["disponible", "Disponibles"],
   ["bajo", "Bajo mínimo"],
   ["agotado", "Agotados"],
 ];
 
+/* Clave para juntar un artículo entre sedes: cada sede guarda su propio
+   registro, y el mismo artículo se reconoce por el nombre (sin mayúsculas,
+   tildes ni espacios de más). */
+const claveArticulo = (nombre) => sinTildes(nombre).replace(/\s+/g, " ").trim();
+
+/* Bodega consolidada: una fila por artículo con la cantidad de cada sede en
+   su propia columna. Admin edita; el técnico solo consulta y no ve costos. */
 function VistaBodega({ data, persist, sedes, editable }) {
-  const [sedeId, setSedeId] = useState(sedes[0]?.id || "");
+  const [fSede, setFSede] = useState("todas");
   const [nuevo, setNuevo] = useState(null);
   const [q, setQ] = useState("");
   const [fEstado, setFEstado] = useState("todos");
 
-  useEffect(() => {
-    if (!sedes.some((s) => s.id === sedeId)) setSedeId(sedes[0]?.id || "");
-  }, [sedes.map((s) => s.id).join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Si la sede elegida deja de estar disponible, se vuelve a ver todas
+  const sedeIds = sedes.map((s) => s.id);
+  if (fSede !== "todas" && !sedeIds.includes(fSede)) setFSede("todas");
+  const columnas = fSede === "todas" ? sedes : sedes.filter((s) => s.id === fSede);
 
-  const items = (data.stock || []).filter((x) => x.sedeId === sedeId);
-  const valorTotal = items.reduce((a, x) => a + x.cantidad * x.costoUnitario, 0);
+  const registros = (data.stock || []).filter((x) => sedeIds.includes(x.sedeId));
+  const valorDe = (xs) => xs.reduce((a, x) => a + (Number(x.cantidad) || 0) * (Number(x.costoUnitario) || 0), 0);
+  const valorTotal = valorDe(registros);
 
-  const estadoDe = (x) => (x.cantidad <= 0 ? "agotado" : x.cantidad <= x.minimo ? "bajo" : "ok");
-  // "Bajo mínimo" incluye los agotados, igual que la tarjeta de arriba
-  const visibles = items
-    .filter((x) => coincideArticulo(x.nombre, q))
-    .filter((x) => fEstado === "todos" || (fEstado === "bajo" ? estadoDe(x) !== "ok" : estadoDe(x) === "agotado"))
+  // Agrupar los registros de todas las sedes por artículo
+  const mapa = new Map();
+  registros.forEach((x) => {
+    const k = claveArticulo(x.nombre);
+    const g = mapa.get(k) || { key: k, porSede: {}, registros: [] };
+    g.porSede[x.sedeId] = x;
+    g.registros.push(x);
+    mapa.set(k, g);
+  });
+  const articulos = [...mapa.values()].map((g) => {
+    // Datos comunes tomados del registro con existencias (o del primero)
+    const base = g.registros.find((x) => x.cantidad > 0) || g.registros[0];
+    const costos = new Set(g.registros.map((x) => Number(x.costoUnitario) || 0));
+    const enColumnas = columnas.map((s) => g.porSede[s.id]).filter(Boolean);
+    const cantidad = enColumnas.reduce((a, x) => a + (Number(x.cantidad) || 0), 0);
+    const bajo = enColumnas.some((x) => x.cantidad > 0 && x.cantidad <= x.minimo);
+    return {
+      ...g, nombre: base.nombre, unidad: base.unidad, costoUnitario: Number(base.costoUnitario) || 0, minimo: base.minimo,
+      costoVaria: costos.size > 1, enColumnas, cantidad, valor: valorDe(enColumnas),
+      estado: cantidad <= 0 ? "agotado" : bajo ? "bajo" : "disponible",
+    };
+  });
+
+  const enAlcance = articulos.filter((a) => a.enColumnas.length > 0);
+  const visibles = enAlcance
+    .filter((a) => coincideArticulo(a.nombre, q))
+    .filter((a) => fEstado === "todos"
+      || (fEstado === "disponible" ? a.estado !== "agotado" : a.estado === fEstado))
     .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
-  const hayFiltro = q.trim() !== "" || fEstado !== "todos";
+  const hayFiltro = q.trim() !== "" || fEstado !== "todos" || fSede !== "todas";
 
-  const setItem = (id, patch) => persist((data) => ({ ...data, stock: data.stock.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
-  const borrar = (id) => persist((data) => ({ ...data, stock: data.stock.filter((y) => y.id !== id) }));
-
-  const th = "text-left text-[10px] font-semibold uppercase tracking-wide px-2.5 py-2 whitespace-nowrap";
-  const td = "px-2.5 py-2 text-xs align-top";
-  const cellInput = "w-full border rounded px-1.5 py-1 text-xs outline-none bg-white";
-
-  const metaEstado = (x) => {
-    const e = estadoDe(x);
-    return e === "agotado" ? { color: COLORS.rojo, label: "Agotado" }
-      : e === "bajo" ? { color: COLORS.ambar, label: "Bajo mínimo" }
-      : { color: COLORS.verde, label: "Disponible" };
+  const setRegistros = (ids, patch) => persist((data) => ({ ...data, stock: data.stock.map((x) => (ids.includes(x.id) ? { ...x, ...patch } : x)) }));
+  const ids = (a) => a.registros.map((x) => x.id);
+  // Cantidad de una sede: si el artículo aún no existe allí, se crea con los datos comunes
+  const setCantidad = (a, sedeId, v) => {
+    const cantidad = Number(v) || 0;
+    const reg = a.porSede[sedeId];
+    if (reg) return setRegistros([reg.id], { cantidad });
+    if (!cantidad) return;
+    persist((data) => ({ ...data, stock: [...(data.stock || []), {
+      id: uid("stk"), sedeId, nombre: a.nombre, unidad: a.unidad, cantidad, costoUnitario: a.costoUnitario, minimo: a.minimo || 0,
+    }] }));
+  };
+  // Borrar: con una sede filtrada solo se quita de esa sede; si no, de todas
+  const borrar = (a) => {
+    const quitar = a.enColumnas.map((x) => x.id);
+    persist((data) => ({ ...data, stock: data.stock.filter((y) => !quitar.includes(y.id)) }));
   };
 
+  const th = "text-left text-[10px] font-semibold uppercase tracking-wide px-2.5 py-2 whitespace-nowrap";
+  const td = "px-2.5 py-2 text-xs align-middle";
+  const cellInput = "w-full border rounded px-1.5 py-1 text-xs outline-none bg-white";
+
+  const META_ESTADO = {
+    agotado: { color: COLORS.rojo, label: "Agotado" },
+    bajo: { color: COLORS.ambar, label: "Bajo mínimo" },
+    disponible: { color: COLORS.verde, label: "Disponible" },
+  };
+  const colorCant = (x) => (!x ? COLORS.slate : x.cantidad <= 0 ? COLORS.rojo : x.cantidad <= x.minimo ? COLORS.ambar : COLORS.charcoal);
+
   // Nombre: en edición es un textarea que crece con el texto; si no, texto que salta de línea
-  const campoNombre = (x) => editable ? (
-    <CampoVivo as="textarea" rows={1} value={x.nombre} onCommit={(v) => setItem(x.id, { nombre: v })}
+  const campoNombre = (a) => editable ? (
+    <CampoVivo as="textarea" rows={1} value={a.nombre} onCommit={(v) => v.trim() && setRegistros(ids(a), { nombre: v.trim() })}
       ref={ajustarAltura} onInput={(e) => ajustarAltura(e.target)}
       className={`${cellInput} resize-none overflow-hidden leading-snug font-semibold`} style={{ ...bLine, ...cChar, fieldSizing: "content" }} />
   ) : (
-    <span className="break-words font-semibold" style={cChar}>{x.nombre}</span>
+    <span className="break-words font-semibold" style={cChar}>{a.nombre}</span>
   );
-  const campoNum = (x, k, w, extra = {}) => (
-    <CampoVivo type="number" min="0" inputMode="decimal" {...extra} value={x[k]}
-      onCommit={(v) => setItem(x.id, { [k]: Number(v) || 0 })}
+  const campoUnidad = (a, w) => editable ? (
+    <CampoVivo value={a.unidad} onCommit={(v) => setRegistros(ids(a), { unidad: v })}
       className={cellInput} style={{ borderColor: COLORS.line, width: w }} />
+  ) : <span style={cSlate}>{a.unidad}</span>;
+  const campoCosto = (a, w) => (
+    <div>
+      <CampoVivo type="number" min="0" step="0.01" inputMode="decimal" value={a.costoUnitario}
+        onCommit={(v) => setRegistros(ids(a), { costoUnitario: Number(v) || 0 })}
+        className={cellInput} style={{ borderColor: COLORS.line, width: w }} />
+      {a.costoVaria && <p className="text-[9px] mt-0.5" style={{ color: COLORS.ambar }} title="Cada sede tiene un costo distinto; al editarlo se iguala en todas">varía por sede</p>}
+    </div>
   );
-  const campoUnidad = (x, w) => (
-    <CampoVivo value={x.unidad} onCommit={(v) => setItem(x.id, { unidad: v })}
-      className={cellInput} style={{ borderColor: COLORS.line, width: w }} />
-  );
-  const vacio = items.length === 0
-    ? "Esta sede aún no tiene artículos en bodega."
+  const campoCantidad = (a, s, w) => {
+    const x = a.porSede[s.id];
+    if (!editable) return <span style={{ color: colorCant(x), fontWeight: 700 }}>{x ? x.cantidad : "—"}</span>;
+    return (
+      <CampoVivo type="number" min="0" inputMode="decimal" value={x ? x.cantidad : ""} placeholder="—"
+        onCommit={(v) => setCantidad(a, s.id, v)}
+        className={cellInput} style={{ borderColor: COLORS.line, width: w, color: colorCant(x), fontWeight: 700 }} />
+    );
+  };
+  const vacio = enAlcance.length === 0
+    ? (fSede === "todas" ? "Aún no hay artículos en bodega." : "Esta sede aún no tiene artículos en bodega.")
     : "Ningún artículo coincide con la búsqueda.";
+  const nCols = 3 + columnas.length + (editable ? 3 : 0);
 
   return (
     <div className="mt-4">
       <p className="text-xs mb-3" style={cSlate}>
         {editable
-          ? "Insumos ya comprados. El técnico los consume directo en las actividades: el consumo descuenta existencias y carga su valor al presupuesto de la sede, sin aprobación."
+          ? "Insumos ya comprados, con la cantidad de cada sede en su columna. El técnico los consume directo en las actividades: el consumo descuenta existencias y carga su valor al presupuesto de la sede, sin aprobación."
           : "Existencias disponibles en tus sedes. Se descuentan solas cuando cargas un consumo en una actividad."}
       </p>
 
-      <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
-        <select value={sedeId} onChange={(e) => setSedeId(e.target.value)}
-          className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
-          {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
-        </select>
-        {editable && (
-          <button onClick={() => setNuevo({ nombre: "", unidad: "u", cantidad: 0, costoUnitario: 0, minimo: 0 })}
-            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white" style={{ background: COLORS.orange }}>
-            <Plus size={13} /> Agregar artículo
-          </button>
-        )}
-      </div>
-
-      {/* Solo el total en dinero, y solo para quien ve costos (el técnico no) */}
+      {/* Totales en dinero, solo para quien ve costos (el técnico no) */}
       {editable && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
-          <Stat label="Total en bodega" value={money(valorTotal)} icon={<Wallet size={14} />} color={COLORS.orange}
-            sub={`${items.length} artículo(s) · existencias × costo`} />
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-3">
+          <Stat label="Bodega general" value={money(valorTotal)} icon={<Wallet size={14} />} color={COLORS.orange}
+            sub={`${articulos.length} artículo(s) · todas las sedes`} />
+          {sedes.map((s) => {
+            const xs = registros.filter((x) => x.sedeId === s.id);
+            return (
+              <Stat key={s.id} label={s.nombre} value={money(valorDe(xs))} icon={<Building2 size={14} />} color={COLORS.charcoal}
+                sub={`${xs.filter((x) => x.cantidad > 0).length} con existencias`} />
+            );
+          })}
         </div>
       )}
 
-      {/* Buscador y filtro por estado */}
+      {/* Buscador, estado y sede */}
       <div className="flex gap-2 mb-2 flex-wrap">
         <div className="flex-1 min-w-48 flex items-center gap-1.5 border rounded-md px-2.5 bg-white" style={inputStyle}>
           <Search size={14} color={COLORS.slate} className="shrink-0" />
@@ -8602,38 +8748,58 @@ function VistaBodega({ data, persist, sedes, editable }) {
           className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
           {FILTROS_BODEGA.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
         </select>
+        {sedes.length > 1 && (
+          <select value={fSede} onChange={(e) => setFSede(e.target.value)}
+            className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
+            <option value="todas">Todas las sedes</option>
+            {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+          </select>
+        )}
+        {editable && (
+          <button onClick={() => setNuevo({ nombre: "", unidad: "u", cantidad: 0, costoUnitario: 0, minimo: 0, sedeId: fSede === "todas" ? sedes[0]?.id || "" : fSede })}
+            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white shrink-0" style={{ background: COLORS.orange }}>
+            <Plus size={13} /> Agregar artículo
+          </button>
+        )}
       </div>
       {hayFiltro && (
         <p className="text-[11px] mb-2" style={cSlate}>
-          Mostrando {visibles.length} de {items.length} artículo(s).{" "}
-          <button onClick={() => { setQ(""); setFEstado("todos"); }} className="font-semibold" style={cOrange}>Quitar filtros</button>
+          Mostrando {visibles.length} de {articulos.length} artículo(s).{" "}
+          <button onClick={() => { setQ(""); setFEstado("todos"); setFSede("todas"); }} className="font-semibold" style={cOrange}>Quitar filtros</button>
         </p>
       )}
 
-      {/* Celular: una tarjeta por artículo, con el nombre completo arriba */}
+      {/* Celular: una tarjeta por artículo, con la cantidad de cada sede */}
       <div className="md:hidden space-y-2">
-        {visibles.map((x) => {
-          const est = metaEstado(x);
+        {visibles.map((a) => {
+          const est = META_ESTADO[a.estado];
           return (
-            <div key={x.id} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${est.color}` }}>
+            <div key={a.key} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${est.color}` }}>
               <div className="flex items-start gap-2">
-                <div className="flex-1 min-w-0 text-sm">{campoNombre(x)}</div>
-                {editable && <DeleteBtn onConfirm={() => borrar(x.id)} />}
+                <div className="flex-1 min-w-0 text-sm">{campoNombre(a)}</div>
+                {editable && <DeleteBtn onConfirm={() => borrar(a)} />}
               </div>
               <div className="flex items-center justify-between gap-2 mt-1.5">
                 <Chip color={est.color}>{est.label}</Chip>
-                {editable && <span className="text-xs font-bold" style={cOrange}>{money(x.cantidad * x.costoUnitario)}</span>}
+                {editable && <span className="text-xs font-bold" style={cOrange}>{money(a.valor)}</span>}
               </div>
-              <div className={`grid ${editable ? "grid-cols-4" : "grid-cols-3"} gap-2 mt-2`}>
-                {[
-                  ["Existencias", editable ? campoNum(x, "cantidad", "100%") : <span style={{ color: est.color, fontWeight: 700 }}>{x.cantidad}</span>],
-                  ["Unidad", editable ? campoUnidad(x, "100%") : x.unidad],
-                  ["Mínimo", editable ? campoNum(x, "minimo", "100%") : x.minimo],
-                  ...(editable ? [["Costo u.", campoNum(x, "costoUnitario", "100%", { step: "0.01" })]] : []),
-                ].map(([label, val]) => (
-                  <div key={label} className="min-w-0">
-                    <p className="text-[9px] font-semibold uppercase tracking-wide mb-0.5" style={cSlate}>{label}</p>
-                    <div className="text-xs" style={cChar}>{val}</div>
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                <div className="min-w-0">
+                  <p className="text-[9px] font-semibold uppercase tracking-wide mb-0.5" style={cSlate}>Unidad</p>
+                  <div className="text-xs" style={cChar}>{campoUnidad(a, "100%")}</div>
+                </div>
+                {editable && (
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-semibold uppercase tracking-wide mb-0.5" style={cSlate}>Costo u.</p>
+                    <div className="text-xs" style={cChar}>{campoCosto(a, "100%")}</div>
+                  </div>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-2 mt-2">
+                {columnas.map((s) => (
+                  <div key={s.id} className="min-w-0">
+                    <p className="text-[9px] font-semibold uppercase tracking-wide mb-0.5 truncate" style={cSlate} title={s.nombre}>{s.nombre}</p>
+                    <div className="text-xs">{campoCantidad(a, s, "100%")}</div>
                   </div>
                 ))}
               </div>
@@ -8643,47 +8809,52 @@ function VistaBodega({ data, persist, sedes, editable }) {
         {visibles.length === 0 && <Empty>{vacio}</Empty>}
       </div>
 
-      {/* Computador / tablet: tabla, con la columna del artículo amplia */}
+      {/* Computador / tablet: tabla con una columna de cantidad por sede */}
       <div className="hidden md:block border rounded-md overflow-x-auto" style={cardStyle}>
-        <table className="w-full border-collapse" style={{ minWidth: editable ? 760 : 480 }}>
+        <table className="w-full border-collapse" style={{ minWidth: 420 + columnas.length * 90 + (editable ? 260 : 0) }}>
           <thead>
             <tr style={{ background: COLORS.charcoal }}>
-              <th className={th} style={{ color: "white", width: "40%" }}>Artículo</th>
-              <th className={th} style={{ color: "white" }}>Existencias</th>
+              <th className={th} style={{ color: "white", width: "30%" }}>Artículo</th>
               <th className={th} style={{ color: "white" }}>Unidad</th>
-              <th className={th} style={{ color: "white" }}>Mínimo</th>
               {editable && <th className={th} style={{ color: "white" }}>Costo unit.</th>}
+              {columnas.map((s) => (
+                <th key={s.id} className={`${th} text-center`} style={{ color: "white", whiteSpace: "normal", minWidth: 76 }}>{s.nombre}</th>
+              ))}
+              {columnas.length > 1 && <th className={`${th} text-center`} style={{ color: "white" }}>Total</th>}
               {editable && <th className={th} style={{ color: "white" }}>Valor</th>}
               <th className={th} style={{ color: "white" }}>Estado</th>
               {editable && <th className={th} style={{ color: "white" }}></th>}
             </tr>
           </thead>
           <tbody>
-            {visibles.map((x, i) => {
-              const est = metaEstado(x);
+            {visibles.map((a, i) => {
+              const est = META_ESTADO[a.estado];
               return (
-                <tr key={x.id} style={{ background: i % 2 ? COLORS.paper : "white", borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className={td} style={{ minWidth: 220 }}>{campoNombre(x)}</td>
-                  <td className={td}>
-                    {editable ? campoNum(x, "cantidad", 68) : <span style={{ color: est.color, fontWeight: 700 }}>{x.cantidad}</span>}
-                  </td>
-                  <td className={td} style={cSlate}>{editable ? campoUnidad(x, 74) : x.unidad}</td>
-                  <td className={td} style={cSlate}>{editable ? campoNum(x, "minimo", 62) : x.minimo}</td>
-                  {editable && <td className={td}>{campoNum(x, "costoUnitario", 78, { step: "0.01" })}</td>}
-                  {editable && (
-                    <td className={td} style={{ ...cOrange, fontWeight: 700 }}>{money(x.cantidad * x.costoUnitario)}</td>
-                  )}
+                <tr key={a.key} style={{ background: i % 2 ? COLORS.paper : "white", borderTop: `1px solid ${COLORS.line}` }}>
+                  <td className={td} style={{ minWidth: 200 }}>{campoNombre(a)}</td>
+                  <td className={td}>{campoUnidad(a, 64)}</td>
+                  {editable && <td className={td}>{campoCosto(a, 74)}</td>}
+                  {columnas.map((s) => (
+                    <td key={s.id} className={`${td} text-center`}>{campoCantidad(a, s, 64)}</td>
+                  ))}
+                  {columnas.length > 1 && <td className={`${td} text-center font-bold`} style={cChar}>{a.cantidad}</td>}
+                  {editable && <td className={td} style={{ ...cOrange, fontWeight: 700 }}>{money(a.valor)}</td>}
                   <td className={td}><Chip color={est.color}>{est.label}</Chip></td>
-                  {editable && <td className={td}><DeleteBtn onConfirm={() => borrar(x.id)} /></td>}
+                  {editable && <td className={td}><DeleteBtn onConfirm={() => borrar(a)} /></td>}
                 </tr>
               );
             })}
             {visibles.length === 0 && (
-              <tr><td colSpan={editable ? 8 : 5} className="px-3 py-5 text-sm text-center" style={cSlate}>{vacio}</td></tr>
+              <tr><td colSpan={nCols + (columnas.length > 1 ? 1 : 0)} className="px-3 py-5 text-sm text-center" style={cSlate}>{vacio}</td></tr>
             )}
           </tbody>
         </table>
       </div>
+      {editable && (
+        <p className="text-[10px] mt-2" style={cSlate}>
+          Escribe una cantidad en la columna de una sede donde el artículo aún no existe para agregarlo allí. Al borrar con una sede filtrada solo se quita de esa sede.
+        </p>
+      )}
 
       {nuevo && (
         <Modal title="Nuevo artículo de bodega" onClose={() => setNuevo(null)}>
@@ -8691,6 +8862,14 @@ function VistaBodega({ data, persist, sedes, editable }) {
             <Field label="Nombre del artículo">
               <input autoFocus value={nuevo.nombre} onChange={(e) => setNuevo({ ...nuevo, nombre: e.target.value })}
                 placeholder="Ej. Foco LED 18W" className={inputCls} style={inputStyle} />
+            </Field>
+            {mapa.has(claveArticulo(nuevo.nombre)) && (
+              <p className="text-[11px]" style={{ color: COLORS.ambar }}>Este artículo ya existe; para otra sede basta con escribir su cantidad en la tabla.</p>
+            )}
+            <Field label="Sede">
+              <select value={nuevo.sedeId} onChange={(e) => setNuevo({ ...nuevo, sedeId: e.target.value })} className={inputCls} style={inputStyle}>
+                {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+              </select>
             </Field>
             <div className="grid grid-cols-2 gap-2">
               <Field label="Cantidad inicial">
@@ -8712,9 +8891,10 @@ function VistaBodega({ data, persist, sedes, editable }) {
                   onChange={(e) => setNuevo({ ...nuevo, minimo: Number(e.target.value) || 0 })} className={inputCls} style={inputStyle} />
               </Field>
             </div>
-            <button disabled={!nuevo.nombre.trim()}
+            <button disabled={!nuevo.nombre.trim() || !nuevo.sedeId
+                || !!mapa.get(claveArticulo(nuevo.nombre))?.porSede[nuevo.sedeId]}
               onClick={() => {
-                persist((data) => ({ ...data, stock: [...(data.stock || []), { ...nuevo, id: uid("stk"), sedeId, nombre: nuevo.nombre.trim() }] }));
+                persist((data) => ({ ...data, stock: [...(data.stock || []), { ...nuevo, id: uid("stk"), nombre: nuevo.nombre.trim() }] }));
                 setNuevo(null);
               }}
               className="w-full py-2.5 rounded-md font-semibold text-sm text-white disabled:opacity-40" style={{ background: COLORS.orange }}>
@@ -10585,7 +10765,7 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
 
   return (
    <ProveedorDetalle data={data}>
-    <div className="max-w-6xl mx-auto px-4 pb-16">
+    <div className="w-full max-w-screen-2xl mx-auto px-4 lg:px-8 pb-16">
       <AppHeader user={user} onLogout={onLogout} ultimaSync={ultimaSync} sedesTexto="Todas las sedes" />
       <Tabs tabs={tabs} active={tab} onChange={cambiarTab} />
 
@@ -10636,7 +10816,7 @@ function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
 
   return (
    <ProveedorDetalle data={data}>
-    <div className="max-w-5xl mx-auto px-4 pb-16">
+    <div className="w-full max-w-screen-2xl mx-auto px-4 lg:px-8 pb-16">
       <AppHeader user={user} onLogout={onLogout} ultimaSync={ultimaSync} sedesTexto="Todas las sedes · Solo lectura" />
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
 
