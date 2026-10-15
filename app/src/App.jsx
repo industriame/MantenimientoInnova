@@ -15,7 +15,7 @@ import {
   QrCode, Wrench, ClipboardList, BarChart3, Plus, X, ChevronRight, ChevronDown,
   ChevronLeft, ChevronUp, AlertTriangle, CheckCircle2, Clock, DollarSign, Building2, Layers,
   Users, ShieldCheck, ArrowLeft, Download, Send, Trash2, Pencil, CalendarDays,
-  Filter, KeyRound, Eye, EyeOff, Camera, LogOut, TrendingUp, Wallet, Star, Info, RefreshCw, FileText, Search, Bell
+  Filter, KeyRound, Eye, EyeOff, Camera, LogOut, TrendingUp, Wallet, Star, Info, RefreshCw, FileText, Search, Bell, Undo2
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, ReferenceLine, XAxis, YAxis, CartesianGrid,
@@ -1189,6 +1189,8 @@ const BORRADOS = { ordenes: new Set(), solicitudes: new Set(), servicios: new Se
 const marcarBorrado = (coleccion, ids) => {
   [].concat(ids).filter(Boolean).forEach((id) => BORRADOS[coleccion].add(id));
 };
+// Si un registro vuelve a su colección (p. ej. un servicio devuelto a solicitud), deja de estar borrado
+const desmarcarBorrado = (coleccion, id) => { BORRADOS[coleccion].delete(id); };
 
 function useSystemData() {
   const [data, setData] = useState(null);
@@ -1430,9 +1432,38 @@ function solicitudAServicio(sol, { detalle = "", log = null, pasadaPor = "", pas
     estado: "por_definir",
     createdAt: sol.fecha || fmtDate(new Date()),
     desdeSolicitud: true, pasadaPor, pasadaEn,
+    // Lo que tenía como solicitud, para poder devolverla tal cual si fue un error
+    previo: { estado: sol.estado || "pendiente", fechaProgramada: sol.fechaProgramada || "", tecnicoId: sol.tecnicoId || "" },
     log: log ? [...(sol.log || []), log] : (sol.log || []),
   };
 }
+
+/* Servicio devuelto a solicitud (se pasó por error): recupera el estado,
+   la fecha programada y el técnico que tenía; si no se conocen, queda Sin
+   programar. El detalle escrito al pasarla se conserva en observaciones. */
+const CAMPOS_SOLO_SERVICIO = ["trabajo", "detalle", "tipoProveedor", "proveedor", "presupuesto", "presupuestoAprobado",
+  "motivoRechazo", "desdeSolicitud", "pasadaPor", "pasadaEn", "fechaReporte", "horaReporte", "createdAt", "previo", "decididoEn", "enEspera"];
+function servicioASolicitud(srv, log) {
+  const resto = { ...srv };
+  CAMPOS_SOLO_SERVICIO.forEach((k) => delete resto[k]);
+  const prev = srv.previo || {};
+  const conFecha = ESTADOS_ABIERTOS.includes(prev.estado) && prev.fechaProgramada;
+  return {
+    ...resto,
+    fecha: srv.fechaReporte || srv.createdAt || "", hora: srv.horaReporte || "",
+    estado: conFecha ? prev.estado : "pendiente",
+    fechaProgramada: conFecha ? prev.fechaProgramada : "",
+    tecnicoId: prev.tecnicoId || srv.tecnicoId || "",
+    fechaCompletada: "", horaCompletada: "",
+    foto: fotosDe({ ...srv, tipo: "servicio" })[0] || "",
+    fotoSolicitante: fotoSolicitudDe(srv),
+    observaciones: [srv.observaciones, srv.detalle ? `Detalle al pasar a servicio: ${srv.detalle}` : ""].filter(Boolean).join("\n"),
+    log: [...(srv.log || []), log],
+  };
+}
+
+/* Un servicio se puede devolver a solicitud mientras el cliente no lo haya aprobado. */
+const servicioDevolvible = (srv) => !!srv.desdeSolicitud && ["por_definir", "por_aprobar"].includes(srv.estado);
 
 /* Título visible del servicio: el "Trabajo a realizar" que define el
    supervisor o, mientras no lo haya, la novedad que trae la solicitud. */
@@ -1504,6 +1535,24 @@ function useAcciones(data, persist, usuario) {
        quita la fecha programada, así que sale del calendario hasta que el
        supervisor lo programe tras la aprobación del cliente. Lo pueden
        hacer el técnico y el supervisor. */
+    devolverASolicitud: (srv) => {
+      const log = {
+        id: uid("log"), titulo: "Devuelta a solicitud",
+        detalle: `${ESTADOS[srv.estado]?.label || srv.estado} → ${ESTADOS[srv.previo?.estado]?.label || "Sin Programar"} (pasada a servicio por error)`,
+        usuarioId: usuario?.id || "", sello: `${fmtDate(new Date())} · ${fmtHora(new Date())}`,
+      };
+      marcarBorrado("servicios", srv.id);
+      desmarcarBorrado("solicitudes", srv.id);
+      return persist((d) => {
+        const x = (d.servicios || []).find((s) => s.id === srv.id);
+        if (!x) return d;
+        return {
+          ...d,
+          servicios: d.servicios.filter((s) => s.id !== srv.id),
+          solicitudes: [servicioASolicitud(x, log), ...d.solicitudes.filter((s) => s.id !== srv.id)],
+        };
+      });
+    },
     pasarAServicio: (item, detalle) => {
       const sello = `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
       const log = {
@@ -1512,6 +1561,7 @@ function useAcciones(data, persist, usuario) {
         usuarioId: usuario?.id || "", sello,
       };
       marcarBorrado("solicitudes", item.id);
+      desmarcarBorrado("servicios", item.id);
       return persist((d) => {
         const sol = d.solicitudes.find((x) => x.id === item.id);
         if (!sol) return d;
@@ -6481,7 +6531,7 @@ function TecnicoCorrectivos({ data, acciones, solicitudes }) {
 
 /* Igual estructura visual que AdminServicios, pero sin mostrar ningún monto:
    el técnico solo necesita saber qué servicio le toca ejecutar y cuándo. */
-function TecnicoServicios({ data, servicios }) {
+function TecnicoServicios({ data, servicios, acciones }) {
   // Lo que aún está en trámite con el supervisor o el cliente
   const enTramite = servicios.filter((s) => ["por_definir", "por_aprobar", "aprobada"].includes(s.estado));
   const programados = servicios.filter((s) => s.estado === "programada");
@@ -6506,6 +6556,7 @@ function TecnicoServicios({ data, servicios }) {
         </div>
         <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha, ocultarCosto: true }} size={13} />
       </div>
+      <BotonDevolverSolicitud srv={srv} acciones={acciones} />
     </div>
   );
 
@@ -6603,7 +6654,7 @@ function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
 
       {sub === "preventivos" && <TecnicoPreventivos data={data} acciones={acciones} ordenes={misOrdenes} />}
       {sub === "correctivos" && <TecnicoCorrectivos data={data} acciones={acciones} solicitudes={misSolicitudes} />}
-      {sub === "servicios" && <TecnicoServicios data={data} servicios={misServicios} />}
+      {sub === "servicios" && <TecnicoServicios data={data} servicios={misServicios} acciones={acciones} />}
     </div>
   );
 }
@@ -7136,6 +7187,35 @@ function FormCerrarServicio({ srv, onConfirm, onClose }) {
   );
 }
 
+/* Devolver a solicitud un servicio pasado por error (antes de que el cliente
+   lo apruebe), con confirmación. */
+function BotonDevolverSolicitud({ srv, acciones }) {
+  const [confirmar, setConfirmar] = useState(false);
+  if (!servicioDevolvible(srv)) return null;
+  const destino = ESTADOS[srv.previo?.estado]?.label;
+  return !confirmar ? (
+    <button onClick={() => setConfirmar(true)}
+      className="mt-1.5 flex items-center gap-1 text-[11px] font-semibold" style={cSlate}>
+      <Undo2 size={12} /> Devolver a solicitud
+    </button>
+  ) : (
+    <div className="mt-2 rounded-md p-2.5 border text-left" style={{ borderColor: COLORS.line, background: COLORS.paper }}>
+      <p className="text-[11px]" style={cChar}>
+        ¿Devolver <b>{srv.codigo}</b> a correctivos? Sale de Servicios y vuelve como solicitud
+        {destino && srv.previo?.fechaProgramada ? ` (${destino.toLowerCase()} para el ${srv.previo.fechaProgramada})` : " (sin programar)"}.
+      </p>
+      <div className="flex gap-1.5 mt-2">
+        <button onClick={() => setConfirmar(false)} className="flex-1 py-1.5 rounded-md text-[11px] font-semibold border"
+          style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>Cancelar</button>
+        <button onClick={() => { acciones.devolverASolicitud(srv); setConfirmar(false); }}
+          className="flex-1 py-1.5 rounded-md text-[11px] font-semibold text-white" style={{ background: COLORS.charcoal }}>
+          Sí, devolver
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* Servicios por etapa. Todo servicio nace de una solicitud (Pasar a
    servicio). El supervisor lo define, el cliente lo aprueba y el supervisor
    asigna proveedor y fecha. En modo "cliente" es la misma vista, de solo
@@ -7224,7 +7304,7 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
   ));
 
   // El cliente revisa la ficha completa solo al desplegarla para decidir
-  const enAprobacion = (srv) => !esCliente ? tarjeta(srv) : gestionar === srv.id ? (
+  const enAprobacion = (srv) => !esCliente ? tarjeta(srv, <BotonDevolverSolicitud srv={srv} acciones={acciones} />) : gestionar === srv.id ? (
     <div key={srv.id}>
       <TarjetaServicioCliente srv={srv} data={data} onDecidir={(patch) => { set(srv.id, patch); setGestionar(null); }} />
       <button onClick={() => setGestionar(null)} className="w-full mt-1 text-[10px] font-semibold" style={cSlate}>Ocultar</button>
@@ -7244,8 +7324,12 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
 
       <SeccionPlegable titulo={esCliente ? "Por definir (supervisor)" : "Por definir · completar y enviar a aprobación"} count={porDefinir.length}
         color={ESTADOS.por_definir.color} defaultOpen={!esCliente && porDefinir.length > 0}>
-        {porDefinir.map((s) => tarjeta(s, !esCliente &&
-          botonAccion("Completar y enviar a aprobación", ESTADOS.por_definir.color, () => setModal({ srv: s, enviar: true }))))}
+        {porDefinir.map((s) => tarjeta(s, !esCliente && (
+          <>
+            {botonAccion("Completar y enviar a aprobación", ESTADOS.por_definir.color, () => setModal({ srv: s, enviar: true }))}
+            <BotonDevolverSolicitud srv={s} acciones={acciones} />
+          </>
+        )))}
         {porDefinir.length === 0 && <Empty>Nada por definir.</Empty>}
       </SeccionPlegable>
 
