@@ -9807,6 +9807,22 @@ ${secciones || `<section class="pagina">${cabecera(titulo)}<p>Sin lecturas.</p><
 </body></html>`;
 }
 
+/* Registro fotográfico del informe: todas las fotos en una cuadrícula
+   compacta, varias por fila según cuántas haya, para verlas de una sola vez.
+   Cada foto conserva su proporción dentro de una caja de alto fijo (sin
+   object-fit, que html2canvas no respeta). */
+function fotosHTML(a) {
+  const fotos = [
+    ...(fotoSolicitudDe(a) ? [{ src: fotoSolicitudDe(a), pie: "Reportado por el solicitante" }] : []),
+    ...fotosDe(a).map((src, i, arr) => ({ src, pie: `Evidencia del técnico${arr.length > 1 ? ` ${i + 1}` : ""}` })),
+  ];
+  if (!fotos.length) return "";
+  const cols = fotos.length <= 2 ? 2 : fotos.length === 3 ? 3 : 4;
+  const alto = { 2: 210, 3: 160, 4: 125 }[cols];
+  const celdas = fotos.map((f) => `<figure><div class="caja" style="height:${alto}px"><img src="${f.src}" style="max-height:${alto}px"></div><figcaption>${f.pie}</figcaption></figure>`).join("");
+  return `<div class="blk"><h4>Registro fotográfico (${fotos.length})</h4><div class="fotos" style="grid-template-columns:repeat(${cols},minmax(0,1fr))">${celdas}</div></div>`;
+}
+
 function construirReporteHTML(items, data, meta) {
   const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   const nom = (id) => esc(usuarioNombre(data.usuarios, id));
@@ -9859,10 +9875,7 @@ function construirReporteHTML(items, data, meta) {
       </div>
 
       ${checklistHTML(a.checklist)}
-      ${(fotoSolicitudDe(a) || fotosDe(a).length) ? `<div class="blk"><h4>Registro fotográfico</h4><div class="fotos">
-        ${fotoSolicitudDe(a) ? `<figure><img src="${fotoSolicitudDe(a)}"><figcaption>Reportado por el solicitante</figcaption></figure>` : ""}
-        ${fotosDe(a).map((f, i, arr) => `<figure><img src="${f}"><figcaption>Evidencia del técnico${arr.length > 1 ? ` ${i + 1}` : ""}</figcaption></figure>`).join("")}
-      </div></div>` : ""}
+      ${fotosHTML(a)}
       ${(a.reprogramaciones || []).length ? `<div class="blk"><h4>Reprogramaciones (${a.reprogramaciones.length})</h4>${
         a.reprogramaciones.map((r) => `<div class="rep">
           <b>${esc(r.fechaAnterior || "sin fecha")} → ${esc(r.fechaNueva)}</b> · ${esc(r.motivo)}
@@ -9925,10 +9938,11 @@ tbody tr:nth-child(even){background:#F7F6F3}
 .chk .p-val{width:30%;text-align:right;white-space:nowrap}
 .rep{border-left:2px solid #D9A441;padding:2px 0 2px 7px;margin-bottom:4px;font-size:8pt}
 .rep .mut{color:#8D939B;font-size:7.5pt}
-.fotos{display:flex;gap:10px;flex-wrap:wrap}
-.fotos figure{margin:0;max-width:48%}
-.fotos img{width:100%;border:1px solid #D8D4CB;border-radius:2px;max-height:200px;object-fit:contain}
-.fotos figcaption{font-size:7pt;color:#8D939B;margin-top:2px;text-align:center}
+.fotos{display:grid;gap:6px}
+.fotos figure{margin:0;min-width:0;border:1px solid #D8D4CB;border-radius:2px;padding:3px;background:#FAF8F4}
+.fotos .caja{display:flex;align-items:center;justify-content:center}
+.fotos img{display:block;max-width:100%;width:auto;height:auto}
+.fotos figcaption{font-size:6.8pt;color:#8D939B;margin-top:2px;text-align:center}
 .marca img{max-height:34px;margin-bottom:3px}
 .firma{display:flex;gap:30px;margin-top:14px;padding-top:6px}
 .firma div{flex:1;text-align:center}
