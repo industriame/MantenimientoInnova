@@ -8352,8 +8352,7 @@ function construirServicioHTML(srv, data, { costos = true } = {}) {
   const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
   const novedad = novedadServicio(srv);
-  const foto = fotoSolicitudDe(srv);
-  const evidencias = fotosDe({ ...srv, tipo: "servicio" });
+  const fotosSrv = listaFotos({ ...srv, tipo: "servicio" });
   const dato = (k, v) => (v ? `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>` : "");
   const bloque = (k, v) => (v ? `<h3>${esc(k)}</h3><p class="txt">${esc(v)}</p>` : "");
   const aprobado = srv.presupuestoAprobado != null && srv.estado !== "por_aprobar" && srv.estado !== "por_definir";
@@ -8380,8 +8379,7 @@ th,td{padding:5px 7px;border:1px solid #E3E0D8}
 thead th{background:#35383C;color:#fff;font-size:7pt;text-transform:uppercase;text-align:left}
 td.v{text-align:right;font-weight:700;width:130px}
 tr.tot td{background:#FDEEE7;color:#ED5B23;font-size:10pt}
-.foto{margin-top:6px;max-height:230px;max-width:100%;border:1px solid #E3E0D8}
-.foto.ev{max-height:160px;max-width:48%;margin-right:6px}
+${FOTOS_CSS}
 .pie{margin-top:14px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.8pt;color:#8D939B;display:flex;justify-content:space-between}
 </style></head><body>
 <div class="hdr">
@@ -8408,8 +8406,7 @@ ${costos ? `<h3>Valores</h3>
   <tr><td>Presupuesto estimado</td><td class="v">${esc(money(srv.presupuesto || 0))}</td></tr>
   ${aprobado ? `<tr class="tot"><td>Valor aprobado</td><td class="v">${esc(money(srv.presupuestoAprobado))}</td></tr>` : ""}
 </tbody></table>` : ""}
-${foto ? `<h3>Foto de la solicitud</h3><img class="foto" src="${esc(foto)}" alt="Foto de la solicitud">` : ""}
-${evidencias.length ? `<h3>Evidencia del técnico</h3><div>${evidencias.map((f) => `<img class="foto ev" src="${esc(f)}" alt="Evidencia">`).join("")}</div>` : ""}
+${fotosSrv.length ? `<h3>Registro fotográfico (${fotosSrv.length})</h3>${cuadriculaFotos(fotosSrv)}` : ""}
 <div class="pie"><span>Documento generado desde IndustriaMe</span><span>${esc(srv.codigo)}</span></div>
 </body></html>`;
 }
@@ -9807,21 +9804,33 @@ ${secciones || `<section class="pagina">${cabecera(titulo)}<p>Sin lecturas.</p><
 </body></html>`;
 }
 
-/* Registro fotográfico del informe: todas las fotos en una cuadrícula
+/* Registro fotográfico de los PDF: todas las fotos en una cuadrícula
    compacta, varias por fila según cuántas haya, para verlas de una sola vez.
    Cada foto conserva su proporción dentro de una caja de alto fijo (sin
-   object-fit, que html2canvas no respeta). */
-function fotosHTML(a) {
-  const fotos = [
-    ...(fotoSolicitudDe(a) ? [{ src: fotoSolicitudDe(a), pie: "Reportado por el solicitante" }] : []),
-    ...fotosDe(a).map((src, i, arr) => ({ src, pie: `Evidencia del técnico${arr.length > 1 ? ` ${i + 1}` : ""}` })),
+   object-fit, que html2canvas no respeta). Requiere FOTOS_CSS en el documento. */
+function listaFotos(item) {
+  return [
+    ...(fotoSolicitudDe(item) ? [{ src: fotoSolicitudDe(item), pie: "Reportado por el solicitante" }] : []),
+    ...fotosDe(item).map((src, i, arr) => ({ src, pie: `Evidencia del técnico${arr.length > 1 ? ` ${i + 1}` : ""}` })),
   ];
-  if (!fotos.length) return "";
+}
+function cuadriculaFotos(fotos) {
   const cols = fotos.length <= 2 ? 2 : fotos.length === 3 ? 3 : 4;
   const alto = { 2: 210, 3: 160, 4: 125 }[cols];
-  const celdas = fotos.map((f) => `<figure><div class="caja" style="height:${alto}px"><img src="${f.src}" style="max-height:${alto}px"></div><figcaption>${f.pie}</figcaption></figure>`).join("");
-  return `<div class="blk"><h4>Registro fotográfico (${fotos.length})</h4><div class="fotos" style="grid-template-columns:repeat(${cols},minmax(0,1fr))">${celdas}</div></div>`;
+  const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const celdas = fotos.map((f) => `<figure><div class="caja" style="height:${alto}px"><img src="${esc(f.src)}" style="max-height:${alto}px"></div><figcaption>${esc(f.pie)}</figcaption></figure>`).join("");
+  return `<div class="fotos" style="grid-template-columns:repeat(${cols},minmax(0,1fr))">${celdas}</div>`;
 }
+function fotosHTML(a) {
+  const fotos = listaFotos(a);
+  if (!fotos.length) return "";
+  return `<div class="blk"><h4>Registro fotográfico (${fotos.length})</h4>${cuadriculaFotos(fotos)}</div>`;
+}
+const FOTOS_CSS = `.fotos{display:grid;gap:6px}
+.fotos figure{margin:0;min-width:0;border:1px solid #D8D4CB;border-radius:2px;padding:3px;background:#FAF8F4}
+.fotos .caja{display:flex;align-items:center;justify-content:center}
+.fotos img{display:block;max-width:100%;width:auto;height:auto}
+.fotos figcaption{font-size:6.8pt;color:#8D939B;margin-top:2px;text-align:center}`;
 
 function construirReporteHTML(items, data, meta) {
   const esc = (v) => String(v ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -9938,11 +9947,7 @@ tbody tr:nth-child(even){background:#F7F6F3}
 .chk .p-val{width:30%;text-align:right;white-space:nowrap}
 .rep{border-left:2px solid #D9A441;padding:2px 0 2px 7px;margin-bottom:4px;font-size:8pt}
 .rep .mut{color:#8D939B;font-size:7.5pt}
-.fotos{display:grid;gap:6px}
-.fotos figure{margin:0;min-width:0;border:1px solid #D8D4CB;border-radius:2px;padding:3px;background:#FAF8F4}
-.fotos .caja{display:flex;align-items:center;justify-content:center}
-.fotos img{display:block;max-width:100%;width:auto;height:auto}
-.fotos figcaption{font-size:6.8pt;color:#8D939B;margin-top:2px;text-align:center}
+${FOTOS_CSS}
 .marca img{max-height:34px;margin-bottom:3px}
 .firma{display:flex;gap:30px;margin-top:14px;padding-top:6px}
 .firma div{flex:1;text-align:center}
