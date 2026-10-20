@@ -2702,7 +2702,7 @@ function ChecklistEjecucion({ items, onChange, readOnly, compacto }) {
                       {p.valor === "" || p.valor == null ? "sin dato" : `${p.valor}${p.unidad ? " " + p.unidad : ""}`}
                     </span>
                   ) : (
-                    <CampoVivo type="number" step="any" value={p.valor} onCommit={(v) => set(p.id, v)}
+                    <CampoVivo type="text" inputMode="decimal" value={p.valor} onCommit={(v) => set(p.id, String(v).trim().replace(",", "."))}
                       placeholder="—" className="w-20 border rounded px-2 py-1 text-xs text-right outline-none shrink-0"
                       style={{ borderColor: p.valor === "" ? COLORS.line : COLORS.orange }} />
                   )}
@@ -3091,8 +3091,10 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
   const consumos = item.consumos || [];
   const total = costoConsumos(item);
   const art = stockSede.find((x) => x.id === sel);
-  const excede = art && Number(cant) > art.cantidad;
-  const valido = art && Number(cant) > 0;
+  // Acepta coma o punto como separador decimal
+  const numCant = Number(String(cant).replace(",", "."));
+  const excede = art && numCant > art.cantidad;
+  const valido = art && numCant > 0;
 
   return (
     <div>
@@ -3122,11 +3124,14 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
               <SelectorArticulo articulos={stockSede} value={sel} onChange={(id) => { setSel(id); setCant(1); }} />
               <div className="flex items-center gap-1.5 mt-1.5">
                 <span className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Cantidad</span>
-                <input type="number" min="1" inputMode="decimal" value={cant} onChange={(e) => setCant(e.target.value)}
+                {/* Texto y no "number": así el teclado del celular deja escribir
+                    punto o coma, sin depender del idioma del teléfono */}
+                <input type="text" inputMode="decimal" value={cant}
+                  onChange={(e) => setCant(e.target.value.replace(/[^0-9.,]/g, ""))}
                   className="w-20 border rounded-md px-2 py-1.5 text-xs outline-none" style={inputStyle} />
                 {art && <span className="text-[10px]" style={cSlate}>{art.unidad}</span>}
                 <button disabled={!valido}
-                  onClick={() => { onRegistrar(art, Number(cant)); setSel(""); setCant(1); }}
+                  onClick={() => { onRegistrar(art, numCant); setSel(""); setCant(1); }}
                   className="ml-auto text-xs font-semibold px-3 py-1.5 rounded-md text-white shrink-0 disabled:opacity-40"
                   style={{ background: COLORS.orange }}>
                   Cargar
@@ -3136,7 +3141,7 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
                 <p className="text-[10px] mt-1" style={{ color: excede ? COLORS.ambar : COLORS.slate }}>
                   {excede
                     ? `En bodega solo hay ${art.cantidad} ${art.unidad}; se registrará el consumo y la existencia quedará en cero.`
-                    : `${money(art.costoUnitario)} por ${art.unidad} · subtotal ${money(art.costoUnitario * (Number(cant) || 0))}`}
+                    : `${money(art.costoUnitario)} por ${art.unidad} · subtotal ${money(art.costoUnitario * (numCant || 0))}`}
                 </p>
               )}
             </>
@@ -11074,9 +11079,45 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
   );
 }
 
+/* Sesión recordada en el dispositivo: si el navegador cierra o recarga la
+   app (pasa a menudo en el celular al cambiar de aplicación), se vuelve a
+   entrar sin pedir la clave. Dura 30 días desde el último uso y se cierra
+   sola si al usuario le cambian la clave o lo eliminan. Solo se guarda el id
+   y una huella de la clave, no la clave. */
+const SESION_CLAVE = "sesion_mantenimiento";
+const SESION_DIAS = 30;
+const huellaClave = (clave) => {
+  let h = 0;
+  for (const c of String(clave || "")) h = (h * 31 + c.charCodeAt(0)) | 0;
+  return h.toString(36);
+};
+function guardarSesion(u) {
+  try {
+    localStorage.setItem(SESION_CLAVE, JSON.stringify({ id: u.id, huella: huellaClave(u.clave), exp: Date.now() + SESION_DIAS * 864e5 }));
+  } catch { /* sin almacenamiento: la sesión dura lo que la pestaña */ }
+}
+function leerSesion() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SESION_CLAVE) || "null");
+    if (!s?.id || !(s.exp > Date.now())) return null;
+    // Cada vez que se abre la app se renuevan los 30 días
+    localStorage.setItem(SESION_CLAVE, JSON.stringify({ ...s, exp: Date.now() + SESION_DIAS * 864e5 }));
+    return s;
+  } catch { return null; }
+}
+function borrarSesion() {
+  try { localStorage.removeItem(SESION_CLAVE); } catch { /* sin almacenamiento */ }
+}
+
 export default function App() {
   const { data, persist, persistYa, loading, ultimaSync, syncError } = useSystemData();
-  const [user, setUser] = useState(null);
+  const [sesion, setSesion] = useState(leerSesion);
+  // El usuario se toma siempre de la base: si le cambian el rol o las sedes, se refleja al momento
+  const user = (sesion && (data?.usuarios || []).find((u) => u.id === sesion.id && huellaClave(u.clave) === sesion.huella)) || null;
+  const setUser = (u) => {
+    if (u) { guardarSesion(u); setSesion({ id: u.id, huella: huellaClave(u.clave) }); }
+    else { borrarSesion(); setSesion(null); }
+  };
 
   const vista = () => {
     switch (user.rol) {
