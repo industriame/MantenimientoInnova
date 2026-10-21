@@ -11081,11 +11081,11 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
 
 /* Sesión recordada en el dispositivo: si el navegador cierra o recarga la
    app (pasa a menudo en el celular al cambiar de aplicación), se vuelve a
-   entrar sin pedir la clave. Dura 30 días desde el último uso y se cierra
+   entrar sin pedir la clave. Dura un día desde el último uso y se cierra
    sola si al usuario le cambian la clave o lo eliminan. Solo se guarda el id
    y una huella de la clave, no la clave. */
 const SESION_CLAVE = "sesion_mantenimiento";
-const SESION_DIAS = 30;
+const SESION_DIAS = 1;
 const huellaClave = (clave) => {
   let h = 0;
   for (const c of String(clave || "")) h = (h * 31 + c.charCodeAt(0)) | 0;
@@ -11100,7 +11100,7 @@ function leerSesion() {
   try {
     const s = JSON.parse(localStorage.getItem(SESION_CLAVE) || "null");
     if (!s?.id || !(s.exp > Date.now())) return null;
-    // Cada vez que se abre la app se renuevan los 30 días
+    // Cada vez que se abre la app se renueva el plazo
     localStorage.setItem(SESION_CLAVE, JSON.stringify({ ...s, exp: Date.now() + SESION_DIAS * 864e5 }));
     return s;
   } catch { return null; }
