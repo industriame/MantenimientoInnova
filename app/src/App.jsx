@@ -892,6 +892,37 @@ function cronogramaAnual(data, anio, sedeIds) {
         d.setMonth(d.getMonth() + (FRECUENCIA_MESES[plan.frecuencia] || 3));
         proxima = fmtDate(d);
       }
+      /* Meses ya pasados que tocaban y no se ejecutaron en su mes:
+         - "atraso": hubo una ejecución después. Si esa ejecución cayó en un mes
+           sin programación propia, cubre este mes (cuenta como ejecutada y no
+           suma una tarea extra). Si cayó en un mes que ya tocaba (p. ej. un
+           mensual que se retoma al mes siguiente), cuenta para ese otro mes y
+           este queda como no cumplido, solo con la nota de cuándo se retomó.
+         - "vencida": no se ha vuelto a ejecutar.
+         Se recorren de atrás hacia adelante para que la ejecución cubra el
+         mes atrasado más cercano. */
+      const mesActual = mesKey(fmtDate(new Date()));
+      const ejecucionesTodas = (data.ordenes || [])
+        .filter((o) => o.planId === plan.id && o.sedeId === ap.sedeId && o.estado === "completada"
+          && (o.faseId || "") === (ap.faseId || "") && (o.activoId || "") === (ap.activoId || ""))
+        .map((o) => ({ fecha: o.fechaCompletada || o.fechaProgramada, codigo: o.codigo || "" }))
+        .concat(fechaInicialRealizada(ap) ? [{ fecha: ap.fechaInicial, codigo: "Mantenimiento inicial" }] : [])
+        .filter((x) => x.fecha)
+        .sort((a, b) => a.fecha.localeCompare(b.fecha));
+      const atrasos = new Map();   // mes → { estado, fecha, codigo, cubre }
+      const recuperaciones = new Set();   // meses con una ejecución que cubre un mes atrasado
+      [...proyectados].sort((a, b) => b - a).forEach((p) => {
+        const mk = `${anio}-${String(p + 1).padStart(2, "0")}`;
+        if (ejecutados.has(p) || mk >= mesActual) return;
+        const sig = ejecucionesTodas.find((x) => mesKey(x.fecha) > mk);
+        if (!sig) { atrasos.set(p, { estado: "vencida" }); return; }
+        const mSig = mesKey(sig.fecha);
+        const idx = Number(mSig.slice(5, 7)) - 1;
+        const cubre = Number(mSig.slice(0, 4)) === anio && !proyectados.includes(idx) && !recuperaciones.has(idx);
+        if (cubre) recuperaciones.add(idx);
+        atrasos.set(p, { estado: "atraso", fecha: sig.fecha, codigo: sig.codigo, cubre });
+      });
+
       const sede = (data.sedes || []).find((x) => x.id === ap.sedeId);
       const fase = (sede?.fases || []).find((x) => x.id === ap.faseId);
       const activo = (fase?.activos || []).find((x) => x.id === ap.activoId);
@@ -902,7 +933,7 @@ function cronogramaAnual(data, anio, sedeIds) {
         sedeId: ap.sedeId, ubicacion: ubicacionTexto(data.sedes, ap),
         lugar: activo ? `${activo.nombre} · ${fase.nombre}` : fase ? `${fase.nombre} completa` : "Sede completa",
         ap, inicio: arranque, fechaInicial: ap.fechaInicial || "", inicialRealizada: fechaInicialRealizada(ap), ultima, proxima,
-        proyectados, ejecutados,
+        proyectados, ejecutados, atrasos, recuperaciones,
       });
     });
   });
@@ -8049,11 +8080,12 @@ function AdminConfiguracion({ data, persist, setPlanModal }) {
    ========================================================================= */
 /* Cifras del plan anual para un conjunto de filas, contadas sobre el año:
    - tareas: cada mes marcado en la tabla (programado o ejecutado), es decir,
-     todas las tareas del año;
+     todas las tareas del año. Una ejecución atrasada que cae en un mes sin
+     programación propia cubre el mes que tocaba y no suma una tarea extra;
    - ejecutadas: los meses con ✓;
    - cumplimiento: ejecutadas sobre el total de tareas del año. */
 function resumenPlanAnual(filas) {
-  const tareas = filas.reduce((n, f) => n + new Set([...f.proyectados, ...f.ejecutados.keys()]).size, 0);
+  const tareas = filas.reduce((n, f) => n + new Set([...f.proyectados, ...f.ejecutados.keys()]).size - (f.recuperaciones?.size || 0), 0);
   const ejecutadas = filas.reduce((n, f) => n + f.ejecutados.size, 0);
   return {
     tareas, ejecutadas, pendientes: tareas - ejecutadas,
@@ -8062,6 +8094,14 @@ function resumenPlanAnual(filas) {
 }
 
 const fmtDMY = (iso) => (iso ? iso.split("-").reverse().join("/") : "—");
+
+// Estados de un mes en el plan anual (pantalla y PDF)
+const ESTADO_MES_PLAN = {
+  prog: { label: "Programado", color: COLORS.orange, icono: "" },
+  ejec: { label: "Ejecutado", color: COLORS.verde, icono: "✓" },
+  atraso: { label: "Ejecutada con atraso", color: COLORS.ambar, icono: "↻" },
+  vencida: { label: "No ejecutada", color: COLORS.rojo, icono: "✕" },
+};
 
 function VistaPlanAnual({ data, sedes }) {
   const hoyAnio = new Date().getFullYear();
@@ -8252,25 +8292,30 @@ function VistaPlanAnual({ data, sedes }) {
                           </button>
                         </td>
                         {MESES.map((m, i) => {
-                          /* Solo dos estados por mes: Ejecutado (hay una orden
-                             cerrada ese mes) o Programado (tocaba y aún no). */
+                          /* Estados por mes: Ejecutado (orden cerrada ese mes),
+                             Programado (tocaba y el mes aún no termina), y en
+                             meses ya pasados que tocaban sin ejecutarse:
+                             Ejecutada con atraso (se hizo después) o No
+                             ejecutada (no se ha vuelto a hacer). */
                           const toca = f.proyectados.includes(i);
                           const hecho = f.ejecutados.has(i);
-                          const tipo = hecho ? "ejec" : "prog";
+                          const atr = !hecho && f.atrasos.get(i);
+                          const tipo = hecho ? "ejec" : atr ? atr.estado : "prog";
+                          const est = ESTADO_MES_PLAN[tipo];
                           const abierto = esAbierto(tipo, f, i);
                           return (
                             <td key={m} className="text-center"
                               style={{ borderBottom: bd, borderRight: bd, padding: 2 }}>
                               {(hecho || toca) && (
                                 <button type="button" {...disparadores(tipo, f, i)}
-                                  aria-label={`${hecho ? "Ejecutado" : "Programado"} en ${m}: ver detalle`}
+                                  aria-label={`${est.label} en ${m}: ver detalle`}
                                   style={{
                                     display: "inline-block", width: 18, height: 18, borderRadius: 3, fontSize: 10,
                                     lineHeight: "18px", color: "white", cursor: "pointer",
-                                    background: hecho ? COLORS.verde : COLORS.orange,
-                                    boxShadow: abierto ? `0 0 0 2px ${hecho ? COLORS.verde : COLORS.orange}55` : "none",
+                                    background: est.color,
+                                    boxShadow: abierto ? `0 0 0 2px ${est.color}55` : "none",
                                   }}>
-                                  {hecho ? "✓" : ""}
+                                  {est.icono}
                                 </button>
                               )}
                             </td>
@@ -8288,7 +8333,7 @@ function VistaPlanAnual({ data, sedes }) {
       {!grupos.length && <Empty>No hay planes preventivos con aplicaciones para este año.</Empty>}
 
       <div className="flex items-center gap-3 flex-wrap">
-        {[["Programado", COLORS.orange], ["Ejecutado", COLORS.verde]].map(([l, c]) => (
+        {["prog", "ejec", "atraso", "vencida"].map((k) => [ESTADO_MES_PLAN[k].label, ESTADO_MES_PLAN[k].color]).map(([l, c]) => (
           <span key={l} className="flex items-center gap-1 text-[10px]" style={cSlate}>
             <span className="w-2.5 h-2.5 rounded-sm" style={{ background: c }} />{l}
           </span>
@@ -8298,9 +8343,10 @@ function VistaPlanAnual({ data, sedes }) {
       {pop && (() => {
         const f = pop.fila;
         const ejec = pop.tipo === "ejec" ? f.ejecutados.get(pop.mes) || [] : [];
-        const titulo = pop.tipo === "ejec" ? `Ejecutado · ${MESES[pop.mes]}`
-          : pop.tipo === "prog" ? `Programado · ${MESES[pop.mes]} ${anio}` : "Tarea del plan";
-        const colorTit = pop.tipo === "prog" ? "#F6B593" : "#9FD8BC";
+        const atr = pop.tipo === "atraso" || pop.tipo === "vencida" ? f.atrasos.get(pop.mes) : null;
+        const titulo = pop.tipo === "tarea" ? "Tarea del plan"
+          : `${ESTADO_MES_PLAN[pop.tipo].label} · ${MESES[pop.mes]}${pop.tipo === "ejec" ? "" : ` ${anio}`}`;
+        const colorTit = { prog: "#F6B593", atraso: "#F2D08A", vencida: "#F2A497" }[pop.tipo] || "#9FD8BC";
         const dato = (k, v) => (
           <p className="text-[11px] leading-snug"><span className="opacity-70">{k}: </span><b>{v}</b></p>
         );
@@ -8317,6 +8363,15 @@ function VistaPlanAnual({ data, sedes }) {
                 {fmtDMY(x.fecha)}{x.codigo ? <span className="font-normal opacity-70"> · {x.codigo}</span> : null}
               </p>
             ))}
+            {atr?.estado === "atraso" && (
+              <p className="text-[11px] mt-0.5 leading-snug">
+                No se ejecutó en su mes. Se ejecutó el <b>{fmtDMY(atr.fecha)}</b>{atr.codigo ? ` (${atr.codigo})` : ""}
+                {atr.cubre ? ", y cuenta para este mes." : ", que cuenta para el mes en que se hizo."}
+              </p>
+            )}
+            {atr?.estado === "vencida" && (
+              <p className="text-[11px] mt-0.5 leading-snug">No se ejecutó en su mes y todavía no se ha vuelto a ejecutar.</p>
+            )}
             <p className="text-xs font-semibold mt-0.5 leading-snug">{f.tarea}</p>
             <p className="text-[10px] opacity-70 leading-snug mb-1">{f.lugar} · {sedeNombre(data.sedes, f.sedeId)}</p>
             {pop.tipo !== "ejec" && (
@@ -8520,6 +8575,9 @@ function construirPlanAnualHTML(grupos, anio, nombreSede, data) {
     const cuerpo = filas.map((f) => {
       const celdas = MESES.map((m, k) => {
         if (f.ejecutados.has(k)) return `<td class="c ok">✓</td>`;
+        const atr = f.atrasos.get(k);
+        if (atr?.estado === "atraso") return `<td class="c atr">↻<br><span class="mini">${atr.fecha.slice(8)}/${atr.fecha.slice(5, 7)}</span></td>`;
+        if (atr?.estado === "vencida") return `<td class="c ven">✕</td>`;
         if (f.proyectados.includes(k)) return `<td class="c prog">●</td>`;
         return `<td class="c"></td>`;
       }).join("");
@@ -8535,7 +8593,7 @@ function construirPlanAnualHTML(grupos, anio, nombreSede, data) {
       ${resumen}
       <div class="sede"><h2>${esc(sede.nombre)}</h2><span>${r.tareas} tarea(s) del año · ${r.ejecutadas} ejecutada(s) · cumplimiento ${pct(r)}</span></div>
       <table><thead><tr><th class="vh">Tarea y ubicación</th>${cabMeses}</tr></thead><tbody>${cuerpo}</tbody></table>
-      <p class="ley">● programado · ✓ ejecutado. Cada tarea arranca en su fecha de inicio (o en su primera ejecución) y se repite según su frecuencia.</p>
+      <p class="ley">● programado · ✓ ejecutado · ↻ ejecutada con atraso (con la fecha en que se hizo) · ✕ no ejecutada. Cada tarea arranca en su fecha de inicio (o en su primera ejecución) y se repite según su frecuencia.</p>
       ${pie(`Cronograma anual ${anio} · ${sede.nombre}`)}
     </section>`;
   }).join("");
@@ -8579,6 +8637,9 @@ function construirPlanAnualHTML(grupos, anio, nombreSede, data) {
         const o = porMes.get(k);
         if (o) { const d = o.fechaCompletada || o.fechaProgramada; return `<td class="c ok">${d.slice(8)}/${d.slice(5, 7)}</td>`; }
         if (f.ejecutados.has(k)) return `<td class="c ok">✓</td>`;   // mantenimiento inicial
+        const atr = f.atrasos.get(k);
+        if (atr?.estado === "atraso") return `<td class="c atr">↻</td>`;
+        if (atr?.estado === "vencida") return `<td class="c ven">✕</td>`;
         if (f.proyectados.includes(k)) return `<td class="c prog">●</td>`;
         return `<td class="c mut">·</td>`;
       }).join("");
@@ -8603,7 +8664,7 @@ function construirPlanAnualHTML(grupos, anio, nombreSede, data) {
       ${cabecera("3. Desglose de actividades de mantenimiento", sub)}
       <div class="sede"><h2>${esc(sede.nombre)}</h2><span>${filas.length} tarea(s) del plan</span></div>
       <table><thead><tr><th class="vh">Actividad</th>${cabMeses}</tr></thead><tbody>${cuerpo}</tbody></table>
-      <p class="ley">Fecha (día/mes) = ejecutado · ● programado sin ejecutar · ✓ mantenimiento inicial. En cada paso se muestra lo registrado por el técnico en la ejecución de ese mes.</p>
+      <p class="ley">Fecha (día/mes) = ejecutado · ● programado sin ejecutar · ↻ ejecutada con atraso · ✕ no ejecutada · ✓ mantenimiento inicial. En cada paso se muestra lo registrado por el técnico en la ejecución de ese mes.</p>
       ${pie(`Desglose de actividades ${anio} · ${sede.nombre}`)}
     </section>`;
   }).join("");
@@ -8639,6 +8700,9 @@ td.pasos{font-size:7pt;color:#55595F;padding-left:10px}
 .c{text-align:center}
 .ok{background:#E8F3ED;color:#2E7D5B;font-weight:700}
 .prog{background:#FDEEE7;color:#ED5B23;font-weight:700}
+.atr{background:#FBF1DC;color:#B7791F;font-weight:700}
+.ven{background:#FBE5E1;color:#C1442D;font-weight:700}
+.mini{font-size:5.5pt;font-weight:400}
 .mut{color:#8D939B;font-size:6.8pt;font-weight:400}
 .ley{margin-top:8px;font-size:7pt;color:#8D939B}
 .pie{margin-top:10px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.8pt;color:#8D939B;display:flex;justify-content:space-between}
