@@ -732,7 +732,7 @@ function satisfaccion(data, sedeIds) {
   const total = calificadas.length;
   const promedio = total > 0 ? calificadas.reduce((a, s) => a + Number(s.calificacion), 0) / total : null;
   const dist = [5, 4, 3, 2, 1].map((n) => ({ n, cant: calificadas.filter((s) => s.calificacion === n).length }));
-  return { promedio, total, cerradas, sinCalificar: cerradas - total, dist, comentarios: calificadas.filter((s) => s.comentarioCalif) };
+  return { promedio, total, cerradas, sinCalificar: cerradas - total, dist, calificadas, comentarios: calificadas.filter((s) => s.comentarioCalif) };
 }
 
 /* Serie mensual del costo por estudiante. */
@@ -2199,11 +2199,17 @@ function FotosEvidencia({ fotos = [], onChange, readOnly, label = "Evidencia del
   );
 }
 
-/* Satisfacción del servicio: promedio de estrellas y su distribución. */
-function TarjetaSatisfaccion({ sat }) {
+/* Satisfacción del servicio: promedio de estrellas y su distribución.
+   Tocar una barra (o "Ver calificaciones") abre la lista de órdenes
+   calificadas; desde ahí se abre cada orden con sus observaciones y el
+   comentario del solicitante. */
+function TarjetaSatisfaccion({ sat, data, mostrarCosto }) {
   const color = sat.promedio === null ? COLORS.slate
     : sat.promedio >= 4.5 ? COLORS.verde : sat.promedio >= 3.5 ? COLORS.ambar : COLORS.rojo;
   const max = Math.max(1, ...sat.dist.map((d) => d.cant));
+  const [lista, setLista] = useState(null);   // null = cerrado · 0 = todas · 1..5 = estrellas
+  const [abierta, setAbierta] = useState(null);   // orden abierta dentro del popup
+  const cerrar = () => { setLista(null); setAbierta(null); };
 
   return (
     <div className="border rounded-md p-3" style={cardStyle}>
@@ -2224,7 +2230,9 @@ function TarjetaSatisfaccion({ sat }) {
       {sat.total > 0 ? (
         <div className="space-y-1">
           {sat.dist.map((d) => (
-            <div key={d.n} className="flex items-center gap-2">
+            <button key={d.n} type="button" disabled={!d.cant} onClick={() => setLista(d.n)}
+              title={d.cant ? `Ver las ${d.cant} calificación(es) de ${d.n} estrella(s)` : undefined}
+              className="w-full flex items-center gap-2 rounded-sm enabled:hover:bg-black/5 disabled:cursor-default">
               <span className="text-[10px] w-6 shrink-0 flex items-center gap-0.5" style={cSlate}>
                 {d.n}<Star size={9} color={COLORS.ambar} fill={COLORS.ambar} />
               </span>
@@ -2232,8 +2240,11 @@ function TarjetaSatisfaccion({ sat }) {
                 <div style={{ width: `${(d.cant / max) * 100}%`, background: COLORS.ambar, height: "100%" }} />
               </div>
               <span className="text-[10px] w-4 text-right shrink-0" style={cSlate}>{d.cant}</span>
-            </div>
+            </button>
           ))}
+          <button type="button" onClick={() => setLista(0)} className="w-full text-[11px] font-semibold pt-1.5" style={cOrange}>
+            Ver calificaciones
+          </button>
         </div>
       ) : (
         <p className="text-[11px]" style={cSlate}>
@@ -2246,6 +2257,64 @@ function TarjetaSatisfaccion({ sat }) {
           {sat.sinCalificar} cerrada(s) todavía sin calificar.
         </p>
       )}
+
+      {lista !== null && (
+        <Modal title={abierta ? `Orden ${abierta.codigo}` : "Calificaciones del servicio"} onClose={cerrar} wide>
+          <div className="text-left">
+            {abierta ? (
+              <>
+                <button onClick={() => setAbierta(null)} className="flex items-center gap-1 text-xs font-semibold mb-3" style={cOrange}>
+                  <ChevronLeft size={14} /> Volver a las calificaciones
+                </button>
+                <DetalleActividad data={data} onClose={() => setAbierta(null)}
+                  item={{ ...abierta, tipo: "correctivo", tarea: abierta.descripcion, ocultarCosto: !mostrarCosto }} />
+              </>
+            ) : (
+              <ListaCalificaciones sat={sat} data={data} filtro={lista} onFiltro={setLista} onAbrir={setAbierta} />
+            )}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* Lista de órdenes calificadas: resumen de cada una (código, sede, fecha de
+   cierre, estrellas, descripción corta y comentario), filtrable por estrellas. */
+function ListaCalificaciones({ sat, data, filtro, onFiltro, onAbrir }) {
+  const corta = (t, n) => { const x = String(t || "").trim(); return x.length > n ? `${x.slice(0, n).trim()}…` : x; };
+  const filas = sat.calificadas
+    .filter((s) => !filtro || Number(s.calificacion) === filtro)
+    .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
+  const chip = (n, label, cant) => (
+    <button key={n} onClick={() => onFiltro(n)} className="text-[11px] font-semibold px-2 py-1 rounded-md flex items-center gap-1"
+      style={filtro === n ? { background: COLORS.charcoal, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
+      {label} <span className="opacity-70">({cant})</span>
+    </button>
+  );
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-1.5 flex-wrap">
+        {chip(0, "Todas", sat.total)}
+        {sat.dist.filter((d) => d.cant).map((d) => chip(d.n, `${d.n}★`, d.cant))}
+      </div>
+      <div className="space-y-2">
+        {filas.map((s) => (
+          <button key={s.id} onClick={() => onAbrir(s)} className="w-full text-left border rounded-md p-2.5 hover:bg-black/[.02]"
+            style={{ ...cardStyle, borderLeft: `3px solid ${s.calificacion >= 4 ? COLORS.verde : s.calificacion === 3 ? COLORS.ambar : COLORS.rojo}` }}>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="text-xs font-bold" style={cChar}>{s.codigo}
+                <span className="font-normal" style={cSlate}> · {sedeNombre(data.sedes, s.sedeId)}{s.fechaCompletada ? ` · cerrada ${fmtDMY(s.fechaCompletada)}` : ""}</span>
+              </span>
+              <Estrellas valor={Number(s.calificacion)} size={12} readOnly />
+            </div>
+            <p className="text-xs mt-1" style={cChar}>{corta(s.descripcion, 110) || "Sin descripción"}</p>
+            {s.comentarioCalif && <p className="text-[11px] mt-1 italic" style={cSlate}>“{corta(s.comentarioCalif, 140)}”</p>}
+            <p className="text-[10px] font-semibold mt-1.5" style={cOrange}>Abrir orden ›</p>
+          </button>
+        ))}
+        {!filas.length && <Empty>No hay órdenes con esa calificación.</Empty>}
+      </div>
     </div>
   );
 }
@@ -3560,7 +3629,7 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
           titulo="MTTR · tiempo de respuesta" valor={kpi.mttr} meta={META_MTTR_GLOBAL} invertido campo="mttr" serie={serieKPI}
           detalle={kpi.cerrados > 0 ? `${kpi.cerrados} cierre(s)` : "Sin cierres"}
           desglose={kpi.porCriticidad} notaDesglose="Barra llena = meta alcanzada · nº de cierres" />
-        {mostrarSatisfaccion && <TarjetaSatisfaccion sat={sat} />}
+        {mostrarSatisfaccion && <TarjetaSatisfaccion sat={sat} data={data} mostrarCosto={mostrarCosto} />}
       </div>
 
       {/* Tendencia del costo por estudiante — solo para administración y cliente */}
