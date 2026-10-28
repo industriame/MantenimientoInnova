@@ -648,6 +648,7 @@ function indicadoresMes(data, sedeIds, mes) {
       meta: META_MTTR[id],
       fallas: delNivel.length,
       cerrados: cerradosNivel.length,
+      cerradosLista: cerradosNivel,
       mttr: cerradosNivel.length > 0
         ? cerradosNivel.reduce((acc, s) => acc + diasDe(s), 0) / cerradosNivel.length
         : null,
@@ -1872,7 +1873,15 @@ function SparklineKPI({ serie, campo, meta, invertido }) {
   );
 }
 
-function TarjetaConfiabilidad({ titulo, valor, unidad = "días", meta, invertido, detalle, serie, campo, desglose, notaDesglose }) {
+function TarjetaConfiabilidad({ titulo, valor, unidad = "días", meta, invertido, detalle, serie, campo, desglose, notaDesglose, data, mostrarCosto }) {
+  /* Con data (solo en MTTR) cada criticidad abre la lista de las órdenes
+     cerradas en el mes con su tiempo de respuesta; la orden se abre en el
+     mismo popup. */
+  const verOrdenes = invertido && !!data;
+  const [lista, setLista] = useState(null);   // null = cerrado · "" = todas · id de criticidad
+  const [abierta, setAbierta] = useState(null);
+  const cerrar = () => { setLista(null); setAbierta(null); };
+  const totalCierres = verOrdenes ? (desglose || []).reduce((n, d) => n + d.cerrados, 0) : 0;
   const hayDato = valor !== null && valor !== undefined;
   const color = invertido ? colorVsMeta(valor, meta) : colorMTBF(valor);
   // Variación contra el mes anterior de la misma serie
@@ -1923,9 +1932,15 @@ function TarjetaConfiabilidad({ titulo, valor, unidad = "días", meta, invertido
               const v = invertido ? d.mttr : d.mtbf;
               const c = invertido ? colorVsMeta(v, d.meta) : colorMTBF(v);
               const pct = v === null ? 0 : Math.min(100, (v / d.meta) * 100);
+              const Fila = verOrdenes ? "button" : "div";
+              const filaProps = verOrdenes
+                ? { type: "button", disabled: !d.cerrados, onClick: () => setLista(d.id),
+                    title: d.cerrados ? `Ver las ${d.cerrados} orden(es) de criticidad ${d.label.toLowerCase()}` : undefined,
+                    className: "w-full flex items-center gap-2 rounded-sm enabled:hover:bg-black/5 disabled:cursor-default" }
+                : { className: "flex items-center gap-2" };
               return (
-                <div key={d.id} className="flex items-center gap-2">
-                  <span className="text-[11px] w-12 shrink-0" style={cChar}>{d.label}</span>
+                <Fila key={d.id} {...filaProps}>
+                  <span className="text-[11px] w-12 shrink-0 text-left" style={cChar}>{d.label}</span>
                   <div className="flex-1 h-1.5 rounded-sm overflow-hidden min-w-0" style={{ background: COLORS.line }}>
                     <div style={{ width: `${pct}%`, height: "100%", background: v === null ? COLORS.line : c }} />
                   </div>
@@ -1934,12 +1949,92 @@ function TarjetaConfiabilidad({ titulo, valor, unidad = "días", meta, invertido
                   </span>
                   {invertido && <span className="text-[9px] w-12 shrink-0" style={cSlate}>meta {d.meta} d</span>}
                   <span className="text-[9px] w-5 text-right shrink-0" style={cSlate}>{invertido ? d.cerrados : d.fallas}</span>
-                </div>
+                </Fila>
               );
             })}
           </div>
+          {verOrdenes && totalCierres > 0 && (
+            <button type="button" onClick={() => setLista("")} className="w-full text-[11px] font-semibold pt-1.5" style={cOrange}>
+              Ver órdenes cerradas
+            </button>
+          )}
         </div>
       )}
+
+      {verOrdenes && lista !== null && (
+        <Modal title={abierta ? `Orden ${abierta.codigo}` : "Tiempo de respuesta por orden"} onClose={cerrar} wide>
+          <div className="text-left">
+            {abierta ? (
+              <>
+                <button onClick={() => setAbierta(null)} className="flex items-center gap-1 text-xs font-semibold mb-3" style={cOrange}>
+                  <ChevronLeft size={14} /> Volver a la lista
+                </button>
+                <DetalleActividad data={data} onClose={() => setAbierta(null)}
+                  item={{ ...abierta, tipo: "correctivo", tarea: abierta.descripcion, ocultarCosto: !mostrarCosto }} />
+              </>
+            ) : (
+              <ListaTiempoRespuesta desglose={desglose} data={data} filtro={lista} onFiltro={setLista} onAbrir={setAbierta} />
+            )}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* Órdenes cerradas en el mes con su tiempo de respuesta (del reporte al
+   cierre) contra la meta de su criticidad; primero las más pasadas de meta. */
+function ListaTiempoRespuesta({ desglose, data, filtro, onFiltro, onAbrir }) {
+  const corta = (t, n) => { const x = String(t || "").trim(); return x.length > n ? `${x.slice(0, n).trim()}…` : x; };
+  const dias = (s) => Math.max(0, horasEntre(s.fecha, s.hora, s.fechaCompletada, s.horaCompletada) / 24);
+  const fmtT = (d) => (d < 1 ? `${Math.round(d * 24)} h` : `${d.toFixed(1)} d`);
+  const filas = desglose
+    .filter((d) => !filtro || d.id === filtro)
+    .flatMap((d) => d.cerradosLista.map((s) => ({ s, d, t: dias(s) })))
+    // Primero las más pasadas de su meta (proporción tiempo ÷ meta)
+    .sort((a, b) => b.t / b.d.meta - a.t / a.d.meta);
+  const total = desglose.reduce((n, d) => n + d.cerrados, 0);
+  const chip = (id, label, cant) => (
+    <button key={id || "todas"} onClick={() => onFiltro(id)} className="text-[11px] font-semibold px-2 py-1 rounded-md"
+      style={filtro === id ? { background: COLORS.charcoal, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
+      {label} <span className="opacity-70">({cant})</span>
+    </button>
+  );
+  const fecha = (f, h) => `${fmtDMY(f)}${h ? ` ${h}` : ""}`;
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-1.5 flex-wrap">
+        {chip("", "Todas", total)}
+        {desglose.filter((d) => d.cerrados).map((d) => chip(d.id, d.label, d.cerrados))}
+      </div>
+      <div className="space-y-2">
+        {filas.map(({ s, d, t }) => {
+          const enMeta = t <= d.meta;
+          const c = enMeta ? COLORS.verde : COLORS.rojo;
+          return (
+            <button key={s.id} onClick={() => onAbrir(s)} className="w-full text-left border rounded-md p-2.5 hover:bg-black/[.02]"
+              style={{ ...cardStyle, borderLeft: `3px solid ${c}` }}>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-xs font-bold flex items-center gap-1.5 flex-wrap" style={cChar}>
+                  {s.codigo}
+                  <Chip color={CRITICIDAD[d.id].color}>{d.label}</Chip>
+                  <span className="font-normal" style={cSlate}>{sedeNombre(data.sedes, s.sedeId)}</span>
+                </span>
+                <span className="text-xs font-bold" style={{ color: c }}>
+                  {fmtT(t)} <span className="text-[10px] font-normal" style={cSlate}>· meta {d.meta} d</span>
+                </span>
+              </div>
+              <p className="text-xs mt-1" style={cChar}>{corta(s.descripcion, 110) || "Sin descripción"}</p>
+              <p className="text-[10px] mt-1" style={cSlate}>
+                Reportada {fecha(s.fecha, s.hora)} → cerrada {fecha(s.fechaCompletada, s.horaCompletada)}
+                {enMeta ? "" : " · fuera de meta"}
+              </p>
+              <p className="text-[10px] font-semibold mt-1.5" style={cOrange}>Abrir orden ›</p>
+            </button>
+          );
+        })}
+        {!filas.length && <Empty>No hay órdenes cerradas con esa criticidad en el mes.</Empty>}
+      </div>
     </div>
   );
 }
@@ -3659,7 +3754,8 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
         <TarjetaConfiabilidad
           titulo="MTTR · tiempo de respuesta" valor={kpi.mttr} meta={META_MTTR_GLOBAL} invertido campo="mttr" serie={serieKPI}
           detalle={kpi.cerrados > 0 ? `${kpi.cerrados} cierre(s)` : "Sin cierres"}
-          desglose={kpi.porCriticidad} notaDesglose="Barra llena = meta alcanzada · nº de cierres" />
+          desglose={kpi.porCriticidad} notaDesglose="Barra llena = meta alcanzada · nº de cierres"
+          data={data} mostrarCosto={mostrarCosto} />
         {mostrarSatisfaccion && <TarjetaSatisfaccion sat={sat} data={data} mostrarCosto={mostrarCosto} />}
       </div>
 
