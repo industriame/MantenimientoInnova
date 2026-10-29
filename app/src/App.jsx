@@ -3224,11 +3224,13 @@ function registroHTML(texto, esc) {
 }
 
 /* Comentario nuevo para el registro: etiqueta + texto. Con "Requiere
-   material" se puede elegir el artículo del kardex (aunque no haya
-   existencias) y la cantidad; si no está en el kardex basta con escribirlo. */
+   material" se agregan uno o varios materiales: del kardex (aunque no haya
+   existencias) o escritos a mano si no están, cada uno con cantidad y unidad. */
 function NuevoComentario({ valor, onChange, etiquetas = ETIQUETAS_TECNICO, stock = [], requerido, placeholder }) {
-  const { texto = "", etiqueta = "", articulo = "", cantidad = "" } = valor;
+  const { texto = "", etiqueta = "", materiales = [] } = valor;
   const set = (p) => onChange({ ...valor, ...p });
+  const setMat = (i, p) => set({ materiales: materiales.map((m, j) => (j === i ? { ...m, ...p } : m)) });
+  const agregar = (m) => set({ materiales: [...materiales, { cantidad: "1", ...m }] });
   return (
     <div className="space-y-1.5">
       <div className="flex gap-1 flex-wrap">
@@ -3244,31 +3246,47 @@ function NuevoComentario({ valor, onChange, etiquetas = ETIQUETAS_TECNICO, stock
           );
         })}
       </div>
-      {etiqueta === "material" && stock.length > 0 && (
-        <div className="flex items-start gap-1.5">
-          <div className="flex-1 min-w-0">
-            <SelectorArticulo articulos={stock} value={articulo} onChange={(id) => set({ articulo: id, cantidad: cantidad || "1" })} />
-          </div>
-          {articulo && (
-            <input type="text" inputMode="decimal" value={cantidad} placeholder="Cant."
-              onChange={(e) => set({ cantidad: e.target.value.replace(/[^0-9.,]/g, "") })}
-              className="w-16 border rounded-md px-2 py-2 text-xs outline-none" style={inputStyle} />
-          )}
-          {articulo && <button type="button" onClick={() => set({ articulo: "", cantidad: "" })} className="p-2" title="Quitar artículo"><X size={13} color={COLORS.slate} /></button>}
+      {etiqueta === "material" && (
+        <div className="rounded-md p-2 space-y-1.5" style={{ background: COLORS.cream }}>
+          {materiales.map((m, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <div className="flex-1 min-w-0 text-left">
+                <p className="text-xs font-semibold break-words" style={cChar}>{m.nombre}</p>
+                <p className="text-[10px]" style={{ color: m.stockId ? COLORS.slate : COLORS.orange }}>
+                  {m.stockId ? "Del kardex" : "No está en el kardex"}
+                </p>
+              </div>
+              <input type="text" inputMode="decimal" value={m.cantidad} placeholder="Cant."
+                onChange={(e) => setMat(i, { cantidad: e.target.value.replace(/[^0-9.,]/g, "") })}
+                className="w-14 border rounded-md px-1.5 py-1.5 text-xs outline-none bg-white" style={inputStyle} />
+              <input type="text" value={m.unidad} placeholder="u" disabled={!!m.stockId}
+                onChange={(e) => setMat(i, { unidad: e.target.value })}
+                className="w-14 border rounded-md px-1.5 py-1.5 text-xs outline-none bg-white disabled:opacity-60" style={inputStyle} />
+              <button type="button" onClick={() => set({ materiales: materiales.filter((_, j) => j !== i) })} className="p-1" title="Quitar">
+                <X size={13} color={COLORS.slate} />
+              </button>
+            </div>
+          ))}
+          <SelectorArticulo articulos={stock} value=""
+            textoBoton={materiales.length ? "Agregar otro material…" : "Buscar en el kardex o escribir el material…"}
+            onChange={(id) => { const a = stock.find((x) => x.id === id); if (a) agregar({ stockId: a.id, nombre: a.nombre, unidad: a.unidad || "u" }); }}
+            onNuevo={(nombre) => agregar({ nombre, unidad: "u" })} />
         </div>
       )}
       <textarea value={texto} onChange={(e) => set({ texto: e.target.value })} rows={2}
-        placeholder={placeholder || (etiqueta === "material" ? "Qué material falta (si no está en la lista, escríbelo aquí)…" : "Qué se hizo, qué falta o qué se encontró…")}
+        placeholder={placeholder || (etiqueta === "material" ? "Detalle adicional (opcional)…" : "Qué se hizo, qué falta o qué se encontró…")}
         className={`${inputCls} resize-none`} style={{ ...inputStyle, ...(requerido ? { borderColor: COLORS.orange } : {}) }} />
     </div>
   );
 }
 
-/* Texto final del comentario: artículo elegido + lo escrito. */
-function textoComentario(valor, stock = []) {
-  const art = stock.find((x) => x.id === valor.articulo);
+/* Texto final del comentario: materiales + lo escrito. */
+function textoComentario(valor) {
   const partes = [];
-  if (art) partes.push(`${art.nombre} × ${String(valor.cantidad || 1).replace(",", ".")} ${art.unidad || ""}`.trim());
+  const mats = (valor.materiales || []).filter((m) => (m.nombre || "").trim());
+  if (mats.length) {
+    partes.push(mats.map((m) => `${m.nombre.trim()} × ${String(m.cantidad || 1).replace(",", ".")} ${(m.unidad || "u").trim()}${m.stockId ? "" : " (no está en el kardex)"}`).join("; "));
+  }
   if ((valor.texto || "").trim()) partes.push(valor.texto.trim());
   return partes.join(" · ");
 }
@@ -3341,7 +3359,7 @@ const coincideArticulo = (nombre, q) => {
 /* Desplegable de artículos con buscador integrado. La lista se abre debajo,
    dentro del mismo flujo (no flotante), para que en el celular y dentro de
    los modales nunca quede cortada; los nombres largos se ven completos. */
-function SelectorArticulo({ articulos, value, onChange }) {
+function SelectorArticulo({ articulos, value, onChange, onNuevo, textoBoton }) {
   const [abierto, setAbierto] = useState(false);
   const [q, setQ] = useState("");
   const [activo, setActivo] = useState(0);
@@ -3386,7 +3404,7 @@ function SelectorArticulo({ articulos, value, onChange }) {
               <span className="block text-[10px]" style={{ color: sel.cantidad > 0 ? COLORS.slate : COLORS.rojo }}>{existencia(sel)}</span>
             </span>
           ) : (
-            <span className="text-xs flex items-center gap-1.5" style={cSlate}><Search size={13} /> Buscar o elegir artículo…</span>
+            <span className="text-xs flex items-center gap-1.5" style={cSlate}><Search size={13} /> {textoBoton || "Buscar o elegir artículo…"}</span>
           )}
           <ChevronDown size={14} color={COLORS.slate} className="shrink-0 mt-0.5" />
         </button>
@@ -3413,8 +3431,18 @@ function SelectorArticulo({ articulos, value, onChange }) {
                 </span>
               </button>
             ))}
-            {filtrados.length === 0 && (
-              <p className="px-2.5 py-3 text-xs text-center" style={cSlate}>Ningún artículo coincide con “{q}”.</p>
+            {filtrados.length === 0 && !(onNuevo && q.trim()) && (
+              <p className="px-2.5 py-3 text-xs text-center" style={cSlate}>
+                {q.trim() ? `Ningún artículo coincide con “${q}”.` : "No hay artículos en el kardex de esta sede. Escribe el nombre para agregarlo."}
+              </p>
+            )}
+            {/* Material que no está en el kardex: se agrega con el nombre escrito */}
+            {onNuevo && q.trim() && !filtrados.some((x) => sinTildes(x.nombre) === sinTildes(q.trim())) && (
+              <button type="button" onClick={() => { onNuevo(q.trim()); setAbierto(false); setQ(""); }}
+                className="w-full flex items-center gap-1.5 px-2.5 py-2 text-left text-xs font-semibold border-t"
+                style={{ borderColor: COLORS.line, color: COLORS.orange, background: "white" }}>
+                <Plus size={13} /> Agregar “{q.trim()}” (no está en el kardex)
+              </button>
             )}
           </div>
         </div>
@@ -4941,7 +4969,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
 
   const [confirmarCierre, setConfirmarCierre] = useState(false);
 
-  const textoNuevo = textoComentario(comentario, stockSede);
+  const textoNuevo = textoComentario(comentario);
   // En proceso o en espera se pide contar qué se hizo o qué falta
   const pideComentario = !corrige && ["en_proceso", "espera"].includes(estado);
   /* El comentario se ofrece mientras la orden está abierta. Al cerrar un
