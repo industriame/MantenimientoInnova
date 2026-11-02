@@ -686,36 +686,109 @@ function indicadoresMes(data, sedeIds, mes) {
   };
 }
 
-/* Cumplimiento del plan preventivo: para cada aplicación de plan (un activo
-   con un preventivo asignado) se decide una sola categoría:
-   - Completadas / En Ejecución: según su orden con fecha en el mes elegido.
-   - Sin Programar: con el mismo criterio de ciclo que getPendientes (sin
-     orden abierta y con la próxima fecha dentro del mes o ya vencida), para
-     que el Dashboard coincida con Programación y Actividades.
-   Lo que no cae en ninguna (ya ejecutado y con el ciclo vigente, o
-   programado para otro mes) está al día y no suma al total del mes. */
+/* Suma n meses a una clave 'YYYY-MM'. */
+const sumarMeses = (mk, n) => {
+  const [y, m] = mk.split("-").map(Number);
+  const d = new Date(y, m - 1 + n, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
+/* Ciclo de una aplicación de plan reconstruido con su historia real:
+   - Toca por primera vez en su fecha de inicio (o desde el arranque del
+     servicio si no tiene fecha ni ejecuciones); si la fecha de inicio ya pasó,
+     cuenta como un mantenimiento hecho.
+   - Cada ejecución cubre todos los turnos pendientes hasta su mes: los de
+     meses anteriores quedan "cumplidos con atraso" y el de su propio mes,
+     cumplido. Así, una mensual de octubre hecha el 5 de noviembre cumple
+     octubre (con atraso) y noviembre con esa sola ejecución.
+   - El siguiente turno vuelve a contar desde la última ejecución.
+   Devuelve qué turnos cubrió cada ejecución y desde cuándo hay algo
+   pendiente sin cubrir. */
+function cicloAplicacion(plan, ap, ordenesApp, inicioMes) {
+  const paso = FRECUENCIA_MESES[plan.frecuencia] || 3;
+  const fechas = ordenesApp.filter((o) => o.estado === "completada").map((o) => o.fechaCompletada || o.fechaProgramada).filter(Boolean);
+  if (fechaInicialRealizada(ap)) fechas.push(ap.fechaInicial);
+  const meses = [...new Set(fechas.map(mesKey))].sort();
+  let pendienteDesde = fechaInicialRealizada(ap) ? null
+    : ap.fechaInicial ? mesKey(ap.fechaInicial)
+    : [inicioMes, meses[0]].filter(Boolean).sort()[0] || null;
+  const turnos = new Map();       // mes del turno → mes de la ejecución que lo cubrió
+  const ejecuciones = new Map();  // mes de ejecución → { atrasada }
+  meses.forEach((em) => {
+    if (pendienteDesde === null || em < pendienteDesde) {
+      ejecuciones.set(em, { atrasada: false });
+    } else {
+      let atrasada = false;
+      for (let t = pendienteDesde; t <= em; t = sumarMeses(t, paso)) {
+        turnos.set(t, em);
+        if (t < em) atrasada = true;
+      }
+      ejecuciones.set(em, { atrasada });
+    }
+    pendienteDesde = sumarMeses(em, paso);
+  });
+  return { turnos, ejecuciones, pendienteDesde };
+}
+
+/* Estado de una aplicación en un mes, según el ciclo:
+   - completada: se ejecutó en ese mes (atrasada si recuperó turnos previos);
+   - atraso: tocaba y se cumplió después (mes ya cerrado);
+   - noRealizada: tocaba, el mes ya cerró y sigue sin hacerse;
+   - enEjecucion / sinProgramar: tocaba (o viene atrasada) en el mes en curso
+     o futuro, con o sin orden abierta.
+   null si en ese mes no le tocaba nada. */
+function estadoAplicacionMes(ciclo, mes, mesActual, hayAbierta) {
+  const ej = ciclo.ejecuciones.get(mes);
+  if (ej) return { tipo: "completada", atrasada: ej.atrasada };
+  const pendiente = ciclo.pendienteDesde !== null && ciclo.pendienteDesde <= mes;
+  if (pendiente) {
+    const atrasada = ciclo.pendienteDesde < mes;
+    if (mes < mesActual) return { tipo: "noRealizada", atrasada };
+    return { tipo: hayAbierta ? "enEjecucion" : "sinProgramar", atrasada };
+  }
+  let cubierta = null, atrasada = false;
+  ciclo.turnos.forEach((c, t) => { if (t <= mes && c > mes) { cubierta = !cubierta || c < cubierta ? c : cubierta; if (t < mes) atrasada = true; } });
+  return cubierta ? { tipo: "atraso", atrasada, cubiertaEn: cubierta } : null;
+}
+
+/* Cumplimiento del plan preventivo en un mes: cada aplicación de plan (un
+   activo con un preventivo asignado) cae en una sola categoría según lo que
+   realmente pasó en ese mes (ver estadoAplicacionMes). Las tareas que vienen
+   atrasadas de meses anteriores cuentan en el mes como pendientes hasta que
+   se hagan. Un mes cerrado no cambia porque luego se reprograme o se haga
+   tarde lo que le tocaba: lo hecho después aparece como "cumplida con
+   atraso" y no suma al cumplimiento de ese mes. */
 function avancePlan(data, sedeIds, mes) {
-  let sinProgramar = 0, enEjecucion = 0, completadas = 0;
+  let sinProgramar = 0, enEjecucion = 0, completadas = 0, noRealizadas = 0, conAtraso = 0, atrasadas = 0;
+  const mesActual = mesKey(fmtDate(new Date()));
+  const inicioMes = primerMesConDatos(data, null);
 
   (data.planes || []).forEach((plan) => {
     (plan.aplicaciones || []).forEach((ap) => {
       if (!sedeIds.includes(ap.sedeId)) return;
       const todas = ordenesDeAplicacion(data, plan, ap);
-      const delMes = todas.filter((o) => mesKey(o.fechaProgramada) === mes);
-      if (delMes.some((o) => o.estado === "completada")) { completadas++; return; }
-      if (delMes.some((o) => ESTADOS_ABIERTOS.includes(o.estado))) { enEjecucion++; return; }
-      if (preventivoPendiente(plan, todas, mes, ap)) sinProgramar++;
+      const est = estadoAplicacionMes(cicloAplicacion(plan, ap, todas, inicioMes), mes, mesActual,
+        todas.some((o) => ESTADOS_ABIERTOS.includes(o.estado)));
+      if (!est) return;
+      if (est.tipo === "completada") completadas++;
+      else if (est.tipo === "enEjecucion") enEjecucion++;
+      else if (est.tipo === "sinProgramar") sinProgramar++;
+      else if (est.tipo === "noRealizada") noRealizadas++;
+      else if (est.tipo === "atraso") conAtraso++;
+      if (est.atrasada && est.tipo !== "completada" && est.tipo !== "atraso") atrasadas++;
     });
   });
 
-  const total = sinProgramar + enEjecucion + completadas;
+  const total = sinProgramar + enEjecucion + completadas + noRealizadas + conAtraso;
   return {
-    total, sinProgramar, enEjecucion, completadas,
+    total, sinProgramar, enEjecucion, completadas, noRealizadas, conAtraso, atrasadas,
     cumplimiento: total > 0 ? (completadas / total) * 100 : null,
     datos: [
       { name: "Completadas", value: completadas, color: COLORS.verde },
       { name: "En Ejecución", value: enEjecucion, color: COLORS.orange },
+      { name: "Cumplida con atraso", value: conAtraso, color: COLORS.ambar },
       { name: "Sin Programar", value: sinProgramar, color: COLORS.rojo },
+      { name: "No realizada", value: noRealizadas, color: COLORS.vino },
     ].filter((d) => d.value > 0),
   };
 }
@@ -894,14 +967,12 @@ function cronogramaAnual(data, anio, sedeIds) {
         proxima = fmtDate(d);
       }
       /* Meses ya pasados que tocaban y no se ejecutaron en su mes:
-         - "atraso": hubo una ejecución después. Si esa ejecución cayó en un mes
-           sin programación propia, cubre este mes (cuenta como ejecutada y no
-           suma una tarea extra). Si cayó en un mes que ya tocaba (p. ej. un
-           mensual que se retoma al mes siguiente), cuenta para ese otro mes y
-           este queda como no cumplido, solo con la nota de cuándo se retomó.
-         - "vencida": no se ha vuelto a ejecutar.
-         Se recorren de atrás hacia adelante para que la ejecución cubra el
-         mes atrasado más cercano. */
+         - "atraso": se ejecutó después. La primera ejecución posterior cubre
+           todos los meses atrasados anteriores a ella y cuenta como cumplida
+           para cada uno; si cae en un mes que también tocaba (un mensual de
+           octubre hecho en noviembre), cumple además ese mes. Una sola
+           ejecución basta: el atraso solo queda anotado.
+         - "vencida": no se ha vuelto a ejecutar. */
       const mesActual = mesKey(fmtDate(new Date()));
       const ejecucionesTodas = (data.ordenes || [])
         .filter((o) => o.planId === plan.id && o.sedeId === ap.sedeId && o.estado === "completada"
@@ -912,16 +983,16 @@ function cronogramaAnual(data, anio, sedeIds) {
         .sort((a, b) => a.fecha.localeCompare(b.fecha));
       const atrasos = new Map();   // mes → { estado, fecha, codigo, cubre }
       const recuperaciones = new Set();   // meses con una ejecución que cubre un mes atrasado
-      [...proyectados].sort((a, b) => b - a).forEach((p) => {
+      [...proyectados].sort((a, b) => a - b).forEach((p) => {
         const mk = `${anio}-${String(p + 1).padStart(2, "0")}`;
         if (ejecutados.has(p) || mk >= mesActual) return;
         const sig = ejecucionesTodas.find((x) => mesKey(x.fecha) > mk);
         if (!sig) { atrasos.set(p, { estado: "vencida" }); return; }
         const mSig = mesKey(sig.fecha);
         const idx = Number(mSig.slice(5, 7)) - 1;
-        const cubre = Number(mSig.slice(0, 4)) === anio && !proyectados.includes(idx) && !recuperaciones.has(idx);
-        if (cubre) recuperaciones.add(idx);
-        atrasos.set(p, { estado: "atraso", fecha: sig.fecha, codigo: sig.codigo, cubre });
+        // Si se hizo en un mes que no tenía turno propio, esa ejecución no suma una tarea aparte
+        if (Number(mSig.slice(0, 4)) === anio && !proyectados.includes(idx)) recuperaciones.add(idx);
+        atrasos.set(p, { estado: "atraso", fecha: sig.fecha, codigo: sig.codigo, cubre: true });
       });
 
       const sede = (data.sedes || []).find((x) => x.id === ap.sedeId);
@@ -978,6 +1049,16 @@ const semaforoDe = (item) =>
     : item.tipo === "servicio" ? semaforoServicio(item)
     : semaforoCorrectivo(item);
 const ordenarPorUrgencia = (items) => [...items].sort((a, b) => semaforoDe(b).nivel - semaforoDe(a).nivel);
+
+/* Desglose en texto de una barra de cumplimiento. */
+const resumenAvance = (a) => [
+  `${a.total} tareas`, `${a.completadas} completadas`,
+  a.enEjecucion ? `${a.enEjecucion} en ejecución` : "",
+  a.conAtraso ? `${a.conAtraso} cumplida(s) con atraso` : "",
+  a.sinProgramar ? `${a.sinProgramar} sin programar` : "",
+  a.noRealizadas ? `${a.noRealizadas} no realizada(s)` : "",
+  a.atrasadas ? `${a.atrasadas} atrasada(s) de meses anteriores` : "",
+].filter(Boolean).join(" · ");
 
 /* Órdenes de una aplicación de plan (mismo plan, sede, fase y activo). */
 const ordenesDeAplicacion = (data, plan, ap) => (data.ordenes || []).filter(
@@ -3724,17 +3805,19 @@ function Dashboard({ data, persist, sedes, mes, onMesChange, mostrarPresupuesto,
                   <div className="h-3 rounded-sm overflow-hidden flex" style={{ background: COLORS.line }}>
                     <div style={{ width: `${a.total ? (a.completadas / a.total) * 100 : 0}%`, background: COLORS.verde }} title={`${a.completadas} completadas`} />
                     <div style={{ width: `${a.total ? (a.enEjecucion / a.total) * 100 : 0}%`, background: COLORS.orange }} title={`${a.enEjecucion} en ejecución`} />
+                    <div style={{ width: `${a.total ? (a.conAtraso / a.total) * 100 : 0}%`, background: COLORS.ambar }} title={`${a.conAtraso} cumplida(s) con atraso`} />
                     <div style={{ width: `${a.total ? (a.sinProgramar / a.total) * 100 : 0}%`, background: COLORS.rojo }} title={`${a.sinProgramar} sin programar`} />
+                    <div style={{ width: `${a.total ? (a.noRealizadas / a.total) * 100 : 0}%`, background: COLORS.vino }} title={`${a.noRealizadas} no realizada(s)`} />
                   </div>
                   <p className="text-[10px] mt-1" style={cSlate}>
-                    {a.total} tareas · {a.completadas} completadas · {a.enEjecucion} en ejecución
-                    {a.sinProgramar > 0 ? ` · ${a.sinProgramar} sin programar` : ""}
+                    {resumenAvance(a)}
                   </p>
                 </div>
               ))}
 
               <div className="flex items-center gap-3 flex-wrap pt-2 border-t" style={bLine}>
-                {[["Completadas", COLORS.verde], ["En Ejecución", COLORS.orange], ["Sin Programar", COLORS.rojo]].map(([l, c]) => (
+                {[["Completadas", COLORS.verde], ["En Ejecución", COLORS.orange], ["Cumplida con atraso", COLORS.ambar],
+                  ["Sin Programar", COLORS.rojo], ["No realizada", COLORS.vino]].map(([l, c]) => (
                   <span key={l} className="flex items-center gap-1 text-[10px]" style={cSlate}>
                     <span className="w-2.5 h-2.5 rounded-sm" style={{ background: c }} />{l}
                   </span>
@@ -8178,11 +8261,13 @@ function AdminConfiguracion({ data, persist, setPlanModal }) {
    - tareas: cada mes marcado en la tabla (programado o ejecutado), es decir,
      todas las tareas del año. Una ejecución atrasada que cae en un mes sin
      programación propia cubre el mes que tocaba y no suma una tarea extra;
-   - ejecutadas: los meses con ✓;
+   - ejecutadas: los meses con ✓ y los cumplidos con atraso (↻);
    - cumplimiento: ejecutadas sobre el total de tareas del año. */
 function resumenPlanAnual(filas) {
   const tareas = filas.reduce((n, f) => n + new Set([...f.proyectados, ...f.ejecutados.keys()]).size - (f.recuperaciones?.size || 0), 0);
-  const ejecutadas = filas.reduce((n, f) => n + f.ejecutados.size, 0);
+  // Meses con ✓ (sin contar dos veces la ejecución que recuperó un atraso) + meses cumplidos con atraso
+  const ejecutadas = filas.reduce((n, f) => n + f.ejecutados.size - (f.recuperaciones?.size || 0)
+    + [...(f.atrasos?.values() || [])].filter((a) => a.estado === "atraso").length, 0);
   return {
     tareas, ejecutadas, pendientes: tareas - ejecutadas,
     pct: tareas ? Math.round((ejecutadas / tareas) * 100) : null,
@@ -8462,7 +8547,7 @@ function VistaPlanAnual({ data, sedes }) {
             {atr?.estado === "atraso" && (
               <p className="text-[11px] mt-0.5 leading-snug">
                 No se ejecutó en su mes. Se ejecutó el <b>{fmtDMY(atr.fecha)}</b>{atr.codigo ? ` (${atr.codigo})` : ""}
-                {atr.cubre ? ", y cuenta para este mes." : ", que cuenta para el mes en que se hizo."}
+                , y cuenta como cumplida.
               </p>
             )}
             {atr?.estado === "vencida" && (
@@ -8689,7 +8774,7 @@ function construirPlanAnualHTML(grupos, anio, nombreSede, data) {
       ${resumen}
       <div class="sede"><h2>${esc(sede.nombre)}</h2><span>${r.tareas} tarea(s) del año · ${r.ejecutadas} ejecutada(s) · cumplimiento ${pct(r)}</span></div>
       <table><thead><tr><th class="vh">Tarea y ubicación</th>${cabMeses}</tr></thead><tbody>${cuerpo}</tbody></table>
-      <p class="ley">● programado · ✓ ejecutado · ↻ ejecutada con atraso (con la fecha en que se hizo) · ✕ no ejecutada. Cada tarea arranca en su fecha de inicio (o en su primera ejecución) y se repite según su frecuencia.</p>
+      <p class="ley">● programado · ✓ ejecutado · ↻ ejecutada con atraso, cuenta como cumplida (con la fecha en que se hizo) · ✕ no ejecutada. Cada tarea arranca en su fecha de inicio (o en su primera ejecución) y se repite según su frecuencia.</p>
       ${pie(`Cronograma anual ${anio} · ${sede.nombre}`)}
     </section>`;
   }).join("");
@@ -9367,7 +9452,9 @@ function generarResumenUnificado(data, sedes, mes) {
 
     const av = avancePlan(data, [s.id], mes);
     if (av.total > 0) {
-      partes.push(`${av.completadas} de ${av.total} ${plural(av.total, "preventivo", "preventivos")}${av.sinProgramar > 0 ? ` (${av.sinProgramar} sin programar)` : ""}`);
+      const faltan = [av.sinProgramar ? `${av.sinProgramar} sin programar` : "", av.noRealizadas ? `${av.noRealizadas} no realizada(s)` : "",
+        av.conAtraso ? `${av.conAtraso} cumplida(s) con atraso` : ""].filter(Boolean).join(", ");
+      partes.push(`${av.completadas} de ${av.total} ${plural(av.total, "preventivo", "preventivos")}${faltan ? ` (${faltan})` : ""}`);
     }
 
     const ps = presupuestoSedeMes(data, s.id, mes);
@@ -9562,9 +9649,11 @@ function filaCumplimiento(a, nombre) {
     ${barraApilada([
       { n: "Completadas", v: a.completadas, c: "#2E7D5B" },
       { n: "En Ejecución", v: a.enEjecucion, c: "#ED5B23" },
+      { n: "Cumplida con atraso", v: a.conAtraso, c: "#D9A441" },
       { n: "Sin Programar", v: a.sinProgramar, c: "#C1442D" },
+      { n: "No realizada", v: a.noRealizadas, c: "#7A1F1F" },
     ])}
-    <span class="cump-d">${a.total} tareas · ${a.completadas} completadas · ${a.enEjecucion} en ejecución${a.sinProgramar ? ` · ${a.sinProgramar} sin programar` : ""}</span>
+    <span class="cump-d">${resumenAvance(a)}</span>
   </div>`;
 }
 
