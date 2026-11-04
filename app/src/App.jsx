@@ -1787,45 +1787,71 @@ function Estrellas({ valor = 0, onChange, size = 20, readOnly }) {
   );
 }
 
-/* Bloque de calificación dentro de la tarjeta de una solicitud completada. */
+/* Bloque de calificación dentro de la tarjeta de una solicitud completada.
+   Un solo paso: el solicitante elige las estrellas, escribe su comentario
+   (opcional) y toca "Enviar calificación". Nada se guarda hasta enviar. Una
+   vez enviada se muestra el resumen, con la opción de editarla. */
 function BloqueCalificacion({ solicitud, onCalificar }) {
-  const [comentario, setComentario] = useState(solicitud.comentarioCalif || "");
-  const [abierto, setAbierto] = useState(false);
   const calificada = solicitud.calificacion > 0;
+  const [editando, setEditando] = useState(!calificada);
+  const [estrellas, setEstrellas] = useState(solicitud.calificacion || 0);
+  const [comentario, setComentario] = useState(solicitud.comentarioCalif || "");
+  const [enviada, setEnviada] = useState(false);
+
+  const abrirEdicion = () => {
+    setEstrellas(solicitud.calificacion || 0);
+    setComentario(solicitud.comentarioCalif || "");
+    setEditando(true);
+  };
+  const enviar = () => {
+    if (!estrellas) return;
+    onCalificar({ calificacion: estrellas, comentarioCalif: comentario.trim() });
+    setEditando(false);
+    setEnviada(true);
+    setTimeout(() => setEnviada(false), 4000);
+  };
+
+  if (!editando && calificada) {
+    return (
+      <div className="mt-2 rounded-md p-2.5 text-left" style={{ background: `${COLORS.verde}0D` }}>
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[11px] font-semibold" style={cChar}>Tu calificación</p>
+          <button onClick={abrirEdicion} className="text-[10px] font-semibold" style={cOrange}>Editar</button>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap mt-1">
+          <Estrellas valor={solicitud.calificacion} readOnly />
+          <span className="text-[11px] font-semibold" style={{ color: COLORS.ambar }}>{CALIF_TEXTO[solicitud.calificacion]}</span>
+        </div>
+        {solicitud.comentarioCalif && <p className="text-xs mt-1.5" style={cChar}>“{solicitud.comentarioCalif}”</p>}
+        {enviada && <p className="text-[11px] mt-1.5 font-semibold" style={{ color: COLORS.verde }}>¡Gracias! Tu calificación fue enviada.</p>}
+      </div>
+    );
+  }
 
   return (
-    <div className="mt-2 rounded-md p-2.5" style={{ background: calificada ? `${COLORS.verde}0D` : `${COLORS.ambar}12` }}>
-      <p className="text-[11px] font-semibold mb-1.5" style={cChar}>
-        {calificada ? "Tu calificación" : "¿Cómo fue la atención?"}
-      </p>
+    <div className="mt-2 rounded-md p-2.5 text-left" style={{ background: `${COLORS.ambar}12` }}>
+      <p className="text-[11px] font-semibold mb-1.5" style={cChar}>¿Cómo fue la atención?</p>
       <div className="flex items-center gap-2 flex-wrap">
-        <Estrellas valor={solicitud.calificacion} onChange={(n) => { onCalificar({ calificacion: n }); if (n > 0) setAbierto(true); }} />
-        {solicitud.calificacion > 0 && (
-          <span className="text-[11px] font-semibold" style={{ color: COLORS.ambar }}>{CALIF_TEXTO[solicitud.calificacion]}</span>
+        <Estrellas valor={estrellas} onChange={setEstrellas} />
+        {estrellas > 0
+          ? <span className="text-[11px] font-semibold" style={{ color: COLORS.ambar }}>{CALIF_TEXTO[estrellas]}</span>
+          : <span className="text-[10px]" style={cSlate}>Toca una estrella para calificar.</span>}
+      </div>
+      <textarea value={comentario} onChange={(e) => setComentario(e.target.value)} rows={2}
+        placeholder="Cuéntanos cómo quedó el trabajo (opcional)"
+        className="w-full border rounded-md px-2 py-1.5 text-xs outline-none resize-none mt-2 bg-white" style={inputStyle} />
+      <div className="flex items-center gap-2 mt-1.5">
+        <button onClick={enviar} disabled={!estrellas}
+          className="flex-1 py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40" style={{ background: COLORS.orange }}>
+          Enviar calificación
+        </button>
+        {calificada && (
+          <button onClick={() => setEditando(false)} className="px-3 py-2 rounded-md text-xs font-semibold border"
+            style={{ borderColor: COLORS.line, color: COLORS.slate }}>
+            Cancelar
+          </button>
         )}
       </div>
-
-      {calificada && !abierto && !solicitud.comentarioCalif && (
-        <button onClick={() => setAbierto(true)} className="text-[10px] font-semibold mt-1.5" style={cOrange}>
-          + Agregar un comentario
-        </button>
-      )}
-
-      {calificada && (abierto || solicitud.comentarioCalif) && (
-        <div className="mt-2">
-          <textarea value={comentario} onChange={(e) => setComentario(e.target.value)} rows={2}
-            placeholder="Comentario opcional sobre el trabajo realizado"
-            className="w-full border rounded-md px-2 py-1.5 text-xs outline-none resize-none" style={inputStyle} />
-          {comentario !== (solicitud.comentarioCalif || "") && (
-            <button onClick={() => { onCalificar({ comentarioCalif: comentario.trim() }); setAbierto(false); }}
-              className="mt-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-md text-white" style={{ background: COLORS.charcoal }}>
-              Guardar comentario
-            </button>
-          )}
-        </div>
-      )}
-
-      {!calificada && <p className="text-[10px] mt-1" style={cSlate}>Toca una estrella para calificar.</p>}
     </div>
   );
 }
@@ -3997,6 +4023,10 @@ function TarjetaSolicitudMia({ s, data, onCalificar, onActualizar }) {
           </div>
         </div>
         <p className="text-[10px] mt-1" style={cSlate}>{s.fecha} · {s.hora}</p>
+        {/* La calificación va a la vista, sin tener que abrir el detalle */}
+        {s.estado === "completada" && !s.esServicio && (
+          <BloqueCalificacion solicitud={s} onCalificar={onCalificar} />
+        )}
         {s.esServicio && (
           <p className="text-[11px] mt-1.5 rounded-md px-2 py-1.5" style={{ background: "#7B5EA712", color: COLORS.charcoal }}>
             Tu solicitud requiere un trabajo mayor y se atiende como <b>servicio externo</b>: {ESTADOS[s.estado]?.label || s.estado}
@@ -4050,9 +4080,6 @@ function TarjetaSolicitudMia({ s, data, onCalificar, onActualizar }) {
             </p>
           )}
 
-          {s.estado === "completada" && (
-            <BloqueCalificacion solicitud={s} onCalificar={onCalificar} />
-          )}
         </div>
       )}
     </div>
@@ -4497,8 +4524,15 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
   const filtroActivo = FILTROS_SOLICITUD.find((f) => f.id === fEstado) || FILTROS_SOLICITUD[0];
   const visibles = misSolicitudes.filter((s) => cumpleFiltro(s, filtroActivo));
 
-  const calificar = (id, patch) =>
+  const calificar = (id, patch) => {
     persist((data) => ({ ...data, solicitudes: data.solicitudes.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
+    // Al enviar, la tarjeta sale de "Por calificar": se confirma arriba de la lista
+    if (patch.calificacion) {
+      const sol = data.solicitudes.find((x) => x.id === id);
+      setMsg(`¡Gracias! Tu calificación de ${sol?.codigo || "la solicitud"} fue enviada.`);
+      setTimeout(() => setMsg(""), 4000);
+    }
+  };
 
   const crearSolicitud = async (ubic, form) => {
     const now = new Date();
