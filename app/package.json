@@ -30,5 +30,11 @@
     "globals": "^17.7.0",
     "tailwindcss": "^4.3.3",
     "vite": "^8.2.4"
+  },
+  "overrides": {
+    "dompurify": "^3.4.17",
+    "zod": "^4.6.6",
+    "brace-expansion": "^5.0.12",
+    "minimatch": "^11.0.1"
   }
 }
