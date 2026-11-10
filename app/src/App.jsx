@@ -3274,7 +3274,7 @@ const ETIQUETAS_REGISTRO = {
   resolucion: { label: "Resolución", color: COLORS.verde },
   correccion: { label: "Corrección", color: COLORS.rojo },
 };
-const ETIQUETAS_TECNICO = ["avance", "material", "larga", "servicio", "espera"];
+const ETIQUETAS_TECNICO = ["avance", "material", "servicio", "espera"];
 const etiquetaDe = (label) => Object.values(ETIQUETAS_REGISTRO).find((e) => e.label === label);
 function lineaRegistro(autor, texto, etiqueta) {
   const ahora = new Date();
@@ -3298,22 +3298,22 @@ function leerRegistro(obs) {
   return entradas;
 }
 
-/* Registro de la orden en pantalla: de lo más reciente a lo más antiguo. */
-function RegistroOrden({ texto, vacio = "Sin anotaciones todavía." }) {
+/* Registro de la orden en pantalla: una sola lista compacta, de lo más
+   reciente a lo más antiguo, una línea por anotación. */
+function RegistroOrden({ texto, vacio = "Sin anotaciones todavía.", alto = 200 }) {
   const entradas = leerRegistro(texto).reverse();
-  if (!entradas.length) return <p className="text-[11px]" style={cSlate}>{vacio}</p>;
+  if (!entradas.length) return <p className="text-[11px] text-left" style={cSlate}>{vacio}</p>;
   return (
-    <div className="space-y-1.5 text-left">
+    <div className="border rounded-md bg-white text-left overflow-y-auto" style={{ borderColor: COLORS.line, maxHeight: alto }}>
       {entradas.map((e, i) => {
         const et = etiquetaDe(e.etiqueta);
         return (
-          <div key={i} className="rounded-md px-2.5 py-1.5 border" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${et?.color || COLORS.line}`, background: "white" }}>
-            <p className="text-[10px]" style={cSlate}>
-              {e.anterior ? "Observación anterior" : `${e.fecha} · ${e.autor}`}
-              {e.etiqueta && <span className="ml-1.5 font-semibold" style={{ color: et?.color || COLORS.slate }}>{e.etiqueta}</span>}
-            </p>
-            <p className="text-xs whitespace-pre-wrap break-words" style={cChar}>{e.texto}</p>
-          </div>
+          <p key={i} className="px-2 py-1 text-[11px] leading-snug break-words whitespace-pre-wrap"
+            style={{ ...cChar, borderTop: i ? `1px solid ${COLORS.line}` : "none" }}>
+            <span style={cSlate}>{e.anterior ? "Anterior" : `${e.fecha.slice(0, 5)} ${e.fecha.slice(11)} · ${e.autor.split(" ")[0]}`} · </span>
+            {e.etiqueta && <b style={{ color: et?.color || COLORS.slate }}>[{e.etiqueta}] </b>}
+            {e.texto}
+          </p>
         );
       })}
     </div>
@@ -3333,7 +3333,7 @@ function registroHTML(texto, esc) {
 /* Comentario nuevo para el registro: etiqueta + texto. Con "Requiere
    material" se agregan uno o varios materiales: del kardex (aunque no haya
    existencias) o escritos a mano si no están, cada uno con cantidad y unidad. */
-function NuevoComentario({ valor, onChange, etiquetas = ETIQUETAS_TECNICO, stock = [], requerido, placeholder }) {
+function NuevoComentario({ valor, onChange, etiquetas = ETIQUETAS_TECNICO, stock = [], requerido, placeholder, onGuardar }) {
   const { texto = "", etiqueta = "", materiales = [] } = valor;
   const set = (p) => onChange({ ...valor, ...p });
   const setMat = (i, p) => set({ materiales: materiales.map((m, j) => (j === i ? { ...m, ...p } : m)) });
@@ -3383,6 +3383,12 @@ function NuevoComentario({ valor, onChange, etiquetas = ETIQUETAS_TECNICO, stock
       <textarea value={texto} onChange={(e) => set({ texto: e.target.value })} rows={2}
         placeholder={placeholder || (etiqueta === "material" ? "Detalle adicional (opcional)…" : "Qué se hizo, qué falta o qué se encontró…")}
         className={`${inputCls} resize-none`} style={{ ...inputStyle, ...(requerido ? { borderColor: COLORS.orange } : {}) }} />
+      {onGuardar && (
+        <button type="button" onClick={onGuardar} disabled={!textoComentario(valor)}
+          className="w-full py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40" style={{ background: COLORS.charcoal }}>
+          Guardar comentario
+        </button>
+      )}
     </div>
   );
 }
@@ -5087,8 +5093,15 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   const [confirmarCierre, setConfirmarCierre] = useState(false);
 
   const textoNuevo = textoComentario(comentario);
-  // En proceso o en espera se pide contar qué se hizo o qué falta
-  const pideComentario = !corrige && ["en_proceso", "espera"].includes(estado);
+  // Comentario guardado con su propio botón mientras la tarjeta está abierta
+  const [comentoAhora, setComentoAhora] = useState(false);
+  // En proceso o en espera se pide contar qué se hizo o qué falta (basta uno por visita)
+  const pideComentario = !corrige && ["en_proceso", "espera"].includes(estado) && !comentoAhora;
+  const guardarComentario = async () => {
+    if (!textoNuevo) return;
+    await acciones.updateActividad(item, {}, { comentario: { texto: textoNuevo, etiqueta: comentario.etiqueta || (corrige ? "correccion" : "") } });
+    setComentario({}); setFaltaComentario(false); setComentoAhora(true);
+  };
   /* El comentario se ofrece mientras la orden está abierta. Al cerrar un
      correctivo o servicio se escribe la resolución en su propio campo; en un
      preventivo, que no tiene ese campo, el comentario queda como cierre. El
@@ -5521,16 +5534,14 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
           </Field>
 
           <Field label="Registro de la orden">
-            <div className="max-h-56 overflow-y-auto pr-0.5">
-              <RegistroOrden texto={item.observaciones} />
-            </div>
+            <RegistroOrden texto={item.observaciones} />
           </Field>
           {mostrarComentario ? (
             <Field label={estado === "completada" ? "Comentario de cierre" : pideComentario ? "Comentario (obligatorio)" : "Agregar comentario"}
               hint={pideComentario ? "Cuenta qué se hizo hoy o qué falta para terminar. Queda en el registro con la fecha y no se puede editar." : "Queda en el registro con la fecha y no se puede editar."}>
               <NuevoComentario valor={comentario} onChange={(v) => { setComentario(v); setFaltaComentario(false); }}
                 etiquetas={corrige ? [...ETIQUETAS_TECNICO, "correccion"] : ETIQUETAS_TECNICO}
-                stock={stockSede} requerido={faltaComentario} />
+                stock={stockSede} requerido={faltaComentario} onGuardar={guardarComentario} />
               {faltaComentario && (
                 <p className="text-[11px] mt-1 font-semibold" style={{ color: COLORS.rojo }}>
                   Escribe un comentario antes de guardar la orden {ESTADOS[estado]?.label.toLowerCase()}.
