@@ -9469,6 +9469,83 @@ function necesidadesDe(data, sedeIds) {
 }
 const textoNecesidad = (n) => `${n.nombre} × ${n.cantidad} ${n.unidad || "u"}`;
 
+/* Datos al marcar un pedido. Comprado: cantidad y valor de la compra.
+   Entregado: a qué artículo de la bodega de la sede ingresa (uno parecido
+   que ya exista o uno nuevo con el nombre corregido), cantidad y valor. */
+function FormNecesidad({ r, modo, stockSede, sede, onConfirm, onCancel }) {
+  const n = r.n;
+  const sugerido = (n.stockId && stockSede.find((a) => a.id === n.stockId))
+    || stockSede.find((a) => claveArticulo(a.nombre) === claveArticulo(n.nombre));
+  const [cantidad, setCantidad] = useState(String(n.cantidadComprada ?? n.cantidad ?? 1));
+  const [valor, setValor] = useState(n.valorCompra ? String(n.valorCompra) : "");
+  const [sel, setSel] = useState(sugerido?.id || "");
+  const [nombre, setNombre] = useState(n.nombre || "");
+  const [unidad, setUnidad] = useState(n.unidad || "u");
+  const art = stockSede.find((a) => a.id === sel);
+  const q = cantNum(cantidad);
+  const v = cantNum(valor);
+  const entrega = modo === "entregado";
+  const valido = q > 0 && (!entrega || art || nombre.trim());
+  const confirmar = () => {
+    const extra = { cantidadComprada: q, ...(v > 0 ? { valorCompra: v } : {}) };
+    if (!entrega) return onConfirm(extra, null);
+    onConfirm(extra, art
+      ? { stockId: art.id, nombre: art.nombre, unidad: art.unidad, cantidad: q, valor: v }
+      : { nombre: nombre.trim(), unidad: unidad.trim() || "u", cantidad: q, valor: v });
+  };
+  const lbl = "text-[10px] font-semibold uppercase tracking-wide block mb-0.5";
+  return (
+    <div className="mt-2 rounded-md p-2.5 space-y-2" style={{ background: COLORS.cream }}>
+      <p className="text-xs font-semibold" style={cChar}>{entrega ? "Entregar e ingresar a bodega" : "Registrar compra"}</p>
+      {entrega && (
+        <div>
+          <span className={lbl} style={cSlate}>Artículo de bodega ({sede})</span>
+          <SelectorArticulo articulos={stockSede} value={sel}
+            textoBoton="Elegir un artículo parecido o escribir el nombre…"
+            onChange={(id) => setSel(id)}
+            onNuevo={(nm) => { setSel(""); setNombre(nm); }} />
+          {art ? (
+            <p className="text-[10px] mt-1" style={cSlate}>
+              Se suma a “{art.nombre}” (hay {art.cantidad} {art.unidad}).{" "}
+              <button type="button" onClick={() => setSel("")} className="font-semibold" style={cOrange}>Crear como artículo nuevo</button>
+            </p>
+          ) : (
+            <div className="flex gap-1.5 mt-1.5">
+              <input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Nombre en bodega"
+                className="flex-1 min-w-0 border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+              <input value={unidad} onChange={(e) => setUnidad(e.target.value)} placeholder="u"
+                className="w-16 border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+            </div>
+          )}
+          {!art && <p className="text-[10px] mt-1" style={cSlate}>Se creará como artículo nuevo en la bodega de la sede.</p>}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        <label>
+          <span className={lbl} style={cSlate}>Cantidad ({art?.unidad || unidad || "u"})</span>
+          <input type="text" inputMode="decimal" value={cantidad} onChange={(e) => setCantidad(e.target.value.replace(/[^0-9.,]/g, ""))}
+            className="w-full border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+        </label>
+        <label>
+          <span className={lbl} style={cSlate}>Valor total de compra (USD)</span>
+          <input type="text" inputMode="decimal" value={valor} onChange={(e) => setValor(e.target.value.replace(/[^0-9.,]/g, ""))}
+            placeholder="0.00" className="w-full border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+        </label>
+      </div>
+      {v > 0 && q > 0 && <p className="text-[10px]" style={cSlate}>{money(v / q)} por {art?.unidad || unidad || "u"}</p>}
+      <div className="flex gap-1.5">
+        <button type="button" onClick={onCancel} className="flex-1 py-1.5 rounded-md text-[11px] font-semibold border bg-white"
+          style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>Cancelar</button>
+        <button type="button" onClick={confirmar} disabled={!valido}
+          className="flex-1 py-1.5 rounded-md text-[11px] font-semibold text-white disabled:opacity-40"
+          style={{ background: entrega ? COLORS.verde : "#3B6EA5" }}>
+          {entrega ? "Entregar e ingresar a bodega" : "Marcar comprado"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* Bodega → Pendientes de compra: lo que los técnicos pidieron al registrar
    "Requiere material". El supervisor lo marca Comprado → Entregado (o lo
    cancela); cada cambio queda en el registro de la orden y le llega al
@@ -9494,19 +9571,44 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
     .filter((r) => coincideArticulo(`${r.n.nombre} ${r.orden.codigo || ""}`, q))
     .sort((a, b) => `${b.n.fecha} ${b.n.hora || ""}`.localeCompare(`${a.n.fecha} ${a.n.hora || ""}`));
 
-  const cambiar = (r, estado) => {
+  const [form, setForm] = useState(null);   // { id, modo: "comprado" | "entregado" }
+
+  /* Cambia el estado del pedido y lo anota en la orden. La orden no cambia
+     de estado: solo queda informada. Al entregar, el material entra a la
+     bodega de la sede (a un artículo existente o como uno nuevo) y el pedido
+     queda enlazado a él, para que el técnico lo cargue al finalizar. */
+  const cambiar = (r, estado, extra = {}, ingreso = null) => {
     const ahora = new Date();
-    const linea = lineaRegistro(user?.nombre, `${ESTADOS_NECESIDAD[estado].label}: ${textoNecesidad(r.n)}`, "compra");
+    const stockId = ingreso ? (ingreso.stockId || uid("stk")) : null;
+    const detalle = estado === "comprado" && extra.valorCompra ? ` · ${money(extra.valorCompra)}`
+      : ingreso ? ` · ingresó a bodega como “${ingreso.nombre}”` : "";
+    const linea = lineaRegistro(user?.nombre, `${ESTADOS_NECESIDAD[estado].label}: ${textoNecesidad({ ...r.n, ...extra })}${detalle}`, "compra");
     persist((d) => ({
       ...d,
       [r.col]: (d[r.col] || []).map((o) => (o.id !== r.orden.id ? o : {
         ...o,
         necesidades: (o.necesidades || []).map((n) => (n.id !== r.n.id ? n : {
-          ...n, estado, fechaEstado: fmtDate(ahora), horaEstado: fmtHora(ahora), actualizadoPor: user?.id || "",
+          ...n, ...extra, estado, fechaEstado: fmtDate(ahora), horaEstado: fmtHora(ahora), actualizadoPor: user?.id || "",
+          ...(ingreso ? { stockId, nombreBodega: ingreso.nombre } : {}),
         })),
         observaciones: conRegistro(o.observaciones, [linea]),
       })),
+      ...(ingreso ? { stock: ingreso.stockId
+        ? (d.stock || []).map((a) => {
+          if (a.id !== stockId) return a;
+          const cant = (Number(a.cantidad) || 0) + ingreso.cantidad;
+          // Costo promedio ponderado con lo que ya había
+          const costo = ingreso.valor > 0
+            ? ((Number(a.cantidad) || 0) * (Number(a.costoUnitario) || 0) + ingreso.valor) / cant
+            : Number(a.costoUnitario) || 0;
+          return { ...a, cantidad: cant, costoUnitario: Math.round(costo * 100) / 100 };
+        })
+        : [...(d.stock || []), {
+          id: stockId, sedeId: r.orden.sedeId, nombre: ingreso.nombre, unidad: ingreso.unidad || "u",
+          cantidad: ingreso.cantidad, costoUnitario: ingreso.valor > 0 ? Math.round((ingreso.valor / ingreso.cantidad) * 100) / 100 : 0, minimo: 0,
+        }] } : {}),
     }));
+    setForm(null);
   };
 
   const filtros = [["abiertos", "Por atender"], ["pendiente", "Pendientes"], ["comprado", "Comprados"], ["entregado", "Entregados"], ["cancelado", "Cancelados"], ["todos", "Todos"]];
@@ -9577,12 +9679,23 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
                   </div>
                   <Chip color={e.color}>{e.label}</Chip>
                 </div>
-                {editable && ["pendiente", "comprado"].includes(r.n.estado) && (
+                {editable && (r.n.valorCompra > 0 || r.n.nombreBodega) && (
+                  <p className="text-[10px] mt-0.5" style={cSlate}>
+                    {r.n.valorCompra > 0 ? `Compra: ${money(r.n.valorCompra)}` : ""}
+                    {r.n.valorCompra > 0 && r.n.nombreBodega ? " · " : ""}
+                    {r.n.nombreBodega ? `En bodega como “${r.n.nombreBodega}”` : ""}
+                  </p>
+                )}
+                {editable && form?.id === r.n.id ? (
+                  <FormNecesidad r={r} modo={form.modo} sede={sedeNombre(data.sedes, r.orden.sedeId)} stockSede={(data.stock || []).filter((a) => a.sedeId === r.orden.sedeId)}
+                    onCancel={() => setForm(null)}
+                    onConfirm={(extra, ingreso) => cambiar(r, form.modo, extra, ingreso)} />
+                ) : editable && ["pendiente", "comprado"].includes(r.n.estado) && (
                   <div className="flex gap-1.5 mt-2 flex-wrap">
                     {r.n.estado === "pendiente" && (
-                      <button onClick={() => cambiar(r, "comprado")} className={btn} style={{ borderColor: "#3B6EA5", color: "#3B6EA5" }}>Comprado</button>
+                      <button onClick={() => setForm({ id: r.n.id, modo: "comprado" })} className={btn} style={{ borderColor: "#3B6EA5", color: "#3B6EA5" }}>Comprado</button>
                     )}
-                    <button onClick={() => cambiar(r, "entregado")} className={btn} style={{ borderColor: COLORS.verde, color: COLORS.verde }}>Entregado</button>
+                    <button onClick={() => setForm({ id: r.n.id, modo: "entregado" })} className={btn} style={{ borderColor: COLORS.verde, color: COLORS.verde }}>Entregado</button>
                     <button onClick={() => cambiar(r, "cancelado")} className={btn} style={{ borderColor: COLORS.line, color: COLORS.slate }}>Cancelar</button>
                   </div>
                 )}
