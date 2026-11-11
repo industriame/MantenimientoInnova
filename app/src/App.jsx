@@ -15,7 +15,7 @@ import {
   QrCode, Wrench, ClipboardList, BarChart3, Plus, X, ChevronRight, ChevronDown,
   ChevronLeft, ChevronUp, AlertTriangle, CheckCircle2, Clock, DollarSign, Building2, Layers,
   Users, ShieldCheck, ArrowLeft, Download, Send, Trash2, Pencil, CalendarDays,
-  Filter, KeyRound, Eye, EyeOff, Camera, LogOut, TrendingUp, Wallet, Star, Info, RefreshCw, FileText, Search, Bell, Undo2
+  Filter, KeyRound, Eye, EyeOff, Camera, LogOut, TrendingUp, Wallet, Star, Info, RefreshCw, FileText, Search, Bell, Undo2, ShoppingCart
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, ReferenceLine, XAxis, YAxis, CartesianGrid,
@@ -1556,7 +1556,7 @@ function solicitudAServicio(sol, { detalle = "", log = null, pasadaPor = "", pas
    programar. El detalle escrito al pasarla se conserva en observaciones. */
 const CAMPOS_SOLO_SERVICIO = ["trabajo", "detalle", "tipoProveedor", "proveedor", "presupuesto", "presupuestoAprobado",
   "motivoRechazo", "desdeSolicitud", "pasadaPor", "pasadaEn", "fechaReporte", "horaReporte", "createdAt", "previo", "decididoEn", "enEspera"];
-function servicioASolicitud(srv, log) {
+function servicioASolicitud(srv, log, linea = "") {
   const resto = { ...srv };
   CAMPOS_SOLO_SERVICIO.forEach((k) => delete resto[k]);
   const prev = srv.previo || {};
@@ -1570,7 +1570,7 @@ function servicioASolicitud(srv, log) {
     fechaCompletada: "", horaCompletada: "",
     foto: fotosDe({ ...srv, tipo: "servicio" })[0] || "",
     fotoSolicitante: fotoSolicitudDe(srv),
-    observaciones: [srv.observaciones, srv.detalle ? `Detalle al pasar a servicio: ${srv.detalle}` : ""].filter(Boolean).join("\n"),
+    observaciones: conRegistro(srv.observaciones, [linea]),
     log: [...(srv.log || []), log],
   };
 }
@@ -1662,7 +1662,9 @@ function useAcciones(data, persist, usuario) {
         return {
           ...d,
           servicios: d.servicios.filter((s) => s.id !== srv.id),
-          solicitudes: [servicioASolicitud(x, log), ...d.solicitudes.filter((s) => s.id !== srv.id)],
+          solicitudes: [servicioASolicitud(x, log, lineaRegistro(usuario?.nombre,
+            `Devuelta a solicitud (se pasó a servicio por error)${x.detalle ? `. Detalle que tenía: ${x.detalle}` : ""}`)),
+            ...d.solicitudes.filter((s) => s.id !== srv.id)],
         };
       });
     },
@@ -1681,7 +1683,10 @@ function useAcciones(data, persist, usuario) {
         return {
           ...d,
           solicitudes: d.solicitudes.filter((x) => x.id !== item.id),
-          servicios: [solicitudAServicio(sol, { detalle, log, pasadaPor: usuario?.id || "", pasadaEn: sello }), ...(d.servicios || [])],
+          servicios: [{
+            ...solicitudAServicio(sol, { detalle, log, pasadaPor: usuario?.id || "", pasadaEn: sello }),
+            observaciones: conRegistro(sol.observaciones, [lineaRegistro(usuario?.nombre, `Pasa a servicio: ${detalle}`, "servicio")]),
+          }, ...(d.servicios || [])],
         };
       });
     },
@@ -1700,17 +1705,53 @@ function useAcciones(data, persist, usuario) {
           }))]
         : null;
       const conLog = nuevoLog ? { ...patch, log: nuevoLog } : patch;
+      /* Registro de la orden: los mismos movimientos y el comentario, si lo
+         hay, se anexan al final de observaciones. Se arma sobre el registro
+         más reciente de la orden, no sobre la copia que tenía la pantalla. */
+      const autor = usuario?.nombre || "Sistema";
+      const coment = opciones.comentario;
+      const lineas = [
+        ...movimientos.map((m) => lineaRegistro(autor, `${m.campo}: ${m.antes} → ${m.despues}`)),
+        ...((coment?.texto || "").trim() ? [lineaRegistro(autor, coment.texto, coment.etiqueta)] : []),
+        ...(opciones.consumos?.length ? [lineaRegistro(autor, opciones.consumos.map((c) => `${c.art.nombre} × ${c.cantidad} ${c.art.unidad || "u"}`).join("; "), "consumo")] : []),
+      ];
+      /* Pedidos de material: se suman (o actualizan) sobre la lista más
+         reciente de la orden, igual que el registro. */
+      const conNecesidades = (x) => {
+        let nec = x.necesidades || [];
+        if (opciones.necesidades?.length) nec = [...nec, ...opciones.necesidades];
+        if (opciones.mapNecesidades) nec = nec.map(opciones.mapNecesidades);
+        return opciones.necesidades?.length || opciones.mapNecesidades ? { necesidades: nec } : {};
+      };
+      /* Consumo de bodega en el mismo guardado (al finalizar): descuenta
+         existencias y anota el consumo en la orden de una sola vez. */
+      const consumos = (opciones.consumos || []).map((c) => ({
+        id: uid("con"), stockId: c.art.id, nombre: c.art.nombre, unidad: c.art.unidad,
+        cantidad: c.cantidad, costoUnitario: c.art.costoUnitario, fecha: fmtDate(new Date()),
+      }));
+      const aplicar = (x, p) => ({
+        ...x, ...p, ...conNecesidades(x),
+        ...(consumos.length ? { consumos: [...(x.consumos || []), ...consumos] } : {}),
+        ...(lineas.length ? { observaciones: conRegistro(x.observaciones, lineas) } : {}),
+      });
+      const persistir = (fn) => persist((d) => {
+        const r = fn(d);
+        if (!consumos.length) return r;
+        const resta = {};
+        consumos.forEach((c) => { resta[c.stockId] = (resta[c.stockId] || 0) + c.cantidad; });
+        return { ...r, stock: (r.stock || []).map((a) => (resta[a.id] ? { ...a, cantidad: Math.max(0, a.cantidad - resta[a.id]) } : a)) };
+      });
 
       if (item.tipo === "preventivo") {
-        return persist((data) => ({ ...data, ordenes: data.ordenes.map((o) => (o.id === item.id ? { ...o, ...conLog } : o)) }));
+        return persistir((data) => ({ ...data, ordenes: data.ordenes.map((o) => (o.id === item.id ? aplicar(o, conLog) : o)) }));
       }
       if (item.tipo === "servicio") {
         // El servicio guarda su fecha en "fecha"; la agenda la expone como fechaProgramada
         const p = { ...conLog };
         if (p.fechaProgramada !== undefined) { p.fecha = p.fechaProgramada; delete p.fechaProgramada; }
-        return persist((data) => ({ ...data, servicios: data.servicios.map((x) => (x.id === item.id ? { ...x, ...p } : x)) }));
+        return persistir((data) => ({ ...data, servicios: data.servicios.map((x) => (x.id === item.id ? aplicar(x, p) : x)) }));
       }
-      return persist((data) => ({ ...data, solicitudes: data.solicitudes.map((s) => (s.id === item.id ? { ...s, ...conLog } : s)) }));
+      return persistir((data) => ({ ...data, solicitudes: data.solicitudes.map((s) => (s.id === item.id ? aplicar(s, conLog) : s)) }));
     },
   }), [data, persist, usuario]);
 }
@@ -2691,7 +2732,7 @@ function DetalleActividad({ item, data, onClose }) {
         <ChecklistEjecucion items={item.checklist || item.procedimientoPasos} readOnly compacto />
       )}
 
-      {item.observaciones && <Field label="Observaciones del técnico"><ReadOnly>{item.observaciones}</ReadOnly></Field>}
+      {item.observaciones && <Field label="Registro de la orden"><RegistroOrden texto={item.observaciones} /></Field>}
       {item.resolucion && <Field label="Resolución"><ReadOnly>{item.resolucion}</ReadOnly></Field>}
 
       {/* Consumo de bodega */}
@@ -2830,7 +2871,12 @@ function FichaServicio({ srv, data, costos = true }) {
 
       {bloque("Detalle de novedad", novedad, COLORS.cream)}
       {bloque("Detalle del trabajo", srv.detalle)}
-      {bloque("Observaciones", srv.observaciones)}
+      {srv.observaciones && (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Registro de la orden</p>
+          <RegistroOrden texto={srv.observaciones} />
+        </div>
+      )}
       {bloque("Novedades del servicio", srv.resolucion)}
       {srv.motivoRechazo && bloque("Motivo del rechazo", srv.motivoRechazo, `${COLORS.rojo}12`)}
 
@@ -3225,6 +3271,7 @@ function diffCambios(antes, patch, usuarios) {
     if (campo === "materialesEstado") return MAT_ESTADO[v]?.label || v;
     if (campo === "tecnicoId") return usuarioNombre(usuarios, v);
     if (campo === "presupuestoAprobado") return money(v);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(v))) return fmtDMY(String(v));
     return String(v);
   };
   return Object.keys(patch || {})
@@ -3234,6 +3281,219 @@ function diffCambios(antes, patch, usuarios) {
       antes: legible(k, antes?.[k]),
       despues: legible(k, patch[k]),
     }));
+}
+
+/* ---- Registro de la orden (campo observaciones) ----
+   observaciones guarda un registro que solo crece, una línea por anotación:
+     "dd/mm/aaaa hh:mm · Autor · [Etiqueta] texto"
+   Las líneas automáticas (creación, activación, cambios de estado, fechas,
+   responsable, paso a servicio) y los comentarios del técnico van en el mismo
+   texto, así que la base no cambia. Lo escrito antes de este formato se
+   muestra como "Observación anterior". La etiqueta permite luego extraer, por
+   ejemplo, todo lo marcado como [Requiere material] en el mes. */
+const ETIQUETAS_REGISTRO = {
+  avance: { label: "Avance", color: COLORS.slate },
+  material: { label: "Requiere material", color: COLORS.orange },
+  larga: { label: "Tarea larga", color: "#3B6EA5" },
+  servicio: { label: "Requiere servicio", color: "#7B5EA7" },
+  espera: { label: "En espera", color: COLORS.ambar },
+  resolucion: { label: "Resolución", color: COLORS.verde },
+  finalizada: { label: "Finalizada", color: COLORS.verde },
+  compra: { label: "Compra", color: "#3B6EA5" },
+  consumo: { label: "Material usado", color: COLORS.verde },
+  correccion: { label: "Corrección", color: COLORS.rojo },
+};
+const ETIQUETAS_TECNICO = ["avance", "material", "servicio", "espera"];
+const etiquetaDe = (label) => Object.values(ETIQUETAS_REGISTRO).find((e) => e.label === label);
+function lineaRegistro(autor, texto, etiqueta) {
+  const ahora = new Date();
+  const [y, m, d] = fmtDate(ahora).split("-");
+  const tag = etiqueta ? `[${ETIQUETAS_REGISTRO[etiqueta]?.label || etiqueta}] ` : "";
+  return `${d}/${m}/${y} ${fmtHora(ahora)} · ${autor || "Sistema"} · ${tag}${String(texto || "").replace(/\s*\n+\s*/g, " ").trim()}`;
+}
+const conRegistro = (obs, lineas) => [String(obs || "").trim(), ...lineas].filter(Boolean).join("\n");
+const RE_LINEA_REGISTRO = /^(\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}) · (.+?) · (?:\[([^\]]+)\] )?(.*)$/;
+function leerRegistro(obs) {
+  const entradas = [];
+  String(obs || "").split("\n").forEach((l) => {
+    if (!l.trim()) return;
+    const m = l.match(RE_LINEA_REGISTRO);
+    if (m) { entradas.push({ fecha: m[1], autor: m[2], etiqueta: m[3] || "", texto: m[4] }); return; }
+    // Texto libre de antes del registro: se agrupa en una sola entrada
+    const ult = entradas[entradas.length - 1];
+    if (ult?.anterior) ult.texto += `\n${l}`;
+    else entradas.push({ fecha: "", autor: "", etiqueta: "", texto: l, anterior: true });
+  });
+  return entradas;
+}
+
+/* Vuelve a armar el texto del registro a partir de sus entradas. */
+function textoRegistro(entradas) {
+  return entradas.map((e) => (e.anterior ? e.texto
+    : `${e.fecha} · ${e.autor} · ${e.etiqueta ? `[${e.etiqueta}] ` : ""}${String(e.texto || "").replace(/\s*\n+\s*/g, " ").trim()}`)).join("\n");
+}
+
+/* Registro de la orden en pantalla: una sola lista compacta, de lo más
+   reciente a lo más antiguo, una línea por anotación. Con onEditar (el
+   supervisor en modo corrección) cada línea se puede corregir o borrar. */
+function RegistroOrden({ texto, vacio = "Sin anotaciones todavía.", alto = 200, onEditar }) {
+  const [editando, setEditando] = useState(null);   // { i, texto, etiqueta }
+  const [borrando, setBorrando] = useState(null);
+  const todas = leerRegistro(texto);
+  const entradas = todas.map((e, i) => ({ ...e, i })).reverse();
+  if (!entradas.length) return <p className="text-[11px] text-left" style={cSlate}>{vacio}</p>;
+  const guardar = (nuevas) => { onEditar(textoRegistro(nuevas)); setEditando(null); setBorrando(null); };
+  const icono = "p-0.5 shrink-0 opacity-60 hover:opacity-100";
+  return (
+    <div className="border rounded-md bg-white text-left overflow-y-auto" style={{ borderColor: COLORS.line, maxHeight: onEditar ? alto * 1.6 : alto }}>
+      {entradas.map((e, k) => {
+        const et = etiquetaDe(e.etiqueta);
+        const borde = { borderTop: k ? `1px solid ${COLORS.line}` : "none" };
+        if (editando?.i === e.i) {
+          return (
+            <div key={e.i} className="px-2 py-1.5 space-y-1" style={{ ...borde, background: COLORS.cream }}>
+              <p className="text-[10px]" style={cSlate}>{e.anterior ? "Anterior" : `${e.fecha} · ${e.autor}`}</p>
+              {!e.anterior && (
+                <select value={editando.etiqueta} onChange={(ev) => setEditando({ ...editando, etiqueta: ev.target.value })}
+                  className="w-full border rounded-md px-1.5 py-1 text-[11px] bg-white" style={inputStyle}>
+                  <option value="">Sin etiqueta</option>
+                  {Object.values(ETIQUETAS_REGISTRO).map((x) => <option key={x.label} value={x.label}>{x.label}</option>)}
+                </select>
+              )}
+              <textarea autoFocus value={editando.texto} onChange={(ev) => setEditando({ ...editando, texto: ev.target.value })} rows={2}
+                className={`${inputCls} resize-none bg-white text-xs`} style={inputStyle} />
+              <div className="flex gap-1.5">
+                <button type="button" onClick={() => setEditando(null)} className="flex-1 py-1 rounded-md text-[11px] font-semibold border bg-white"
+                  style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>Cancelar</button>
+                <button type="button" disabled={!editando.texto.trim()}
+                  onClick={() => guardar(todas.map((x, j) => (j === e.i ? { ...x, texto: editando.texto.trim(), etiqueta: editando.etiqueta } : x)))}
+                  className="flex-1 py-1 rounded-md text-[11px] font-semibold text-white disabled:opacity-40" style={{ background: COLORS.charcoal }}>
+                  Guardar corrección
+                </button>
+              </div>
+            </div>
+          );
+        }
+        return (
+          <div key={e.i} className="flex items-start gap-1 px-2 py-1" style={borde}>
+            <p className="flex-1 min-w-0 text-[11px] leading-snug break-words whitespace-pre-wrap" style={cChar}>
+              <span style={cSlate}>{e.anterior ? "Anterior" : `${e.fecha.slice(0, 5)} ${e.fecha.slice(11)} · ${e.autor.split(" ")[0]}`} · </span>
+              {e.etiqueta && <b style={{ color: et?.color || COLORS.slate }}>[{e.etiqueta}] </b>}
+              {e.texto}
+            </p>
+            {onEditar && (borrando === e.i ? (
+              <span className="flex items-center gap-1 shrink-0 text-[10px] font-semibold">
+                <button type="button" onClick={() => guardar(todas.filter((_, j) => j !== e.i))} style={{ color: COLORS.rojo }}>Borrar</button>
+                <button type="button" onClick={() => setBorrando(null)} style={cSlate}>No</button>
+              </span>
+            ) : (
+              <>
+                <button type="button" title="Corregir" className={icono}
+                  onClick={() => { setBorrando(null); setEditando({ i: e.i, texto: e.texto, etiqueta: e.etiqueta || "" }); }}>
+                  <Pencil size={11} color={COLORS.slate} />
+                </button>
+                <button type="button" title="Borrar" className={icono} onClick={() => { setEditando(null); setBorrando(e.i); }}>
+                  <Trash2 size={11} color={COLORS.slate} />
+                </button>
+              </>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* Registro en los PDF: en orden cronológico, una línea por anotación. */
+const REG_CSS = `.reg{width:100%;border-collapse:collapse;font-size:7.8pt;margin-top:2px}
+.reg td{padding:2.5px 4px;border-bottom:1px solid #EFEDE8;vertical-align:top}
+.reg .reg-f{width:24%;color:#8D939B;font-size:7pt;white-space:nowrap}`;
+function registroHTML(texto, esc) {
+  const entradas = leerRegistro(texto);
+  if (!entradas.length) return "";
+  return `<table class="reg">${entradas.map((e) => `<tr><td class="reg-f">${e.anterior ? "Anterior" : `${esc(e.fecha)}<br>${esc(e.autor)}`}</td><td>${e.etiqueta ? `<b>[${esc(e.etiqueta)}]</b> ` : ""}${esc(e.texto).replace(/\n/g, "<br>")}</td></tr>`).join("")}</table>`;
+}
+
+/* Lista de materiales que hacen falta: del kardex (aunque no haya
+   existencias) o escritos a mano si no están, cada uno con cantidad y unidad. */
+function ListaMateriales({ materiales = [], onChange, stock = [], textoBoton }) {
+  const setMat = (i, p) => onChange(materiales.map((m, j) => (j === i ? { ...m, ...p } : m)));
+  const agregar = (m) => onChange([...materiales, { cantidad: "1", ...m }]);
+  return (
+        <div className="rounded-md p-2 space-y-1.5" style={{ background: COLORS.cream }}>
+          {materiales.map((m, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <div className="flex-1 min-w-0 text-left">
+                <p className="text-xs font-semibold break-words" style={cChar}>{m.nombre}</p>
+                <p className="text-[10px]" style={{ color: m.stockId ? COLORS.slate : COLORS.orange }}>
+                  {m.stockId ? "Del kardex" : "No está en el kardex"}
+                </p>
+              </div>
+              <input type="text" inputMode="decimal" value={m.cantidad} placeholder="Cant."
+                onChange={(e) => setMat(i, { cantidad: e.target.value.replace(/[^0-9.,]/g, "") })}
+                className="w-14 border rounded-md px-1.5 py-1.5 text-xs outline-none bg-white" style={inputStyle} />
+              <input type="text" value={m.unidad} placeholder="u" disabled={!!m.stockId}
+                onChange={(e) => setMat(i, { unidad: e.target.value })}
+                className="w-14 border rounded-md px-1.5 py-1.5 text-xs outline-none bg-white disabled:opacity-60" style={inputStyle} />
+              <button type="button" onClick={() => onChange(materiales.filter((_, j) => j !== i))} className="p-1" title="Quitar">
+                <X size={13} color={COLORS.slate} />
+              </button>
+            </div>
+          ))}
+          <SelectorArticulo articulos={stock} value=""
+            textoBoton={materiales.length ? "Agregar otro material…" : textoBoton || "Buscar en el kardex o escribir el material…"}
+            onChange={(id) => { const a = stock.find((x) => x.id === id); if (a) agregar({ stockId: a.id, nombre: a.nombre, unidad: a.unidad || "u" }); }}
+            onNuevo={(nombre) => agregar({ nombre, unidad: "u" })} />
+        </div>
+  );
+}
+
+/* Comentario nuevo para el registro: etiqueta + texto. Con "Requiere
+   material" se agregan uno o varios materiales: del kardex (aunque no haya
+   existencias) o escritos a mano si no están, cada uno con cantidad y unidad. */
+function NuevoComentario({ valor, onChange, etiquetas = ETIQUETAS_TECNICO, stock = [], requerido, placeholder, onGuardar }) {
+  const { texto = "", etiqueta = "", materiales = [] } = valor;
+  const set = (p) => onChange({ ...valor, ...p });
+  return (
+    <div className="space-y-1.5">
+      <div className="flex gap-1 flex-wrap">
+        {etiquetas.map((k) => {
+          const e = ETIQUETAS_REGISTRO[k];
+          const on = etiqueta === k;
+          return (
+            <button key={k} type="button" onClick={() => set({ etiqueta: on ? "" : k })}
+              className="text-[10px] font-semibold px-2 py-1 rounded-md"
+              style={on ? { background: e.color, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
+              {e.label}
+            </button>
+          );
+        })}
+      </div>
+      {etiqueta === "material" && (
+        <ListaMateriales materiales={materiales} onChange={(m) => set({ materiales: m })} stock={stock} />
+      )}
+      <textarea value={texto} onChange={(e) => set({ texto: e.target.value })} rows={2}
+        placeholder={placeholder || (etiqueta === "material" ? "Detalle adicional (opcional)…" : "Qué se hizo, qué falta o qué se encontró…")}
+        className={`${inputCls} resize-none`} style={{ ...inputStyle, ...(requerido ? { borderColor: COLORS.orange } : {}) }} />
+      {onGuardar && (
+        <button type="button" onClick={onGuardar} disabled={!textoComentario(valor)}
+          className="w-full py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40" style={{ background: COLORS.charcoal }}>
+          Guardar comentario
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* Texto final del comentario: materiales + lo escrito. */
+function textoComentario(valor) {
+  const partes = [];
+  const mats = (valor.materiales || []).filter((m) => (m.nombre || "").trim());
+  if (mats.length) {
+    partes.push(mats.map((m) => `${m.nombre.trim()} × ${String(m.cantidad || 1).replace(",", ".")} ${(m.unidad || "u").trim()}${m.stockId ? "" : " (no está en el kardex)"}`).join("; "));
+  }
+  if ((valor.texto || "").trim()) partes.push(valor.texto.trim());
+  return partes.join(" · ");
 }
 
 function HistorialActividad({ item, data }) {
@@ -3304,7 +3564,7 @@ const coincideArticulo = (nombre, q) => {
 /* Desplegable de artículos con buscador integrado. La lista se abre debajo,
    dentro del mismo flujo (no flotante), para que en el celular y dentro de
    los modales nunca quede cortada; los nombres largos se ven completos. */
-function SelectorArticulo({ articulos, value, onChange }) {
+function SelectorArticulo({ articulos, value, onChange, onNuevo, textoBoton }) {
   const [abierto, setAbierto] = useState(false);
   const [q, setQ] = useState("");
   const [activo, setActivo] = useState(0);
@@ -3349,7 +3609,7 @@ function SelectorArticulo({ articulos, value, onChange }) {
               <span className="block text-[10px]" style={{ color: sel.cantidad > 0 ? COLORS.slate : COLORS.rojo }}>{existencia(sel)}</span>
             </span>
           ) : (
-            <span className="text-xs flex items-center gap-1.5" style={cSlate}><Search size={13} /> Buscar o elegir artículo…</span>
+            <span className="text-xs flex items-center gap-1.5" style={cSlate}><Search size={13} /> {textoBoton || "Buscar o elegir artículo…"}</span>
           )}
           <ChevronDown size={14} color={COLORS.slate} className="shrink-0 mt-0.5" />
         </button>
@@ -3376,8 +3636,18 @@ function SelectorArticulo({ articulos, value, onChange }) {
                 </span>
               </button>
             ))}
-            {filtrados.length === 0 && (
-              <p className="px-2.5 py-3 text-xs text-center" style={cSlate}>Ningún artículo coincide con “{q}”.</p>
+            {filtrados.length === 0 && !(onNuevo && q.trim()) && (
+              <p className="px-2.5 py-3 text-xs text-center" style={cSlate}>
+                {q.trim() ? `Ningún artículo coincide con “${q}”.` : "No hay artículos en el kardex de esta sede. Escribe el nombre para agregarlo."}
+              </p>
+            )}
+            {/* Material que no está en el kardex: se agrega con el nombre escrito */}
+            {onNuevo && q.trim() && !filtrados.some((x) => sinTildes(x.nombre) === sinTildes(q.trim())) && (
+              <button type="button" onClick={() => { onNuevo(q.trim()); setAbierto(false); setQ(""); }}
+                className="w-full flex items-center gap-1.5 px-2.5 py-2 text-left text-xs font-semibold border-t"
+                style={{ borderColor: COLORS.line, color: COLORS.orange, background: "white" }}>
+                <Plus size={13} /> Agregar “{q.trim()}” (no está en el kardex)
+              </button>
             )}
           </div>
         </div>
@@ -3386,7 +3656,7 @@ function SelectorArticulo({ articulos, value, onChange }) {
   );
 }
 
-function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
+function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly, soloLista }) {
   const [sel, setSel] = useState("");
   const [cant, setCant] = useState(1);
 
@@ -3397,6 +3667,8 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
   const numCant = Number(String(cant).replace(",", "."));
   const excede = art && numCant > art.cantidad;
   const valido = art && numCant > 0;
+  // El técnico carga el material desde "Registrar avance"; aquí solo lo ve
+  if (soloLista && consumos.length === 0) return null;
 
   return (
     <div>
@@ -3419,7 +3691,7 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
         </div>
       )}
 
-      {!readOnly && (
+      {!readOnly && !soloLista && (
         <>
           {stockSede.length > 0 && (
             <>
@@ -4549,7 +4821,9 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
          permanece en "Sin Programar" hasta que se le agende. */
       tecnicoId: tecnicosDeSede(data.usuarios, sede.id)[0]?.id || "",
       fechaProgramada: "", fechaCompletada: "",
-      observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
+      observaciones: lineaRegistro(user?.nombre, form.solicitanteId && form.solicitanteId !== user?.id
+        ? `Solicitud creada a nombre de ${usuarioNombre(data.usuarios, form.solicitanteId)}` : "Solicitud creada"),
+      foto: "", fotoSolicitante: form.foto || "", resolucion: "",
       materiales: [], materialesEstado: "",
       calificacion: 0, comentarioCalif: "",
     };
@@ -4805,49 +5079,346 @@ function ArbolPendientes({ sedes, todosLosSedes, usuarios, pendientes, onActivar
    (programado, en proceso o en espera). Lo pueden hacer el técnico y el
    supervisor: se agrega el detalle del trabajo y la solicitud pasa a ser un
    servicio "Por definir", con su mismo número. */
-function PasoAServicio({ item, rol, acciones }) {
-  const [abierto, setAbierto] = useState(false);
-  const [detalle, setDetalle] = useState("");
-  const morado = "#7B5EA7";
-  if (!ESTADOS_ABIERTOS.includes(item.estado)) return null;
-  if (rol !== "admin" && rol !== "tecnico") return null;
+/* Sello de cierre: fecha y hora de hoy. Si se ejecutó otro día que el
+   programado, la orden se reubica en el calendario al día real y el salto
+   queda en sus reprogramaciones, así no se pierde la fecha original. */
+function selloCierre(item, usuarioId) {
+  const ahora = new Date();
+  const hoyStr = fmtDate(ahora);
+  const p = { fechaCompletada: hoyStr, horaCompletada: fmtHora(ahora) };
+  if (item.fechaProgramada && item.fechaProgramada !== hoyStr) {
+    const adelantada = hoyStr < item.fechaProgramada;
+    p.fechaProgramada = hoyStr;
+    p.reprogramaciones = [...(item.reprogramaciones || []), {
+      id: uid("rep"),
+      fechaAnterior: item.fechaProgramada,
+      fechaNueva: hoyStr,
+      estadoAnterior: item.estado,
+      estadoNuevo: "completada",
+      motivo: adelantada ? "Ejecutada antes de lo programado" : "Ejecutada después de lo programado",
+      detalle: "Ajuste automático al cerrar: la fecha programada se igualó al día de ejecución.",
+      usuarioId: usuarioId || "",
+      sello: `${hoyStr} · ${fmtHora(ahora)}`,
+      automatico: true,
+    }];
+  }
+  return p;
+}
 
-  return !abierto ? (
-    <button onClick={() => setAbierto(true)}
-      className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2 rounded-md border"
-      style={{ borderColor: morado, color: morado, background: "white" }}>
-      <Wrench size={13} /> Pasar a servicio
-    </button>
-  ) : (
-    <div className="rounded-md p-2.5 border" style={{ borderColor: morado }}>
-      <p className="text-xs font-semibold mb-1" style={{ color: morado }}>Pasar {item.codigo} a servicio</p>
-      <p className="text-[11px] mb-2" style={cSlate}>
-        Deja de ser correctivo (sale de los indicadores) y pasa a Servicios con el mismo número. Se quita la fecha
-        programada: el supervisor completa tipo de proveedor y presupuesto, lo envía a aprobación del cliente y,
-        una vez aprobado, asigna el proveedor y la fecha.
+const cantNum = (v) => Number(String(v ?? "").replace(",", ".")) || 0;
+
+/* Motivos para dejar una orden en espera (la falta de material tiene su
+   propia opción, porque además genera el pedido de compra). */
+const MOTIVOS_ESPERA = [
+  "Decisión del cliente",
+  "Sin acceso al área",
+  "Falta de personal o herramienta",
+  "Trabajo largo, continúa otro día",
+  "Otro",
+];
+
+/* Estados de un pedido de material. Lo gestiona el supervisor desde
+   Bodega → Pendientes de compra. */
+const ESTADOS_NECESIDAD = {
+  pendiente: { label: "Pendiente", color: COLORS.orange },
+  comprado: { label: "Comprado", color: "#3B6EA5" },
+  entregado: { label: "Entregado", color: COLORS.verde },
+  cancelado: { label: "Cancelado", color: COLORS.slate },
+};
+
+/* Registrar avance: la única forma en que el técnico mueve una orden.
+   Cada registro queda en el registro de la orden con fecha, autor y
+   etiqueta, y es lo que cambia el estado:
+     · Avance           → En proceso (también retoma una orden en espera)
+     · Requiere material→ En espera + pedido en Pendientes de compra
+     · Requiere servicio→ solo correctivos: pasa a Servicios
+     · En espera        → En espera con su motivo
+     · Finalizar        → Completada; el texto queda como resolución
+   Material y espera aceptan una fecha nueva, que se guarda como
+   reprogramación. El supervisor, además, puede dejar una corrección. */
+function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
+  const esPrev = item.tipo === "preventivo";
+  const esCorr = item.tipo === "correctivo";
+  const abierta = ESTADOS_ABIERTOS.includes(item.estado);
+  const tipos = [
+    ...(abierta ? ["avance", "material", ...(esCorr ? ["servicio"] : []), "espera", "finalizada"] : []),
+    ...(corrige ? ["correccion"] : []),
+  ];
+  const [tipo, setTipo] = useState("");
+  const [texto, setTexto] = useState("");
+  const [materiales, setMateriales] = useState([]);
+  const [motivo, setMotivo] = useState(MOTIVOS_ESPERA[0]);
+  const [nuevaFecha, setNuevaFecha] = useState("");
+  const [confirmar, setConfirmar] = useState(false);
+  const [enviando, setEnviando] = useState(false);
+  const [hecho, setHecho] = useState("");
+  // Material de bodega que se descuenta al finalizar
+  const [usados, setUsados] = useState([]);
+
+  if (!tipos.length) {
+    return item.estado === "pendiente" && !corrige ? (
+      <p className="text-[11px] rounded-md p-2" style={{ background: COLORS.cream, color: COLORS.slate }}>
+        Agenda una fecha para empezar a registrar el trabajo de esta orden.
       </p>
-      <Field label="Detalle del trabajo" hint="Qué hay que hacer y por qué requiere un servicio: alcance, materiales, obra, proveedor externo…">
-        <textarea autoFocus value={detalle} onChange={(e) => setDetalle(e.target.value)} rows={4}
-          className={`${inputCls} resize-none`} style={inputStyle} />
-      </Field>
-      <div className="flex gap-1.5 mt-2">
-        <button onClick={() => { setAbierto(false); setDetalle(""); }} className="flex-1 py-1.5 rounded-md text-[11px] font-semibold border"
-          style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
-          Cancelar
-        </button>
-        <button disabled={!detalle.trim()} onClick={() => acciones.pasarAServicio(item, detalle.trim())}
-          className="flex-1 py-1.5 rounded-md text-[11px] font-semibold text-white disabled:opacity-40" style={{ background: morado }}>
-          Pasar a servicio
-        </button>
-      </div>
+    ) : null;
+  }
+
+  // Bodega de la sede: con existencias se usa; sin existencias se pide
+  const conStock = stock.filter((a) => Number(a.cantidad) > 0);
+  const sinExistencias = stock.filter((a) => !(Number(a.cantidad) > 0));
+  // Material pedido que aún no llega: la orden no se puede finalizar
+  const sinEntregar = (item.necesidades || []).filter((n) => ["pendiente", "comprado"].includes(n.estado));
+  const checklistPend = esPrev ? avanceChecklist(item.checklist).pendientes : 0;
+  const mats = materiales.filter((m) => (m.nombre || "").trim());
+  const conFecha = tipo === "material" || tipo === "espera";
+  const fechaActual = item.fechaProgramada || "";
+  const cambiaFecha = conFecha && nuevaFecha && nuevaFecha !== fechaActual;
+
+  // Material usado de bodega: se puede cargar en cualquier registro de trabajo
+  const conUsados = ["avance", "material", "espera", "finalizada"].includes(tipo);
+  const consumosSel = conUsados ? usados
+    .filter((u) => u.usar && cantNum(u.cantidad) > 0)
+    .map((u) => ({ art: stock.find((a) => a.id === u.stockId), cantidad: cantNum(u.cantidad), necId: u.necId }))
+    .filter((c) => c.art) : [];
+  const valido = !!tipo && !enviando && (
+    tipo === "material" ? mats.length > 0
+    : tipo === "finalizada" ? !!texto.trim() && checklistPend === 0 && sinEntregar.length === 0
+    : tipo === "avance" ? !!texto.trim() || consumosSel.length > 0
+    : !!texto.trim());
+  // Pedidos de la orden que se cargan ahora: quedan entregados y consumidos
+  const opcionesConsumo = () => {
+    const necCargadas = new Set(consumosSel.map((c) => c.necId).filter(Boolean));
+    return {
+      consumos: consumosSel,
+      ...(necCargadas.size ? { mapNecesidades: (n) => (necCargadas.has(n.id)
+        ? { ...n, consumido: true, ...(["pendiente", "comprado"].includes(n.estado) ? { estado: "entregado", fechaEstado: fmtDate(new Date()), horaEstado: fmtHora(new Date()) } : {}) }
+        : n) } : {}),
+    };
+  };
+
+  const limpiar = (msg) => {
+    setTipo(""); setTexto(""); setMateriales([]); setMotivo(MOTIVOS_ESPERA[0]);
+    setNuevaFecha(""); setConfirmar(false); setUsados([]); setHecho(msg);
+    setTimeout(() => setHecho(""), 2500);
+  };
+
+  const registrar = async () => {
+    if (!valido) return;
+    if (tipo === "finalizada" && !confirmar) { setConfirmar(true); return; }
+    setEnviando(true);
+    const usuarioId = acciones.usuario?.id || "";
+    const t = texto.trim();
+    try {
+      if (tipo === "servicio") {
+        await acciones.pasarAServicio(item, t);
+        return;
+      }
+      if (tipo === "correccion") {
+        await acciones.updateActividad(item, {}, { sinRegistro: true, comentario: { texto: t, etiqueta: "correccion" } });
+        limpiar("Corrección anotada");
+        return;
+      }
+      if (tipo === "finalizada") {
+        const patch = { estado: "completada", ...selloCierre(item, usuarioId) };
+        if (!esPrev) patch.resolucion = t;
+        await acciones.updateActividad(item, patch, {
+          comentario: { texto: t, etiqueta: "finalizada" }, ...opcionesConsumo(),
+        });
+        limpiar("");
+        onFinalizada?.();
+        return;
+      }
+      const estadoNuevo = tipo === "avance" ? "en_proceso" : "espera";
+      const patch = item.estado === estadoNuevo ? {} : { estado: estadoNuevo };
+      const motivoFinal = tipo === "material" ? "Falta de repuesto o material" : motivo;
+      if (cambiaFecha) {
+        patch.fechaProgramada = nuevaFecha;
+        patch.reprogramaciones = [...(item.reprogramaciones || []), {
+          id: uid("rep"),
+          fechaAnterior: fechaActual, fechaNueva: nuevaFecha,
+          estadoAnterior: item.estado, estadoNuevo,
+          motivo: motivoFinal, detalle: t,
+          usuarioId, sello: `${fmtDate(new Date())} · ${fmtHora(new Date())}`,
+        }];
+      }
+      const cuerpo = tipo === "material" ? textoComentario({ materiales: mats, texto: t })
+        : tipo === "espera" ? `${motivo}${t ? `: ${t}` : ""}` : t;
+      const necesidades = tipo === "material" ? mats.map((m) => ({
+        id: uid("nec"), nombre: m.nombre.trim(),
+        cantidad: Number(String(m.cantidad || 1).replace(",", ".")) || 1,
+        unidad: (m.unidad || "u").trim(), stockId: m.stockId || "",
+        estado: "pendiente", fecha: fmtDate(new Date()), hora: fmtHora(new Date()), usuarioId,
+      })) : undefined;
+      const conc = opcionesConsumo();
+      if (necesidades && conc.mapNecesidades) {
+        // Los pedidos nuevos no se tocan; solo los que se cargan ahora
+        const m = conc.mapNecesidades;
+        conc.mapNecesidades = (n) => (necesidades.some((x) => x.id === n.id) ? n : m(n));
+      }
+      await acciones.updateActividad(item, patch, {
+        comentario: cuerpo ? { texto: cuerpo, etiqueta: tipo } : null, necesidades, ...conc,
+      });
+      limpiar(tipo === "material" ? "Material pedido: quedó en Pendientes de compra" : "Registrado en la orden");
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  /* Al elegir Finalizar se proponen los materiales pedidos en la orden que
+     están en el kardex (y no se cancelaron ni se cargaron ya). */
+  const proponerUsados = () => setUsados((item.necesidades || [])
+    .filter((n) => n.stockId && n.estado !== "cancelado" && !n.consumido && conStock.some((a) => a.id === n.stockId))
+    .map((n) => ({ necId: n.id, stockId: n.stockId, cantidad: String(n.cantidad || 1), usar: true })));
+  const boton = (k) => {
+    const e = ETIQUETAS_REGISTRO[k];
+    const on = tipo === k;
+    return (
+      <button key={k} type="button" onClick={() => { setTipo(on ? "" : k); setConfirmar(false); if (!on && k === "finalizada" && !usados.length) proponerUsados(); }}
+        className="text-[11px] font-semibold px-2.5 py-1.5 rounded-md"
+        style={on ? { background: e.color, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.charcoal, background: "white" }}>
+        {k === "finalizada" ? "Finalizar" : e.label}
+      </button>
+    );
+  };
+
+  const placeholder = {
+    avance: "Qué se hizo hoy, qué se encontró, qué falta…",
+    material: "Para qué se necesita (opcional)…",
+    servicio: "Qué hay que hacer y por qué requiere un servicio: alcance, obra, proveedor externo…",
+    espera: "Detalle del motivo…",
+    finalizada: esPrev ? "Observación de cierre: cómo quedó el equipo, novedades…" : "Qué se hizo para resolverlo…",
+    correccion: "Qué se corrige y por qué…",
+  }[tipo] || "";
+
+  return (
+    <div className="rounded-md p-2.5 space-y-2" style={{ background: `${COLORS.orange}0D`, border: `1px solid ${COLORS.orange}33` }}>
+      <p className="text-[11px] font-semibold uppercase tracking-wide" style={cChar}>Registrar avance</p>
+      <div className="flex gap-1 flex-wrap">{tipos.map(boton)}</div>
+
+      {tipo === "material" && (
+        <>
+          <p className="text-[11px]" style={cSlate}>
+            Solo lo que <b>no hay en bodega</b> o no está en el kardex: queda en Pendientes de compra.
+            Lo que sí hay en bodega cárgalo abajo, en “Material usado de bodega”.
+          </p>
+          <ListaMateriales materiales={materiales} onChange={setMateriales}
+            stock={sinExistencias} textoBoton="Buscar en el kardex (sin existencias) o escribir el material…" />
+        </>
+      )}
+      {tipo === "espera" && (
+        <select value={motivo} onChange={(e) => setMotivo(e.target.value)} className={inputCls} style={inputStyle}>
+          {MOTIVOS_ESPERA.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+      )}
+      {tipo === "servicio" && (
+        <p className="text-[11px]" style={cSlate}>
+          La orden deja de ser correctivo (sale de los indicadores) y pasa a Servicios con el mismo número.
+          El supervisor completa proveedor y presupuesto y lo envía a aprobación del cliente.
+        </p>
+      )}
+      {conUsados && conStock.length > 0 && (
+        <div className="rounded-md p-2 space-y-1.5 bg-white border" style={bLine}>
+          <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Material usado de bodega</p>
+          {usados.length === 0 && (
+            <p className="text-[11px]" style={cSlate}>Si usaste material de bodega, agrégalo: se descuenta al registrar.</p>
+          )}
+          {usados.map((u, i) => {
+            const art = stock.find((a) => a.id === u.stockId);
+            if (!art) return null;
+            const set = (p) => setUsados(usados.map((x, j) => (j === i ? { ...x, ...p } : x)));
+            const excede = u.usar && cantNum(u.cantidad) > art.cantidad;
+            return (
+              <div key={i}>
+                <div className="flex items-center gap-1.5">
+                  <input type="checkbox" checked={u.usar} onChange={(e) => set({ usar: e.target.checked })} className="shrink-0" />
+                  <div className="flex-1 min-w-0 text-left">
+                    <p className="text-xs font-semibold break-words" style={{ ...cChar, opacity: u.usar ? 1 : 0.5 }}>{art.nombre}</p>
+                    <p className="text-[10px]" style={cSlate}>{u.necId ? "Pedido en la orden" : "Agregado"} · en bodega: {art.cantidad} {art.unidad}</p>
+                  </div>
+                  <input type="text" inputMode="decimal" value={u.cantidad} disabled={!u.usar}
+                    onChange={(e) => set({ cantidad: e.target.value.replace(/[^0-9.,]/g, "") })}
+                    className="w-14 border rounded-md px-1.5 py-1.5 text-xs outline-none bg-white disabled:opacity-50" style={inputStyle} />
+                  <span className="text-[10px] w-8" style={cSlate}>{art.unidad}</span>
+                  {!u.necId && (
+                    <button type="button" onClick={() => setUsados(usados.filter((_, j) => j !== i))} className="p-1" title="Quitar">
+                      <X size={13} color={COLORS.slate} />
+                    </button>
+                  )}
+                </div>
+                {excede && <p className="text-[10px] mt-0.5" style={{ color: COLORS.ambar }}>En bodega solo hay {art.cantidad} {art.unidad}: la existencia quedará en cero.</p>}
+              </div>
+            );
+          })}
+          <SelectorArticulo articulos={conStock.filter((a) => !usados.some((u) => u.stockId === a.id))} value=""
+            textoBoton="Agregar material de bodega…"
+            onChange={(id) => setUsados([...usados, { stockId: id, cantidad: "1", usar: true }])} />
+        </div>
+      )}
+      {tipo === "finalizada" && sinEntregar.length > 0 && (
+        <div className="rounded-md p-2 text-[11px]" style={{ background: `${COLORS.rojo}0D`, color: COLORS.rojo }}>
+          <p className="font-semibold">No se puede finalizar: hay material pedido que aún no se entrega.</p>
+          <ul className="mt-1 space-y-0.5">
+            {sinEntregar.map((n) => (
+              <li key={n.id}>· {textoNecesidad(n)} — {ESTADOS_NECESIDAD[n.estado].label.toLowerCase()}</li>
+            ))}
+          </ul>
+          <p className="mt-1" style={cSlate}>
+            Cuando el supervisor lo marque como entregado entra a la bodega y aquí podrás cargarlo. Si ya no hace falta, el supervisor lo cancela en Bodega → Pendientes de compra.
+          </p>
+        </div>
+      )}
+      {tipo === "finalizada" && checklistPend > 0 && (
+        <p className="text-[11px] font-semibold" style={{ color: COLORS.rojo }}>
+          Falta marcar {checklistPend} {checklistPend === 1 ? "punto" : "puntos"} del checklist para finalizar.
+        </p>
+      )}
+      {tipo && (
+        <textarea value={texto} onChange={(e) => setTexto(e.target.value)} rows={2} placeholder={placeholder}
+          className={`${inputCls} resize-none bg-white`} style={inputStyle} />
+      )}
+      {conFecha && (
+        <Field label="Nueva fecha (opcional)" hint={`Programada: ${fechaActual || "—"}. Si la cambias, queda como reprogramación.`}>
+          <input type="date" value={nuevaFecha} onChange={(e) => setNuevaFecha(e.target.value)}
+            className="w-full border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle} />
+        </Field>
+      )}
+      {tipo && (
+        confirmar ? (
+          <div className="flex gap-1.5">
+            <button type="button" onClick={() => setConfirmar(false)} className="flex-1 py-2 rounded-md text-xs font-semibold border bg-white"
+              style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+              Cancelar
+            </button>
+            <button type="button" onClick={registrar} disabled={enviando}
+              className="flex-1 py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40" style={{ background: COLORS.verde }}>
+              Sí, finalizar la orden
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={registrar} disabled={!valido}
+            className="w-full py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40"
+            style={{ background: ETIQUETAS_REGISTRO[tipo].color }}>
+            {tipo === "finalizada" ? "Finalizar orden" : tipo === "servicio" ? "Pasar a servicio" : "Registrar"}
+          </button>
+        )
+      )}
+      {confirmar && (
+        <p className="text-[11px] text-center" style={cSlate}>Se registrará la fecha y hora de cierre y la orden quedará completada.</p>
+      )}
+      {hecho && (
+        <p className="text-[11px] font-semibold flex items-center gap-1" style={{ color: COLORS.verde }}>
+          <CheckCircle2 size={12} /> {hecho}
+        </p>
+      )}
     </div>
   );
 }
 
 function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicial, permitirReasignar, onCompletada }) {
   const [open, setOpen] = useState(!!abiertoInicial);
-  const [estado, setEstado] = useState(item.estado);
-  const [observaciones, setObservaciones] = useState(item.observaciones || "");
+  // El estado solo lo cambia a mano el supervisor (corrección); el técnico
+  // lo mueve con "Registrar avance"
+  const [estadoForm, setEstado] = useState(item.estado);
   const [resolucion, setResolucion] = useState(item.resolucion || "");
   const [tecnicoId, setTecnicoId] = useState(item.tecnicoId || "");
   const [durValor, setDurValor] = useState(item.duracionValor ?? "");
@@ -4892,7 +5463,6 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   useEffect(() => {
     if (open) return;
     setEstado(item.estado);
-    setObservaciones(item.observaciones || "");
     setResolucion(item.resolucion || "");
     setTecnicoId(item.tecnicoId || "");
     setDurValor(item.duracionValor ?? "");
@@ -4912,6 +5482,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   const [confirmarCierre, setConfirmarCierre] = useState(false);
 
   const guardar = async () => {
+    // Para el técnico el estado es el guardado: lo cambia "Registrar avance"
+    const estado = corrige ? estadoForm : item.estado;
     // Marcar como completada es irreversible en la práctica: se pide confirmar
     if (estado === "completada" && item.estado !== "completada" && !confirmarCierre) {
       setConfirmarCierre(true);
@@ -4932,9 +5504,9 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
       : (agendaTecnico && fProg && estado === "pendiente") ? "programada"
       : estado;
 
-    const patch = { estado: estadoSeguro, observaciones };
+    const patch = { estado: estadoSeguro };
     if (agendaTecnico) patch.fechaProgramada = fProg;
-    if (!esPrev) patch.resolucion = resolucion;
+    if (corrige && !esPrev) patch.resolucion = resolucion;
     if (permitirReasignar) patch.tecnicoId = tecnicoId;
     if (puedeEditarTiempo) {
       patch.duracionValor = Number(durValor) || 0;
@@ -4968,29 +5540,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
        queda registrado en la bitácora, así no se pierde la fecha original. */
     if (estado === "completada") {
       // Si el supervisor escribió la fecha de cierre, esa manda sobre el sello automático
-      if (!item.fechaCompletada && !patch.fechaCompletada) {
-        const ahora = new Date();
-        const hoyStr = fmtDate(ahora);
-        patch.fechaCompletada = hoyStr;
-        patch.horaCompletada = fmtHora(ahora);
-
-        if (item.fechaProgramada && item.fechaProgramada !== hoyStr) {
-          const adelantada = hoyStr < item.fechaProgramada;
-          patch.fechaProgramada = hoyStr;
-          patch.reprogramaciones = [...(item.reprogramaciones || []), {
-            id: uid("rep"),
-            fechaAnterior: item.fechaProgramada,
-            fechaNueva: hoyStr,
-            estadoAnterior: item.estado,
-            estadoNuevo: "completada",
-            motivo: adelantada ? "Ejecutada antes de lo programado" : "Ejecutada después de lo programado",
-            detalle: "Ajuste automático al cerrar: la fecha programada se igualó al día de ejecución.",
-            usuarioId: acciones.usuario?.id || "",
-            sello: `${hoyStr} · ${fmtHora(ahora)}`,
-            automatico: true,
-          }];
-        }
-      }
+      if (!item.fechaCompletada && !patch.fechaCompletada) Object.assign(patch, selloCierre(item, acciones.usuario?.id));
     } else if (item.fechaCompletada) {
       patch.fechaCompletada = "";
       patch.horaCompletada = "";
@@ -5026,9 +5576,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
      no aparecía y el cambio se perdía al cerrar la tarjeta. */
   const dif = (valorForm, valorItem) => String(valorForm ?? "") !== String(valorItem ?? "");
   const sinGuardar =
-    dif(estado, item.estado) ||
-    dif(observaciones, item.observaciones) ||
-    (!esPrev && dif(resolucion, item.resolucion)) ||
+    (corrige && dif(estadoForm, item.estado)) ||
+    (corrige && !esPrev && dif(resolucion, item.resolucion)) ||
     (permitirReasignar && dif(tecnicoId, item.tecnicoId)) ||
     (!corrige && !permitirReasignar && !esServ && item.estado === "pendiente" && dif(fProg, item.fechaProgramada)) ||
     (puedeEditarTiempo && (dif(durValor, item.duracionValor) || dif(durUnidad, item.duracionUnidad || "minutos"))) ||
@@ -5129,7 +5678,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                          como Sin Programar. Solo se ajusta si el estado aún
                          no avanzó más allá (en proceso, espera, completada). */
                       if (!v) setEstado("pendiente");
-                      else if (estado === "pendiente") setEstado("programada");
+                      else if (estadoForm === "pendiente") setEstado("programada");
                     }}
                     className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
                 </Field>
@@ -5155,7 +5704,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                   La ejecución es anterior {fecha ? "al reporte" : "a la fecha programada"}: revisa el año, suele ser un error de tecleo.
                 </p>
               )}
-              {fCompl && estado !== "completada" && (
+              {fCompl && estadoForm !== "completada" && (
                 <p className="text-[10px]" style={{ color: COLORS.ambar }}>
                   Hay fecha de ejecución pero el estado no es Completada.
                 </p>
@@ -5316,9 +5865,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               onChange={(items) => acciones.updateActividad(item, { checklist: items })} />
           )}
 
-          <Field label="Estado"
-            hint={!fProg ? "Sin fecha programada solo puede estar en Sin Programar. Asigna una fecha arriba para poder avanzarla." : undefined}>
-            <select value={estado} onChange={(e) => setEstado(e.target.value)} className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
+          {corrige && <Field label="Estado" hint={!fProg ? "Sin fecha programada solo puede estar en Sin Programar. Asigna una fecha arriba para poder avanzarla." : undefined}>
+            <select value={estadoForm} onChange={(e) => setEstado(e.target.value)} className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
               {/* "Sin Programar" aparece en la lista: antes no estaba, así que
                   una actividad pendiente mostraba "Programada" por defecto y se
                   guardaba con ese estado aunque no tuviera fecha. Los estados
@@ -5328,19 +5876,25 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                 <option key={e} value={e} disabled={!fProg}>{ESTADOS[e].label}</option>
               ))}
             </select>
-          </Field>
+          </Field>}
 
-          <Field label="Observaciones">
-            <textarea value={observaciones} onChange={(e) => setObservaciones(e.target.value)} rows={2}
-              placeholder="Notas de campo, avance, hallazgos..." className={`${inputCls} resize-none`} style={inputStyle} />
+          <Field label="Registro de la orden">
+            <RegistroOrden texto={item.observaciones}
+              onEditar={corrige ? (t) => acciones.updateActividad(item, { observaciones: t }, { sinRegistro: true }) : undefined} />
           </Field>
+          <RegistrarAvance item={item} acciones={acciones} stock={stockSede} corrige={corrige}
+            onFinalizada={() => { if (onCompletada) onCompletada(); else setOpen(false); }} />
 
-          {!esPrev && (
-            <Field label={esServ ? "Novedades del servicio" : "Resolución"}>
+          {/* La resolución sale del comentario de "Finalizar". El supervisor la
+              ve y la puede corregir; también conserva las escritas antes. */}
+          {corrige && !esPrev && (
+            <Field label={esServ ? "Novedades del servicio" : "Resolución"} hint="Se llena con el comentario de Finalizar. Edítala solo para corregir.">
               <textarea value={resolucion} onChange={(e) => setResolucion(e.target.value)} rows={2}
-                placeholder={esServ ? "Qué ejecutó el proveedor, hallazgos, pendientes…" : "Qué se hizo para resolverlo"}
                 className={`${inputCls} resize-none`} style={inputStyle} />
             </Field>
+          )}
+          {!corrige && item.resolucion && !(item.observaciones || "").includes(item.resolucion) && (
+            <Field label={esServ ? "Novedades del servicio" : "Resolución"}><ReadOnly>{item.resolucion}</ReadOnly></Field>
           )}
 
           {corrige ? (
@@ -5359,7 +5913,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               servicios solo aparecía la opción de material nuevo. */}
           <ConsumoStock item={item} stockSede={stockSede}
             onRegistrar={registrarConsumo} onQuitar={quitarConsumo}
-            readOnly={item.estado === "completada"} />
+            readOnly={item.estado === "completada"} soloLista={!corrige} />
 
           {esServ && (
             <div className="rounded-md p-2.5 flex items-center justify-between gap-2" style={{ background: COLORS.cream }}>
@@ -5369,8 +5923,6 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               )}
             </div>
           )}
-
-          {esCorr && <PasoAServicio item={item} rol={rol} acciones={acciones} />}
 
           <div className="flex items-center justify-between gap-2">
             <BotonHistorial item={item} data={data} />
@@ -5418,13 +5970,18 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                   acciones.updateActividad(item, {
                     fechaProgramada, estado: nuevoEstado,
                     reprogramaciones: [...(item.reprogramaciones || []), registro],
-                  });
+                  }, { comentario: {
+                    texto: `Reprogramada: ${registro.motivo}${registro.detalle ? ` · ${registro.detalle}` : ""}`,
+                    etiqueta: nuevoEstado === "espera" ? "espera" : "",
+                  } });
                   setEstado(nuevoEstado);
                 }} />
             </Modal>
           )}
 
-          <div>
+          {/* El técnico solo guarda aquí lo que no pasa por "Registrar avance"
+              (agendar, reasignar); si no hay nada pendiente, no se muestra */}
+          {(corrige || sinGuardar || guardado) && <div>
             <button onClick={guardar} disabled={guardado === "ok"}
               className="w-full py-2 rounded-md text-sm font-semibold text-white flex items-center justify-center gap-1.5 transition-colors"
               style={{ background: guardado === "ok" ? COLORS.verde : sinGuardar ? COLORS.orange : COLORS.charcoal }}>
@@ -5435,7 +5992,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             {sinGuardar && guardado !== "ok" && (
               <p className="text-[10px] mt-1 text-center" style={{ color: COLORS.orange }}>Tienes cambios sin guardar.</p>
             )}
-          </div>
+          </div>}
         </div>
       )}
 
@@ -5483,6 +6040,7 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
     const foco = focoProgramacion(data, destinoNotif.id);
     if (foco?.activar) setActivar(foco.activar);
     if (foco?.ejecutar) setEjecutar(foco.ejecutar);
+    if (destinoNotif.orden) setEjecutar(destinoNotif.orden);
   }
   const [msg, setMsg] = useState("");
 
@@ -5521,7 +6079,8 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
       persist((data) => ({
         ...data,
         solicitudes: data.solicitudes.map((x) =>
-          x.id === item.solicitudId ? { ...x, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: estadoNuevo } : x),
+          x.id === item.solicitudId ? { ...x, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: estadoNuevo,
+            observaciones: conRegistro(x.observaciones, [lineaRegistro(user?.nombre, `Activada · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)}${fecha ? ` · Programada para ${fmtDMY(fecha)}` : " · sin fecha"}`)]) } : x),
       }));
     } else {
       const n = data.otCounter || 1;
@@ -5534,7 +6093,8 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
           duracionValor, duracionUnidad,
           sedeId: item.sedeId, faseId: item.faseId, activoId: item.activoId,
           tecnicoId, fechaProgramada: fecha, fechaCompletada: "",
-          estado: "programada", observaciones: "", foto: "",
+          estado: "programada", foto: "",
+          observaciones: lineaRegistro(user?.nombre, `Orden creada desde el plan · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)} · Programada para ${fmtDMY(fecha)}`),
           materiales: [], materialesEstado: "", consumos: [], createdAt: fmtDate(new Date()),
         }],
         otCounter: n + 1,
@@ -5556,7 +6116,9 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
       estado: "pendiente",
       tecnicoId: tecnicosDeSede(data.usuarios, form.sedeId)[0]?.id || "",
       fechaProgramada: "", fechaCompletada: "",
-      observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
+      observaciones: lineaRegistro(user?.nombre, form.solicitanteId && form.solicitanteId !== user?.id
+        ? `Solicitud creada a nombre de ${usuarioNombre(data.usuarios, form.solicitanteId)}` : "Solicitud creada"),
+      foto: "", fotoSolicitante: form.foto || "", resolucion: "",
       materiales: [], materialesEstado: "", consumos: [], reprogramaciones: [],
       calificacion: 0, comentarioCalif: "",
     };
@@ -5593,7 +6155,7 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
         </div>
       )}
 
-      {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={misSedes} editable={false} />}
+      {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={misSedes} editable={false} user={user} />}
       {tab === "sedes" && (
         <AdminSedes data={{ ...data, sedes: misSedes }} persist={persist} editable={false} />
       )}
@@ -6721,7 +7283,8 @@ function AdminProgramacion({ data, persist, user, foco }) {
       persist((data) => ({
         ...data,
         solicitudes: data.solicitudes.map((s) =>
-          s.id === item.solicitudId ? { ...s, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: estadoNuevo } : s),
+          s.id === item.solicitudId ? { ...s, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: estadoNuevo,
+            observaciones: conRegistro(s.observaciones, [lineaRegistro(user?.nombre, `Activada · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)}${fecha ? ` · Programada para ${fmtDMY(fecha)}` : " · sin fecha"}`)]) } : s),
       }));
     } else {
       const n = data.otCounter || 1;
@@ -6732,7 +7295,8 @@ function AdminProgramacion({ data, persist, user, foco }) {
         duracionValor, duracionUnidad,
         sedeId: item.sedeId, faseId: item.faseId, activoId: item.activoId,
         tecnicoId, fechaProgramada: fecha, fechaCompletada: "",
-        estado: "programada", observaciones: "", foto: "",
+        estado: "programada", foto: "",
+        observaciones: lineaRegistro(user?.nombre, `Orden creada desde el plan · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)} · Programada para ${fmtDMY(fecha)}`),
         materiales: [], materialesEstado: "", consumos: [], createdAt: fmtDate(new Date()),
       };
       persist((data) => ({ ...data, ordenes: [...data.ordenes, orden], otCounter: n + 1 }));
@@ -7000,7 +7564,9 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
       estado: "pendiente",
       tecnicoId: tecnicosDeSede(data.usuarios, form.sedeId)[0]?.id || "",
       fechaProgramada: "", fechaCompletada: "",
-      observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
+      observaciones: lineaRegistro(user?.nombre, form.solicitanteId && form.solicitanteId !== user?.id
+        ? `Solicitud creada a nombre de ${usuarioNombre(data.usuarios, form.solicitanteId)}` : "Solicitud creada"),
+      foto: "", fotoSolicitante: form.foto || "", resolucion: "",
       materiales: [], materialesEstado: "",
       consumos: [], reprogramaciones: [], calificacion: 0, comentarioCalif: "",
     };
@@ -7325,13 +7891,14 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
     estado: srv.estado || "por_definir",
     fechaCompletada: srv.fechaCompletada || "",
     horaCompletada: srv.horaCompletada || "",
-    observaciones: srv.observaciones || "",
     resolucion: srv.resolucion || "",
     motivoRechazo: srv.motivoRechazo || "",
     fotoSolicitante: fotoSolicitudDe(srv),
     fotos: fotosDe({ ...srv, tipo: "servicio" }),
   }));
   const set = (patch) => setF((x) => ({ ...x, ...patch }));
+  // El registro (observaciones) no se edita: solo se le agrega un comentario
+  const [comentario, setComentario] = useState({});
   const sede = data.sedes.find((x) => x.id === f.sedeId);
   const fase = sede?.fases.find((x) => x.id === f.faseId);
   const area = (k, label, rows = 3, hint) => (
@@ -7350,7 +7917,8 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
       presupuestoAprobado: f.presupuestoAprobado === "" ? null : Number(f.presupuestoAprobado),
     };
     if (srv.desdeSolicitud) patch.foto = f.fotoSolicitante;
-    onSave(patch);
+    const texto = textoComentario(comentario);
+    onSave(patch, texto ? { comentario: { texto, etiqueta: comentario.etiqueta || "" } } : {});
     onClose();
   };
 
@@ -7440,7 +8008,12 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
             className="w-20 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
         </div>
       </Field>
-      {area("observaciones", "Observaciones", 2)}
+      <Field label="Registro de la orden">
+        <div className="max-h-48 overflow-y-auto pr-0.5"><RegistroOrden texto={srv.observaciones} /></div>
+      </Field>
+      <Field label="Agregar comentario" hint="Queda en el registro con la fecha y no se puede editar.">
+        <NuevoComentario valor={comentario} onChange={setComentario} etiquetas={[...ETIQUETAS_TECNICO, "correccion"]} />
+      </Field>
       {area("resolucion", "Novedades del servicio", 2)}
       {(f.estado === "rechazada" || f.motivoRechazo) && area("motivoRechazo", "Motivo del rechazo", 2)}
       <FotosEvidencia fotos={f.fotos} onChange={(v) => set({ fotos: v })} carpeta="servicios" />
@@ -7696,7 +8269,7 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
               onSave={(f) => set(modal.srv.id, { ...f, estado: "por_aprobar" })} />
           ) : (
             <FormEditarServicio srv={modal.srv} data={data} onClose={() => setModal(null)}
-              onSave={(patch) => acciones.updateActividad({ ...modal.srv, tipo: "servicio" }, patch)} />
+              onSave={(patch, opciones) => acciones.updateActividad({ ...modal.srv, tipo: "servicio" }, patch, opciones)} />
           )}
         </Modal>
       )}
@@ -7759,7 +8332,8 @@ function AdminPreventivos({ data, persist, user }) {
         duracionValor, duracionUnidad,
         sedeId: item.sedeId, faseId: item.faseId, activoId: item.activoId,
         tecnicoId, fechaProgramada: fecha, fechaCompletada: "",
-        estado: "programada", observaciones: "", foto: "",
+        estado: "programada", foto: "",
+        observaciones: lineaRegistro(user?.nombre, `Orden creada desde el plan · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)} · Programada para ${fmtDMY(fecha)}`),
         materiales: [], materialesEstado: "", consumos: [], reprogramaciones: [],
         createdAt: fmtDate(new Date()),
       }],
@@ -8669,7 +9243,7 @@ function DetallePlanAnual({ fila, data }) {
                     {(o.checklist || []).length > 0
                       ? <ChecklistEjecucion items={o.checklist} readOnly compacto />
                       : <p className="text-[11px]" style={cSlate}>Sin pasos registrados en esta ejecución.</p>}
-                    {o.observaciones && <Field label="Observaciones"><ReadOnly>{o.observaciones}</ReadOnly></Field>}
+                    {o.observaciones && <Field label="Registro de la orden"><RegistroOrden texto={o.observaciones} /></Field>}
                     <FotosEvidencia fotos={fotosDe(o)} readOnly />
                   </div>
                 )}
@@ -8723,6 +9297,7 @@ th,td{padding:5px 7px;border:1px solid #E3E0D8}
 thead th{background:#35383C;color:#fff;font-size:7pt;text-transform:uppercase;text-align:left}
 td.v{text-align:right;font-weight:700;width:130px}
 tr.tot td{background:#FDEEE7;color:#ED5B23;font-size:10pt}
+${REG_CSS}
 ${FOTOS_CSS}
 .pie{margin-top:14px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.8pt;color:#8D939B;display:flex;justify-content:space-between}
 </style></head><body>
@@ -8742,7 +9317,7 @@ ${FOTOS_CSS}
 <h2>${esc(tituloServicio(srv))}</h2>
 ${bloque("Detalle de novedad", novedad)}
 ${bloque("Detalle del trabajo", srv.detalle)}
-${bloque("Observaciones", srv.observaciones)}
+${srv.observaciones ? `<h3>Registro de la orden</h3>${registroHTML(srv.observaciones, esc)}` : ""}
 ${bloque("Novedades del servicio", srv.resolucion)}
 ${bloque("Motivo del rechazo", srv.motivoRechazo)}
 ${costos ? `<h3>Valores</h3>
@@ -8950,7 +9525,322 @@ const claveArticulo = (nombre) => sinTildes(nombre).replace(/\s+/g, " ").trim();
 
 /* Bodega consolidada: una fila por artículo con la cantidad de cada sede en
    su propia columna. Admin edita; el técnico solo consulta y no ve costos. */
-function VistaBodega({ data, persist, sedes, editable }) {
+/* Pedidos de material de todas las órdenes (preventivas, correctivas y
+   servicios) de las sedes dadas, con la orden de la que salen. */
+const COLECCION_TIPO = { ordenes: "preventivo", solicitudes: "correctivo", servicios: "servicio" };
+function necesidadesDe(data, sedeIds) {
+  const filas = [];
+  Object.entries(COLECCION_TIPO).forEach(([col, tipo]) => {
+    (data[col] || []).forEach((o) => {
+      if (sedeIds && !sedeIds.includes(o.sedeId)) return;
+      (o.necesidades || []).forEach((n) => filas.push({ n, orden: o, col, tipo }));
+    });
+  });
+  return filas;
+}
+const textoNecesidad = (n) => `${n.nombre} × ${n.cantidad} ${n.unidad || "u"}`;
+
+/* Datos al marcar un pedido. Comprado: cantidad y valor de la compra.
+   Entregado: a qué artículo de la bodega de la sede ingresa (uno parecido
+   que ya exista o uno nuevo con el nombre corregido), cantidad y valor. */
+function FormNecesidad({ r, modo, stockSede, sede, onConfirm, onCancel }) {
+  const n = r.n;
+  const sugerido = (n.stockId && stockSede.find((a) => a.id === n.stockId))
+    || stockSede.find((a) => claveArticulo(a.nombre) === claveArticulo(n.nombre));
+  const [cantidad, setCantidad] = useState(String(n.cantidadComprada ?? n.cantidad ?? 1));
+  const [valor, setValor] = useState(n.valorCompra ? String(n.valorCompra) : "");
+  const [sel, setSel] = useState(sugerido?.id || "");
+  const [nombre, setNombre] = useState(n.nombre || "");
+  const [unidad, setUnidad] = useState(n.unidad || "u");
+  const art = stockSede.find((a) => a.id === sel);
+  const q = cantNum(cantidad);
+  const v = cantNum(valor);
+  const entrega = modo === "entregado";
+  const valido = q > 0 && (!entrega || art || nombre.trim());
+  const confirmar = () => {
+    const extra = { cantidadComprada: q, ...(v > 0 ? { valorCompra: v } : {}) };
+    if (!entrega) return onConfirm(extra, null);
+    onConfirm(extra, art
+      ? { stockId: art.id, nombre: art.nombre, unidad: art.unidad, cantidad: q, valor: v }
+      : { nombre: nombre.trim(), unidad: unidad.trim() || "u", cantidad: q, valor: v });
+  };
+  const lbl = "text-[10px] font-semibold uppercase tracking-wide block mb-0.5";
+  return (
+    <div className="mt-2 rounded-md p-2.5 space-y-2" style={{ background: COLORS.cream }}>
+      <p className="text-xs font-semibold" style={cChar}>{entrega ? "Entregar e ingresar a bodega" : "Registrar compra"}</p>
+      {entrega && (
+        <div>
+          <span className={lbl} style={cSlate}>Artículo de bodega ({sede})</span>
+          <SelectorArticulo articulos={stockSede} value={sel}
+            textoBoton="Elegir un artículo parecido o escribir el nombre…"
+            onChange={(id) => setSel(id)}
+            onNuevo={(nm) => { setSel(""); setNombre(nm); }} />
+          {art ? (
+            <p className="text-[10px] mt-1" style={cSlate}>
+              Se suma a “{art.nombre}” (hay {art.cantidad} {art.unidad}).{" "}
+              <button type="button" onClick={() => setSel("")} className="font-semibold" style={cOrange}>Crear como artículo nuevo</button>
+            </p>
+          ) : (
+            <div className="flex gap-1.5 mt-1.5">
+              <input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Nombre en bodega"
+                className="flex-1 min-w-0 border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+              <input value={unidad} onChange={(e) => setUnidad(e.target.value)} placeholder="u"
+                className="w-16 border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+            </div>
+          )}
+          {!art && <p className="text-[10px] mt-1" style={cSlate}>Se creará como artículo nuevo en la bodega de la sede.</p>}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        <label>
+          <span className={lbl} style={cSlate}>Cantidad ({art?.unidad || unidad || "u"})</span>
+          <input type="text" inputMode="decimal" value={cantidad} onChange={(e) => setCantidad(e.target.value.replace(/[^0-9.,]/g, ""))}
+            className="w-full border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+        </label>
+        <label>
+          <span className={lbl} style={cSlate}>Valor total de compra (USD)</span>
+          <input type="text" inputMode="decimal" value={valor} onChange={(e) => setValor(e.target.value.replace(/[^0-9.,]/g, ""))}
+            placeholder="0.00" className="w-full border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+        </label>
+      </div>
+      {v > 0 && q > 0 && <p className="text-[10px]" style={cSlate}>{money(v / q)} por {art?.unidad || unidad || "u"}</p>}
+      <div className="flex gap-1.5">
+        <button type="button" onClick={onCancel} className="flex-1 py-1.5 rounded-md text-[11px] font-semibold border bg-white"
+          style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>Cancelar</button>
+        <button type="button" onClick={confirmar} disabled={!valido}
+          className="flex-1 py-1.5 rounded-md text-[11px] font-semibold text-white disabled:opacity-40"
+          style={{ background: entrega ? COLORS.verde : "#3B6EA5" }}>
+          {entrega ? "Entregar e ingresar a bodega" : "Marcar comprado"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* Bodega → Pendientes de compra: lo que los técnicos pidieron al registrar
+   "Requiere material". El supervisor lo marca Comprado → Entregado (o lo
+   cancela); cada cambio queda en el registro de la orden y le llega al
+   técnico asignado como notificación. */
+function PendientesCompra({ data, persist, sedes, editable, user }) {
+  const sedeIds = sedes.map((s) => s.id);
+  const [fEstado, setFEstado] = useState("abiertos");
+  const [fSede, setFSede] = useState("todas");
+  const [q, setQ] = useState("");
+  const todas = necesidadesDe(data, sedeIds);
+  const mes = fmtDate(new Date()).slice(0, 7);
+  const delMes = todas.filter((r) => (r.n.fecha || "").startsWith(mes));
+  const cuenta = (xs, e) => xs.filter((r) => r.n.estado === e).length;
+  const costoDe = (r) => {
+    const art = r.n.stockId && (data.stock || []).find((x) => x.id === r.n.stockId);
+    return art ? (Number(art.costoUnitario) || 0) * (Number(r.n.cantidad) || 0) : 0;
+  };
+  const valorPend = todas.filter((r) => r.n.estado === "pendiente").reduce((a, r) => a + costoDe(r), 0);
+
+  const visibles = todas
+    .filter((r) => fSede === "todas" || r.orden.sedeId === fSede)
+    .filter((r) => fEstado === "todos" || (fEstado === "abiertos" ? ["pendiente", "comprado"].includes(r.n.estado) : r.n.estado === fEstado))
+    .filter((r) => coincideArticulo(`${r.n.nombre} ${r.orden.codigo || ""}`, q))
+    .sort((a, b) => `${b.n.fecha} ${b.n.hora || ""}`.localeCompare(`${a.n.fecha} ${a.n.hora || ""}`));
+
+  const [form, setForm] = useState(null);   // { id, modo: "comprado" | "entregado" }
+
+  /* Cambia el estado del pedido y lo anota en la orden. La orden no cambia
+     de estado: solo queda informada. Al entregar, el material entra a la
+     bodega de la sede (a un artículo existente o como uno nuevo) y el pedido
+     queda enlazado a él, para que el técnico lo cargue al finalizar. */
+  const cambiar = (r, estado, extra = {}, ingreso = null) => {
+    const ahora = new Date();
+    const stockId = ingreso ? (ingreso.stockId || uid("stk")) : null;
+    const detalle = estado === "comprado" && extra.valorCompra ? ` · ${money(extra.valorCompra)}`
+      : ingreso ? ` · ingresó a bodega como “${ingreso.nombre}”` : "";
+    const linea = lineaRegistro(user?.nombre, `${ESTADOS_NECESIDAD[estado].label}: ${textoNecesidad({ ...r.n, ...extra })}${detalle}`, "compra");
+    persist((d) => ({
+      ...d,
+      [r.col]: (d[r.col] || []).map((o) => (o.id !== r.orden.id ? o : {
+        ...o,
+        necesidades: (o.necesidades || []).map((n) => (n.id !== r.n.id ? n : {
+          ...n, ...extra, estado, fechaEstado: fmtDate(ahora), horaEstado: fmtHora(ahora), actualizadoPor: user?.id || "",
+          ...(ingreso ? { stockId, nombreBodega: ingreso.nombre, ingresoNuevo: !ingreso.stockId } : {}),
+        })),
+        observaciones: conRegistro(o.observaciones, [linea]),
+      })),
+      ...(ingreso ? { stock: ingreso.stockId
+        ? (d.stock || []).map((a) => {
+          if (a.id !== stockId) return a;
+          const cant = (Number(a.cantidad) || 0) + ingreso.cantidad;
+          // Costo promedio ponderado con lo que ya había
+          const costo = ingreso.valor > 0
+            ? ((Number(a.cantidad) || 0) * (Number(a.costoUnitario) || 0) + ingreso.valor) / cant
+            : Number(a.costoUnitario) || 0;
+          return { ...a, cantidad: cant, costoUnitario: Math.round(costo * 100) / 100 };
+        })
+        : [...(d.stock || []), {
+          id: stockId, sedeId: r.orden.sedeId, nombre: ingreso.nombre, unidad: ingreso.unidad || "u",
+          cantidad: ingreso.cantidad, costoUnitario: ingreso.valor > 0 ? Math.round((ingreso.valor / ingreso.cantidad) * 100) / 100 : 0, minimo: 0,
+          creadoDesde: { codigo: r.orden.codigo || "", fecha: fmtDate(ahora), usuarioId: user?.id || "" },
+        }] } : {}),
+    }));
+    setForm(null);
+  };
+
+  const filtros = [["abiertos", "Por atender"], ["pendiente", "Pendientes"], ["comprado", "Comprados"], ["entregado", "Entregados"], ["cancelado", "Cancelados"], ["todos", "Todos"]];
+  const btn = "text-[11px] font-semibold px-2 py-1 rounded-md border bg-white";
+
+  return (
+    <div className="mt-4">
+      <p className="text-xs mb-3" style={cSlate}>
+        {editable
+          ? "Material que pidieron los técnicos al registrar “Requiere material” en una orden. Márcalo como comprado y luego entregado: queda en el registro de la orden y se avisa al técnico."
+          : "Material pedido en las órdenes de tus sedes y en qué va la compra."}
+      </p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+        <Stat label="Pendientes de compra" value={cuenta(todas, "pendiente")} icon={<ShoppingCart size={14} />} color={COLORS.orange}
+          sub={editable && valorPend > 0 ? `≈ ${money(valorPend)} (kardex)` : "por comprar"} />
+        <Stat label="Comprados por entregar" value={cuenta(todas, "comprado")} icon={<Layers size={14} />} color="#3B6EA5" sub="falta entregar al técnico" />
+        <Stat label="Pedidos este mes" value={delMes.length} icon={<CalendarDays size={14} />} color={COLORS.charcoal}
+          sub={`${cuenta(delMes, "pendiente")} siguen pendientes`} />
+        <Stat label="Entregados este mes" value={cuenta(delMes, "entregado")} icon={<CheckCircle2 size={14} />} color={COLORS.verde}
+          sub={`${cuenta(delMes, "cancelado")} cancelados`} />
+      </div>
+
+      <div className="flex gap-2 mb-2 flex-wrap">
+        <div className="flex-1 min-w-48 flex items-center gap-1.5 border rounded-md px-2.5 bg-white" style={inputStyle}>
+          <Search size={14} color={COLORS.slate} className="shrink-0" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar material u orden…"
+            className="flex-1 min-w-0 py-2 text-sm outline-none bg-transparent" style={cChar} />
+        </div>
+        {sedes.length > 1 && (
+          <select value={fSede} onChange={(e) => setFSede(e.target.value)} className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
+            <option value="todas">Todas las sedes</option>
+            {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+          </select>
+        )}
+      </div>
+      <div className="flex gap-1 flex-wrap mb-3">
+        {filtros.map(([k, l]) => (
+          <button key={k} onClick={() => setFEstado(k)} className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
+            style={fEstado === k ? { background: COLORS.charcoal, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      {visibles.length === 0 ? (
+        <Empty>{todas.length ? "Ningún pedido coincide con el filtro." : "No hay material pedido en las órdenes."}</Empty>
+      ) : (
+        <div className="space-y-2">
+          {visibles.map((r) => {
+            const e = ESTADOS_NECESIDAD[r.n.estado] || ESTADOS_NECESIDAD.pendiente;
+            return (
+              <div key={r.n.id} className="border rounded-md p-2.5 bg-white text-left" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${e.color}` }}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold break-words" style={cChar}>
+                      {r.n.nombre} <span className="font-normal" style={cSlate}>× {r.n.cantidad} {r.n.unidad || "u"}</span>
+                    </p>
+                    <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                      <TipoChip tipo={r.tipo} />
+                      <span className="text-[10px] font-bold" style={cOrange}>{r.orden.codigo}</span>
+                      <span className="text-[11px] truncate" style={cChar}>{r.orden.tarea || r.orden.descripcion || r.orden.trabajo || ""}</span>
+                    </div>
+                    <p className="text-[10px] mt-0.5" style={cSlate}>
+                      {sedeNombre(data.sedes, r.orden.sedeId)} · Pedido el {r.n.fecha}{r.n.hora ? ` ${r.n.hora}` : ""} por {usuarioNombre(data.usuarios, r.n.usuarioId)}
+                      {" · "}<span style={{ color: r.n.stockId ? COLORS.slate : COLORS.orange }}>{r.n.stockId ? "Del kardex" : "No está en el kardex"}</span>
+                      {r.n.fechaEstado && r.n.estado !== "pendiente" ? ` · ${e.label} el ${r.n.fechaEstado}` : ""}
+                    </p>
+                  </div>
+                  <Chip color={e.color}>{e.label}</Chip>
+                </div>
+                {editable && (r.n.valorCompra > 0 || r.n.nombreBodega) && (
+                  <p className="text-[10px] mt-0.5" style={cSlate}>
+                    {r.n.valorCompra > 0 ? `Compra: ${money(r.n.valorCompra)}` : ""}
+                    {r.n.valorCompra > 0 && r.n.nombreBodega ? " · " : ""}
+                    {r.n.nombreBodega ? `En bodega como “${r.n.nombreBodega}”` : ""}
+                  </p>
+                )}
+                {editable && form?.id === r.n.id ? (
+                  <FormNecesidad r={r} modo={form.modo} sede={sedeNombre(data.sedes, r.orden.sedeId)} stockSede={(data.stock || []).filter((a) => a.sedeId === r.orden.sedeId)}
+                    onCancel={() => setForm(null)}
+                    onConfirm={(extra, ingreso) => cambiar(r, form.modo, extra, ingreso)} />
+                ) : editable && ["pendiente", "comprado"].includes(r.n.estado) && (
+                  <div className="flex gap-1.5 mt-2 flex-wrap">
+                    {r.n.estado === "pendiente" && (
+                      <button onClick={() => setForm({ id: r.n.id, modo: "comprado" })} className={btn} style={{ borderColor: "#3B6EA5", color: "#3B6EA5" }}>Comprado</button>
+                    )}
+                    <button onClick={() => setForm({ id: r.n.id, modo: "entregado" })} className={btn} style={{ borderColor: COLORS.verde, color: COLORS.verde }}>Entregado</button>
+                    <button onClick={() => cambiar(r, "cancelado")} className={btn} style={{ borderColor: COLORS.line, color: COLORS.slate }}>Cancelar</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Bodega → Ingresos: lo que entró a bodega desde Pendientes de compra.
+   Dice si se creó un artículo nuevo o se sumó a uno existente. */
+function IngresosBodega({ data, sedes, editable }) {
+  const filas = necesidadesDe(data, sedes.map((s) => s.id))
+    .filter((r) => r.n.estado === "entregado" && r.n.nombreBodega)
+    .sort((a, b) => `${b.n.fechaEstado} ${b.n.horaEstado || ""}`.localeCompare(`${a.n.fechaEstado} ${a.n.horaEstado || ""}`));
+  return (
+    <div className="mt-4">
+      <p className="text-xs mb-3" style={cSlate}>Material que ingresó a bodega al marcar “Entregado” un pedido de una orden.</p>
+      {filas.length === 0 ? <Empty>Todavía no hay ingresos por compra.</Empty> : (
+        <div className="space-y-2">
+          {filas.map((r) => (
+            <div key={r.n.id} className="border rounded-md p-2.5 bg-white text-left" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${COLORS.verde}` }}>
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-sm font-semibold break-words min-w-0" style={cChar}>
+                  {r.n.nombreBodega} <span className="font-normal" style={cSlate}>+{r.n.cantidadComprada ?? r.n.cantidad} {r.n.unidad || "u"}</span>
+                </p>
+                <Chip color={r.n.ingresoNuevo ? "#3B6EA5" : COLORS.verde}>{r.n.ingresoNuevo ? "Artículo nuevo" : "Sumado a existente"}</Chip>
+              </div>
+              <p className="text-[10px] mt-0.5" style={cSlate}>
+                {sedeNombre(data.sedes, r.orden.sedeId)} · {r.n.fechaEstado}{r.n.horaEstado ? ` ${r.n.horaEstado}` : ""} · {usuarioNombre(data.usuarios, r.n.actualizadoPor)}
+                {editable && r.n.valorCompra > 0 ? ` · ${money(r.n.valorCompra)}` : ""}
+              </p>
+              <p className="text-[10px]" style={cSlate}>
+                Pedido en <b style={cOrange}>{r.orden.codigo}</b> como “{r.n.nombre}” por {usuarioNombre(data.usuarios, r.n.usuarioId)}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Bodega: inventario por sede y, aparte, lo que falta comprar. */
+function VistaBodega({ data, persist, sedes, editable, user, foco }) {
+  const [vista, setVista] = useState(foco?.compras ? "compras" : "inventario");
+  const sedeIds = sedes.map((s) => s.id);
+  const pendientes = necesidadesDe(data, sedeIds).filter((r) => r.n.estado === "pendiente").length;
+  const op = (k, l) => (
+    <button onClick={() => setVista(k)} className="flex-1 sm:flex-none text-xs font-semibold px-3 py-1.5 rounded-md flex items-center justify-center gap-1.5"
+      style={vista === k ? { background: "white", color: COLORS.charcoal, boxShadow: "0 1px 2px rgba(0,0,0,.08)" } : { color: COLORS.slate }}>
+      {l}
+    </button>
+  );
+  return (
+    <div>
+      <div className="mt-4 inline-flex w-full sm:w-auto gap-1 p-1 rounded-lg" style={{ background: COLORS.cream }}>
+        {op("inventario", "Inventario")}
+        {op("ingresos", "Ingresos")}
+        {op("compras", <>Pendientes de compra{pendientes > 0 && <span className="min-w-4 h-4 px-1 rounded-full text-[9px] font-bold text-white flex items-center justify-center" style={{ background: COLORS.orange }}>{pendientes}</span>}</>)}
+      </div>
+      {vista === "compras"
+        ? <PendientesCompra data={data} persist={persist} sedes={sedes} editable={editable} user={user} />
+        : vista === "ingresos" ? <IngresosBodega data={data} sedes={sedes} editable={editable} />
+        : <InventarioBodega data={data} persist={persist} sedes={sedes} editable={editable} />}
+    </div>
+  );
+}
+
+function InventarioBodega({ data, persist, sedes, editable }) {
   const [fSede, setFSede] = useState("todas");
   const [nuevo, setNuevo] = useState(null);
   const [q, setQ] = useState("");
@@ -9033,6 +9923,11 @@ function VistaBodega({ data, persist, sedes, editable }) {
   ) : (
     <span className="break-words font-semibold" style={cChar}>{a.nombre}</span>
   );
+  // Artículos que nacieron de una compra pedida en una orden
+  const chipOrigen = (a) => {
+    const o = a.registros.find((x) => x.creadoDesde)?.creadoDesde;
+    return o ? <span className="block mt-0.5"><Chip color="#3B6EA5">Creado por compra · {o.codigo} · {o.fecha}</Chip></span> : null;
+  };
   const campoUnidad = (a, w) => editable ? (
     <CampoVivo value={a.unidad} onCommit={(v) => setRegistros(ids(a), { unidad: v })}
       className={cellInput} style={{ borderColor: COLORS.line, width: w }} />
@@ -9126,7 +10021,7 @@ function VistaBodega({ data, persist, sedes, editable }) {
           return (
             <div key={a.key} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${est.color}` }}>
               <div className="flex items-start gap-2">
-                <div className="flex-1 min-w-0 text-sm">{campoNombre(a)}</div>
+                <div className="flex-1 min-w-0 text-sm">{campoNombre(a)}{chipOrigen(a)}</div>
                 {editable && <DeleteBtn onConfirm={() => borrar(a)} />}
               </div>
               <div className="flex items-center justify-between gap-2 mt-1.5">
@@ -9181,7 +10076,7 @@ function VistaBodega({ data, persist, sedes, editable }) {
               const est = META_ESTADO[a.estado];
               return (
                 <tr key={a.key} style={{ background: i % 2 ? COLORS.paper : "white", borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className={td} style={{ minWidth: 200 }}>{campoNombre(a)}</td>
+                  <td className={td} style={{ minWidth: 200 }}>{campoNombre(a)}{chipOrigen(a)}</td>
                   <td className={td}>{campoUnidad(a, 64)}</td>
                   {editable && <td className={td}>{campoCosto(a, 74)}</td>}
                   {columnas.map((s) => (
@@ -10249,7 +11144,7 @@ function construirReporteHTML(items, data, meta) {
           <br><span class="mut">${esc(nom(r.usuarioId))} · ${esc(r.sello)}</span>
         </div>`).join("")
       }</div>` : ""}
-      ${a.observaciones ? `<div class="blk"><h4>Observaciones</h4><p>${esc(a.observaciones)}</p></div>` : ""}
+      ${a.observaciones ? `<div class="blk"><h4>Registro de la orden</h4>${registroHTML(a.observaciones, esc)}</div>` : ""}
       ${a.resolucion ? `<div class="blk"><h4>Resolución</h4><p>${esc(a.resolucion)}</p></div>` : ""}
       ${consumos ? `<div class="blk"><h4>Consumo de bodega</h4><table class="mini"><tbody>${consumos}</tbody></table></div>` : ""}
       ${materiales ? `<div class="blk"><h4>Materiales comprados (registro anterior)</h4><table class="mini"><tbody>${materiales}</tbody></table>${a.materialesLiquidados ? '<p class="mut">Solo consulta: su costo ya está incluido en el consumo de bodega.</p>' : ""}</div>` : ""}
@@ -10297,6 +11192,7 @@ tbody tr:nth-child(even){background:#F7F6F3}
 .blk h4{font-size:8pt;text-transform:uppercase;letter-spacing:.05em;color:#787D85;margin-bottom:3px}
 .blk p,.blk pre{font-size:8.5pt;white-space:pre-wrap;font-family:inherit}
 .mini td{padding:3px 5px;border-bottom:1px solid #EFEDE8;font-size:8pt}
+${REG_CSS}
 .chk{width:100%;border-collapse:collapse}
 .chk td{padding:2.5px 4px;border-bottom:1px solid #F0EEE9;font-size:8pt;vertical-align:top}
 .chk .p-txt{padding-top:6px;border-bottom:none;font-size:8.3pt}
@@ -11152,7 +12048,7 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
       {tab === "actividades" && <AdminActividades data={data} persist={persist} persistYa={persistYa} user={user} />}
       {tab === "planual" && <VistaPlanAnual data={data} sedes={data.sedes} />}
       {tab === "monitoreo" && <VistaMonitoreo data={data} />}
-      {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={data.sedes} editable />}
+      {tab === "bodega" && <VistaBodega key={focoProg?.ts || 0} data={data} persist={persist} sedes={data.sedes} editable user={user} foco={focoProg} />}
       {tab === "reportes" && <VistaReportes data={data} sedes={data.sedes} user={user} />}
       {tab === "config" && <AdminConfiguracion data={data} persist={persist} setPlanModal={setPlanModal} />}
 
@@ -11271,6 +12167,24 @@ function notificacionesDe(data, user) {
         texto: s.descripcion || "", fecha: s.f, hora: s.h || "",
       }));
   }
+  /* Material: al supervisor le llega cada pedido nuevo (lo lleva a
+     Pendientes de compra); al técnico, cuando su material se compró o se
+     entregó (lo lleva a la orden). */
+  if (user.rol === "admin" || user.rol === "tecnico") {
+    const sedes = user.rol === "tecnico" ? (user.sedeIds || []) : null;
+    necesidadesDe(data, sedes).forEach(({ n, orden, tipo }) => {
+      const base = { codigo: orden.codigo, sedeId: orden.sedeId, material: true };
+      if (user.rol === "admin" && n.estado === "pendiente" && n.usuarioId !== user.id && n.fecha >= ventana) {
+        lista.push({ ...base, id: `matreq|${n.id}`, texto: `Material pedido: ${textoNecesidad(n)}`,
+          fecha: n.fecha, hora: n.hora || "", tab: "bodega", compras: true });
+      }
+      if (user.rol === "tecnico" && orden.tecnicoId === user.id && ["comprado", "entregado"].includes(n.estado)
+        && n.fechaEstado && n.fechaEstado >= ventana) {
+        lista.push({ ...base, id: `mat|${n.id}|${n.estado}`, texto: `Material ${ESTADOS_NECESIDAD[n.estado].label.toLowerCase()}: ${textoNecesidad(n)}`,
+          fecha: n.fechaEstado, hora: n.horaEstado || "", tab: "mias", orden: { tipo, id: orden.id } });
+      }
+    });
+  }
   return lista.sort((a, b) => `${b.fecha} ${b.hora}`.localeCompare(`${a.fecha} ${a.hora}`));
 }
 
@@ -11340,7 +12254,7 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
     marcar([n.id]);
     if (esSolicitante) { setDetalle(n); return; }
     setAbierto(false);
-    setDestino((d) => ({ tab: "programacion", ts: (d?.ts || 0) + 1, id: n.id }));
+    setDestino((d) => ({ tab: n.tab || "programacion", ts: (d?.ts || 0) + 1, id: n.id, orden: n.orden, compras: n.compras }));
   };
   const calificar = (id, patch) =>
     persist((data) => ({ ...data, solicitudes: data.solicitudes.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
@@ -11352,12 +12266,13 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
   const fila = (x, leida) => (
     <button key={x.id} onClick={() => abrirDetalle(x)}
       className="w-full text-left border rounded-md p-2.5 hover:shadow-sm transition-shadow"
-      style={{ ...cardStyle, opacity: leida ? 0.65 : 1, borderLeft: `3px solid ${esSolicitante ? COLORS.verde : (CRITICIDAD[x.criticidad]?.color || COLORS.slate)}` }}>
+      style={{ ...cardStyle, opacity: leida ? 0.65 : 1, borderLeft: `3px solid ${esSolicitante ? COLORS.verde : x.material ? COLORS.orange : (CRITICIDAD[x.criticidad]?.color || COLORS.slate)}` }}>
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-1.5 flex-wrap">
           {!leida && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: COLORS.rojo }} />}
           <span className="text-[11px] font-bold" style={cOrange}>{x.codigo}</span>
           {x.esServicio && <TipoChip tipo="servicio" />}
+          {x.material && <Chip color={COLORS.orange}>Material</Chip>}
           {!esSolicitante && x.criticidad && CRITICIDAD[x.criticidad] && (
             <Chip color={CRITICIDAD[x.criticidad].color}>{CRITICIDAD[x.criticidad].label}</Chip>
           )}
@@ -11379,12 +12294,12 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
       {children}
 
       {abierto && !detalle && (
-        <Modal title={esSolicitante ? "Solicitudes finalizadas" : "Solicitudes nuevas"} onClose={() => setAbierto(false)} wide>
+        <Modal title={esSolicitante ? "Solicitudes finalizadas" : "Notificaciones"} onClose={() => setAbierto(false)} wide>
           <div className="flex items-center justify-between gap-2 mb-3">
             <p className="text-xs" style={cSlate}>
               {sinLeer.length === 0
                 ? "No tienes notificaciones sin leer."
-                : `${sinLeer.length} sin leer. ${esSolicitante ? "Toca una para ver el detalle y calificarla." : "Toca una para ir a Programación."}`}
+                : `${sinLeer.length} sin leer. ${esSolicitante ? "Toca una para ver el detalle y calificarla." : "Toca una para abrirla."}`}
             </p>
             {sinLeer.length > 0 && (
               <button onClick={() => marcar(sinLeer.map((n) => n.id))} className="text-[11px] font-semibold shrink-0" style={cOrange}>
