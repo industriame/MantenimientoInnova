@@ -5111,6 +5111,8 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
   // Bodega de la sede: con existencias se usa; sin existencias se pide
   const conStock = stock.filter((a) => Number(a.cantidad) > 0);
   const sinExistencias = stock.filter((a) => !(Number(a.cantidad) > 0));
+  // Material pedido que aún no llega: la orden no se puede finalizar
+  const sinEntregar = (item.necesidades || []).filter((n) => ["pendiente", "comprado"].includes(n.estado));
   const checklistPend = esPrev ? avanceChecklist(item.checklist).pendientes : 0;
   const mats = materiales.filter((m) => (m.nombre || "").trim());
   const conFecha = tipo === "material" || tipo === "espera";
@@ -5125,7 +5127,7 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
     .filter((c) => c.art) : [];
   const valido = !!tipo && !enviando && (
     tipo === "material" ? mats.length > 0
-    : tipo === "finalizada" ? !!texto.trim() && checklistPend === 0
+    : tipo === "finalizada" ? !!texto.trim() && checklistPend === 0 && sinEntregar.length === 0
     : tipo === "avance" ? !!texto.trim() || consumosSel.length > 0
     : !!texto.trim());
   // Pedidos de la orden que se cargan ahora: quedan entregados y consumidos
@@ -5295,6 +5297,19 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
           <SelectorArticulo articulos={conStock.filter((a) => !usados.some((u) => u.stockId === a.id))} value=""
             textoBoton="Agregar material de bodega…"
             onChange={(id) => setUsados([...usados, { stockId: id, cantidad: "1", usar: true }])} />
+        </div>
+      )}
+      {tipo === "finalizada" && sinEntregar.length > 0 && (
+        <div className="rounded-md p-2 text-[11px]" style={{ background: `${COLORS.rojo}0D`, color: COLORS.rojo }}>
+          <p className="font-semibold">No se puede finalizar: hay material pedido que aún no se entrega.</p>
+          <ul className="mt-1 space-y-0.5">
+            {sinEntregar.map((n) => (
+              <li key={n.id}>· {textoNecesidad(n)} — {ESTADOS_NECESIDAD[n.estado].label.toLowerCase()}</li>
+            ))}
+          </ul>
+          <p className="mt-1" style={cSlate}>
+            Cuando el supervisor lo marque como entregado entra a la bodega y aquí podrás cargarlo. Si ya no hace falta, el supervisor lo cancela en Bodega → Pendientes de compra.
+          </p>
         </div>
       )}
       {tipo === "finalizada" && checklistPend > 0 && (
