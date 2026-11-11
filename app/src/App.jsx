@@ -3327,22 +3327,77 @@ function leerRegistro(obs) {
   return entradas;
 }
 
+/* Vuelve a armar el texto del registro a partir de sus entradas. */
+function textoRegistro(entradas) {
+  return entradas.map((e) => (e.anterior ? e.texto
+    : `${e.fecha} · ${e.autor} · ${e.etiqueta ? `[${e.etiqueta}] ` : ""}${String(e.texto || "").replace(/\s*\n+\s*/g, " ").trim()}`)).join("\n");
+}
+
 /* Registro de la orden en pantalla: una sola lista compacta, de lo más
-   reciente a lo más antiguo, una línea por anotación. */
-function RegistroOrden({ texto, vacio = "Sin anotaciones todavía.", alto = 200 }) {
-  const entradas = leerRegistro(texto).reverse();
+   reciente a lo más antiguo, una línea por anotación. Con onEditar (el
+   supervisor en modo corrección) cada línea se puede corregir o borrar. */
+function RegistroOrden({ texto, vacio = "Sin anotaciones todavía.", alto = 200, onEditar }) {
+  const [editando, setEditando] = useState(null);   // { i, texto, etiqueta }
+  const [borrando, setBorrando] = useState(null);
+  const todas = leerRegistro(texto);
+  const entradas = todas.map((e, i) => ({ ...e, i })).reverse();
   if (!entradas.length) return <p className="text-[11px] text-left" style={cSlate}>{vacio}</p>;
+  const guardar = (nuevas) => { onEditar(textoRegistro(nuevas)); setEditando(null); setBorrando(null); };
+  const icono = "p-0.5 shrink-0 opacity-60 hover:opacity-100";
   return (
-    <div className="border rounded-md bg-white text-left overflow-y-auto" style={{ borderColor: COLORS.line, maxHeight: alto }}>
-      {entradas.map((e, i) => {
+    <div className="border rounded-md bg-white text-left overflow-y-auto" style={{ borderColor: COLORS.line, maxHeight: onEditar ? alto * 1.6 : alto }}>
+      {entradas.map((e, k) => {
         const et = etiquetaDe(e.etiqueta);
+        const borde = { borderTop: k ? `1px solid ${COLORS.line}` : "none" };
+        if (editando?.i === e.i) {
+          return (
+            <div key={e.i} className="px-2 py-1.5 space-y-1" style={{ ...borde, background: COLORS.cream }}>
+              <p className="text-[10px]" style={cSlate}>{e.anterior ? "Anterior" : `${e.fecha} · ${e.autor}`}</p>
+              {!e.anterior && (
+                <select value={editando.etiqueta} onChange={(ev) => setEditando({ ...editando, etiqueta: ev.target.value })}
+                  className="w-full border rounded-md px-1.5 py-1 text-[11px] bg-white" style={inputStyle}>
+                  <option value="">Sin etiqueta</option>
+                  {Object.values(ETIQUETAS_REGISTRO).map((x) => <option key={x.label} value={x.label}>{x.label}</option>)}
+                </select>
+              )}
+              <textarea autoFocus value={editando.texto} onChange={(ev) => setEditando({ ...editando, texto: ev.target.value })} rows={2}
+                className={`${inputCls} resize-none bg-white text-xs`} style={inputStyle} />
+              <div className="flex gap-1.5">
+                <button type="button" onClick={() => setEditando(null)} className="flex-1 py-1 rounded-md text-[11px] font-semibold border bg-white"
+                  style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>Cancelar</button>
+                <button type="button" disabled={!editando.texto.trim()}
+                  onClick={() => guardar(todas.map((x, j) => (j === e.i ? { ...x, texto: editando.texto.trim(), etiqueta: editando.etiqueta } : x)))}
+                  className="flex-1 py-1 rounded-md text-[11px] font-semibold text-white disabled:opacity-40" style={{ background: COLORS.charcoal }}>
+                  Guardar corrección
+                </button>
+              </div>
+            </div>
+          );
+        }
         return (
-          <p key={i} className="px-2 py-1 text-[11px] leading-snug break-words whitespace-pre-wrap"
-            style={{ ...cChar, borderTop: i ? `1px solid ${COLORS.line}` : "none" }}>
-            <span style={cSlate}>{e.anterior ? "Anterior" : `${e.fecha.slice(0, 5)} ${e.fecha.slice(11)} · ${e.autor.split(" ")[0]}`} · </span>
-            {e.etiqueta && <b style={{ color: et?.color || COLORS.slate }}>[{e.etiqueta}] </b>}
-            {e.texto}
-          </p>
+          <div key={e.i} className="flex items-start gap-1 px-2 py-1" style={borde}>
+            <p className="flex-1 min-w-0 text-[11px] leading-snug break-words whitespace-pre-wrap" style={cChar}>
+              <span style={cSlate}>{e.anterior ? "Anterior" : `${e.fecha.slice(0, 5)} ${e.fecha.slice(11)} · ${e.autor.split(" ")[0]}`} · </span>
+              {e.etiqueta && <b style={{ color: et?.color || COLORS.slate }}>[{e.etiqueta}] </b>}
+              {e.texto}
+            </p>
+            {onEditar && (borrando === e.i ? (
+              <span className="flex items-center gap-1 shrink-0 text-[10px] font-semibold">
+                <button type="button" onClick={() => guardar(todas.filter((_, j) => j !== e.i))} style={{ color: COLORS.rojo }}>Borrar</button>
+                <button type="button" onClick={() => setBorrando(null)} style={cSlate}>No</button>
+              </span>
+            ) : (
+              <>
+                <button type="button" title="Corregir" className={icono}
+                  onClick={() => { setBorrando(null); setEditando({ i: e.i, texto: e.texto, etiqueta: e.etiqueta || "" }); }}>
+                  <Pencil size={11} color={COLORS.slate} />
+                </button>
+                <button type="button" title="Borrar" className={icono} onClick={() => { setEditando(null); setBorrando(e.i); }}>
+                  <Trash2 size={11} color={COLORS.slate} />
+                </button>
+              </>
+            ))}
+          </div>
         );
       })}
     </div>
@@ -5824,7 +5879,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
           </Field>}
 
           <Field label="Registro de la orden">
-            <RegistroOrden texto={item.observaciones} />
+            <RegistroOrden texto={item.observaciones}
+              onEditar={corrige ? (t) => acciones.updateActividad(item, { observaciones: t }, { sinRegistro: true }) : undefined} />
           </Field>
           <RegistrarAvance item={item} acciones={acciones} stock={stockSede} corrige={corrige}
             onFinalizada={() => { if (onCompletada) onCompletada(); else setOpen(false); }} />
@@ -9604,7 +9660,7 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
         ...o,
         necesidades: (o.necesidades || []).map((n) => (n.id !== r.n.id ? n : {
           ...n, ...extra, estado, fechaEstado: fmtDate(ahora), horaEstado: fmtHora(ahora), actualizadoPor: user?.id || "",
-          ...(ingreso ? { stockId, nombreBodega: ingreso.nombre } : {}),
+          ...(ingreso ? { stockId, nombreBodega: ingreso.nombre, ingresoNuevo: !ingreso.stockId } : {}),
         })),
         observaciones: conRegistro(o.observaciones, [linea]),
       })),
@@ -9621,6 +9677,7 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
         : [...(d.stock || []), {
           id: stockId, sedeId: r.orden.sedeId, nombre: ingreso.nombre, unidad: ingreso.unidad || "u",
           cantidad: ingreso.cantidad, costoUnitario: ingreso.valor > 0 ? Math.round((ingreso.valor / ingreso.cantidad) * 100) / 100 : 0, minimo: 0,
+          creadoDesde: { codigo: r.orden.codigo || "", fecha: fmtDate(ahora), usuarioId: user?.id || "" },
         }] } : {}),
     }));
     setForm(null);
@@ -9723,6 +9780,40 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
   );
 }
 
+/* Bodega → Ingresos: lo que entró a bodega desde Pendientes de compra.
+   Dice si se creó un artículo nuevo o se sumó a uno existente. */
+function IngresosBodega({ data, sedes, editable }) {
+  const filas = necesidadesDe(data, sedes.map((s) => s.id))
+    .filter((r) => r.n.estado === "entregado" && r.n.nombreBodega)
+    .sort((a, b) => `${b.n.fechaEstado} ${b.n.horaEstado || ""}`.localeCompare(`${a.n.fechaEstado} ${a.n.horaEstado || ""}`));
+  return (
+    <div className="mt-4">
+      <p className="text-xs mb-3" style={cSlate}>Material que ingresó a bodega al marcar “Entregado” un pedido de una orden.</p>
+      {filas.length === 0 ? <Empty>Todavía no hay ingresos por compra.</Empty> : (
+        <div className="space-y-2">
+          {filas.map((r) => (
+            <div key={r.n.id} className="border rounded-md p-2.5 bg-white text-left" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${COLORS.verde}` }}>
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-sm font-semibold break-words min-w-0" style={cChar}>
+                  {r.n.nombreBodega} <span className="font-normal" style={cSlate}>+{r.n.cantidadComprada ?? r.n.cantidad} {r.n.unidad || "u"}</span>
+                </p>
+                <Chip color={r.n.ingresoNuevo ? "#3B6EA5" : COLORS.verde}>{r.n.ingresoNuevo ? "Artículo nuevo" : "Sumado a existente"}</Chip>
+              </div>
+              <p className="text-[10px] mt-0.5" style={cSlate}>
+                {sedeNombre(data.sedes, r.orden.sedeId)} · {r.n.fechaEstado}{r.n.horaEstado ? ` ${r.n.horaEstado}` : ""} · {usuarioNombre(data.usuarios, r.n.actualizadoPor)}
+                {editable && r.n.valorCompra > 0 ? ` · ${money(r.n.valorCompra)}` : ""}
+              </p>
+              <p className="text-[10px]" style={cSlate}>
+                Pedido en <b style={cOrange}>{r.orden.codigo}</b> como “{r.n.nombre}” por {usuarioNombre(data.usuarios, r.n.usuarioId)}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* Bodega: inventario por sede y, aparte, lo que falta comprar. */
 function VistaBodega({ data, persist, sedes, editable, user, foco }) {
   const [vista, setVista] = useState(foco?.compras ? "compras" : "inventario");
@@ -9738,10 +9829,12 @@ function VistaBodega({ data, persist, sedes, editable, user, foco }) {
     <div>
       <div className="mt-4 inline-flex w-full sm:w-auto gap-1 p-1 rounded-lg" style={{ background: COLORS.cream }}>
         {op("inventario", "Inventario")}
+        {op("ingresos", "Ingresos")}
         {op("compras", <>Pendientes de compra{pendientes > 0 && <span className="min-w-4 h-4 px-1 rounded-full text-[9px] font-bold text-white flex items-center justify-center" style={{ background: COLORS.orange }}>{pendientes}</span>}</>)}
       </div>
       {vista === "compras"
         ? <PendientesCompra data={data} persist={persist} sedes={sedes} editable={editable} user={user} />
+        : vista === "ingresos" ? <IngresosBodega data={data} sedes={sedes} editable={editable} />
         : <InventarioBodega data={data} persist={persist} sedes={sedes} editable={editable} />}
     </div>
   );
@@ -9830,6 +9923,11 @@ function InventarioBodega({ data, persist, sedes, editable }) {
   ) : (
     <span className="break-words font-semibold" style={cChar}>{a.nombre}</span>
   );
+  // Artículos que nacieron de una compra pedida en una orden
+  const chipOrigen = (a) => {
+    const o = a.registros.find((x) => x.creadoDesde)?.creadoDesde;
+    return o ? <span className="block mt-0.5"><Chip color="#3B6EA5">Creado por compra · {o.codigo} · {o.fecha}</Chip></span> : null;
+  };
   const campoUnidad = (a, w) => editable ? (
     <CampoVivo value={a.unidad} onCommit={(v) => setRegistros(ids(a), { unidad: v })}
       className={cellInput} style={{ borderColor: COLORS.line, width: w }} />
@@ -9923,7 +10021,7 @@ function InventarioBodega({ data, persist, sedes, editable }) {
           return (
             <div key={a.key} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${est.color}` }}>
               <div className="flex items-start gap-2">
-                <div className="flex-1 min-w-0 text-sm">{campoNombre(a)}</div>
+                <div className="flex-1 min-w-0 text-sm">{campoNombre(a)}{chipOrigen(a)}</div>
                 {editable && <DeleteBtn onConfirm={() => borrar(a)} />}
               </div>
               <div className="flex items-center justify-between gap-2 mt-1.5">
@@ -9978,7 +10076,7 @@ function InventarioBodega({ data, persist, sedes, editable }) {
               const est = META_ESTADO[a.estado];
               return (
                 <tr key={a.key} style={{ background: i % 2 ? COLORS.paper : "white", borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className={td} style={{ minWidth: 200 }}>{campoNombre(a)}</td>
+                  <td className={td} style={{ minWidth: 200 }}>{campoNombre(a)}{chipOrigen(a)}</td>
                   <td className={td}>{campoUnidad(a, 64)}</td>
                   {editable && <td className={td}>{campoCosto(a, 74)}</td>}
                   {columnas.map((s) => (
