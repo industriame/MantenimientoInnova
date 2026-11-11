@@ -1713,6 +1713,7 @@ function useAcciones(data, persist, usuario) {
       const lineas = [
         ...movimientos.map((m) => lineaRegistro(autor, `${m.campo}: ${m.antes} → ${m.despues}`)),
         ...((coment?.texto || "").trim() ? [lineaRegistro(autor, coment.texto, coment.etiqueta)] : []),
+        ...(opciones.consumos?.length ? [lineaRegistro(autor, opciones.consumos.map((c) => `${c.art.nombre} × ${c.cantidad} ${c.art.unidad || "u"}`).join("; "), "consumo")] : []),
       ];
       /* Pedidos de material: se suman (o actualizan) sobre la lista más
          reciente de la orden, igual que el registro. */
@@ -3299,6 +3300,7 @@ const ETIQUETAS_REGISTRO = {
   resolucion: { label: "Resolución", color: COLORS.verde },
   finalizada: { label: "Finalizada", color: COLORS.verde },
   compra: { label: "Compra", color: "#3B6EA5" },
+  consumo: { label: "Material usado", color: COLORS.verde },
   correccion: { label: "Corrección", color: COLORS.rojo },
 };
 const ETIQUETAS_TECNICO = ["avance", "material", "servicio", "espera"];
@@ -3359,7 +3361,7 @@ function registroHTML(texto, esc) {
 
 /* Lista de materiales que hacen falta: del kardex (aunque no haya
    existencias) o escritos a mano si no están, cada uno con cantidad y unidad. */
-function ListaMateriales({ materiales = [], onChange, stock = [] }) {
+function ListaMateriales({ materiales = [], onChange, stock = [], textoBoton }) {
   const setMat = (i, p) => onChange(materiales.map((m, j) => (j === i ? { ...m, ...p } : m)));
   const agregar = (m) => onChange([...materiales, { cantidad: "1", ...m }]);
   return (
@@ -3384,7 +3386,7 @@ function ListaMateriales({ materiales = [], onChange, stock = [] }) {
             </div>
           ))}
           <SelectorArticulo articulos={stock} value=""
-            textoBoton={materiales.length ? "Agregar otro material…" : "Buscar en el kardex o escribir el material…"}
+            textoBoton={materiales.length ? "Agregar otro material…" : textoBoton || "Buscar en el kardex o escribir el material…"}
             onChange={(id) => { const a = stock.find((x) => x.id === id); if (a) agregar({ stockId: a.id, nombre: a.nombre, unidad: a.unidad || "u" }); }}
             onNuevo={(nombre) => agregar({ nombre, unidad: "u" })} />
         </div>
@@ -3599,7 +3601,7 @@ function SelectorArticulo({ articulos, value, onChange, onNuevo, textoBoton }) {
   );
 }
 
-function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
+function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly, soloLista }) {
   const [sel, setSel] = useState("");
   const [cant, setCant] = useState(1);
 
@@ -3610,6 +3612,8 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
   const numCant = Number(String(cant).replace(",", "."));
   const excede = art && numCant > art.cantidad;
   const valido = art && numCant > 0;
+  // El técnico carga el material desde "Registrar avance"; aquí solo lo ve
+  if (soloLista && consumos.length === 0) return null;
 
   return (
     <div>
@@ -3632,7 +3636,7 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
         </div>
       )}
 
-      {!readOnly && (
+      {!readOnly && !soloLista && (
         <>
           {stockSede.length > 0 && (
             <>
@@ -5104,16 +5108,36 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
     ) : null;
   }
 
+  // Bodega de la sede: con existencias se usa; sin existencias se pide
+  const conStock = stock.filter((a) => Number(a.cantidad) > 0);
+  const sinExistencias = stock.filter((a) => !(Number(a.cantidad) > 0));
   const checklistPend = esPrev ? avanceChecklist(item.checklist).pendientes : 0;
   const mats = materiales.filter((m) => (m.nombre || "").trim());
   const conFecha = tipo === "material" || tipo === "espera";
   const fechaActual = item.fechaProgramada || "";
   const cambiaFecha = conFecha && nuevaFecha && nuevaFecha !== fechaActual;
 
+  // Material usado de bodega: se puede cargar en cualquier registro de trabajo
+  const conUsados = ["avance", "material", "espera", "finalizada"].includes(tipo);
+  const consumosSel = conUsados ? usados
+    .filter((u) => u.usar && cantNum(u.cantidad) > 0)
+    .map((u) => ({ art: stock.find((a) => a.id === u.stockId), cantidad: cantNum(u.cantidad), necId: u.necId }))
+    .filter((c) => c.art) : [];
   const valido = !!tipo && !enviando && (
     tipo === "material" ? mats.length > 0
     : tipo === "finalizada" ? !!texto.trim() && checklistPend === 0
+    : tipo === "avance" ? !!texto.trim() || consumosSel.length > 0
     : !!texto.trim());
+  // Pedidos de la orden que se cargan ahora: quedan entregados y consumidos
+  const opcionesConsumo = () => {
+    const necCargadas = new Set(consumosSel.map((c) => c.necId).filter(Boolean));
+    return {
+      consumos: consumosSel,
+      ...(necCargadas.size ? { mapNecesidades: (n) => (necCargadas.has(n.id)
+        ? { ...n, consumido: true, ...(["pendiente", "comprado"].includes(n.estado) ? { estado: "entregado", fechaEstado: fmtDate(new Date()), horaEstado: fmtHora(new Date()) } : {}) }
+        : n) } : {}),
+    };
+  };
 
   const limpiar = (msg) => {
     setTipo(""); setTexto(""); setMateriales([]); setMotivo(MOTIVOS_ESPERA[0]);
@@ -5140,17 +5164,8 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
       if (tipo === "finalizada") {
         const patch = { estado: "completada", ...selloCierre(item, usuarioId) };
         if (!esPrev) patch.resolucion = t;
-        const consumos = usados
-          .filter((u) => u.usar && cantNum(u.cantidad) > 0)
-          .map((u) => ({ art: stock.find((a) => a.id === u.stockId), cantidad: cantNum(u.cantidad), necId: u.necId }))
-          .filter((c) => c.art);
-        const necCargadas = new Set(consumos.map((c) => c.necId).filter(Boolean));
         await acciones.updateActividad(item, patch, {
-          comentario: { texto: t, etiqueta: "finalizada" },
-          consumos,
-          ...(necCargadas.size ? { mapNecesidades: (n) => (necCargadas.has(n.id)
-            ? { ...n, consumido: true, ...(["pendiente", "comprado"].includes(n.estado) ? { estado: "entregado", fechaEstado: fmtDate(new Date()), horaEstado: fmtHora(new Date()) } : {}) }
-            : n) } : {}),
+          comentario: { texto: t, etiqueta: "finalizada" }, ...opcionesConsumo(),
         });
         limpiar("");
         onFinalizada?.();
@@ -5177,8 +5192,14 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
         unidad: (m.unidad || "u").trim(), stockId: m.stockId || "",
         estado: "pendiente", fecha: fmtDate(new Date()), hora: fmtHora(new Date()), usuarioId,
       })) : undefined;
+      const conc = opcionesConsumo();
+      if (necesidades && conc.mapNecesidades) {
+        // Los pedidos nuevos no se tocan; solo los que se cargan ahora
+        const m = conc.mapNecesidades;
+        conc.mapNecesidades = (n) => (necesidades.some((x) => x.id === n.id) ? n : m(n));
+      }
       await acciones.updateActividad(item, patch, {
-        comentario: { texto: cuerpo, etiqueta: tipo }, necesidades,
+        comentario: cuerpo ? { texto: cuerpo, etiqueta: tipo } : null, necesidades, ...conc,
       });
       limpiar(tipo === "material" ? "Material pedido: quedó en Pendientes de compra" : "Registrado en la orden");
     } finally {
@@ -5189,13 +5210,13 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
   /* Al elegir Finalizar se proponen los materiales pedidos en la orden que
      están en el kardex (y no se cancelaron ni se cargaron ya). */
   const proponerUsados = () => setUsados((item.necesidades || [])
-    .filter((n) => n.stockId && n.estado !== "cancelado" && !n.consumido && stock.some((a) => a.id === n.stockId))
+    .filter((n) => n.stockId && n.estado !== "cancelado" && !n.consumido && conStock.some((a) => a.id === n.stockId))
     .map((n) => ({ necId: n.id, stockId: n.stockId, cantidad: String(n.cantidad || 1), usar: true })));
   const boton = (k) => {
     const e = ETIQUETAS_REGISTRO[k];
     const on = tipo === k;
     return (
-      <button key={k} type="button" onClick={() => { setTipo(on ? "" : k); setConfirmar(false); if (!on && k === "finalizada") proponerUsados(); }}
+      <button key={k} type="button" onClick={() => { setTipo(on ? "" : k); setConfirmar(false); if (!on && k === "finalizada" && !usados.length) proponerUsados(); }}
         className="text-[11px] font-semibold px-2.5 py-1.5 rounded-md"
         style={on ? { background: e.color, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.charcoal, background: "white" }}>
         {k === "finalizada" ? "Finalizar" : e.label}
@@ -5218,7 +5239,14 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
       <div className="flex gap-1 flex-wrap">{tipos.map(boton)}</div>
 
       {tipo === "material" && (
-        <ListaMateriales materiales={materiales} onChange={setMateriales} stock={stock} />
+        <>
+          <p className="text-[11px]" style={cSlate}>
+            Solo lo que <b>no hay en bodega</b> o no está en el kardex: queda en Pendientes de compra.
+            Lo que sí hay en bodega cárgalo abajo, en “Material usado de bodega”.
+          </p>
+          <ListaMateriales materiales={materiales} onChange={setMateriales}
+            stock={sinExistencias} textoBoton="Buscar en el kardex (sin existencias) o escribir el material…" />
+        </>
       )}
       {tipo === "espera" && (
         <select value={motivo} onChange={(e) => setMotivo(e.target.value)} className={inputCls} style={inputStyle}>
@@ -5231,11 +5259,11 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
           El supervisor completa proveedor y presupuesto y lo envía a aprobación del cliente.
         </p>
       )}
-      {tipo === "finalizada" && stock.length > 0 && (
+      {conUsados && conStock.length > 0 && (
         <div className="rounded-md p-2 space-y-1.5 bg-white border" style={bLine}>
           <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Material usado de bodega</p>
           {usados.length === 0 && (
-            <p className="text-[11px]" style={cSlate}>Si usaste material de bodega, agrégalo: se descuenta al finalizar.</p>
+            <p className="text-[11px]" style={cSlate}>Si usaste material de bodega, agrégalo: se descuenta al registrar.</p>
           )}
           {usados.map((u, i) => {
             const art = stock.find((a) => a.id === u.stockId);
@@ -5264,7 +5292,7 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
               </div>
             );
           })}
-          <SelectorArticulo articulos={stock.filter((a) => !usados.some((u) => u.stockId === a.id))} value=""
+          <SelectorArticulo articulos={conStock.filter((a) => !usados.some((u) => u.stockId === a.id))} value=""
             textoBoton="Agregar material de bodega…"
             onChange={(id) => setUsados([...usados, { stockId: id, cantidad: "1", usar: true }])} />
         </div>
@@ -5814,7 +5842,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               servicios solo aparecía la opción de material nuevo. */}
           <ConsumoStock item={item} stockSede={stockSede}
             onRegistrar={registrarConsumo} onQuitar={quitarConsumo}
-            readOnly={item.estado === "completada"} />
+            readOnly={item.estado === "completada"} soloLista={!corrige} />
 
           {esServ && (
             <div className="rounded-md p-2.5 flex items-center justify-between gap-2" style={{ background: COLORS.cream }}>
