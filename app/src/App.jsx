@@ -1722,21 +1722,35 @@ function useAcciones(data, persist, usuario) {
         if (opciones.mapNecesidades) nec = nec.map(opciones.mapNecesidades);
         return opciones.necesidades?.length || opciones.mapNecesidades ? { necesidades: nec } : {};
       };
+      /* Consumo de bodega en el mismo guardado (al finalizar): descuenta
+         existencias y anota el consumo en la orden de una sola vez. */
+      const consumos = (opciones.consumos || []).map((c) => ({
+        id: uid("con"), stockId: c.art.id, nombre: c.art.nombre, unidad: c.art.unidad,
+        cantidad: c.cantidad, costoUnitario: c.art.costoUnitario, fecha: fmtDate(new Date()),
+      }));
       const aplicar = (x, p) => ({
         ...x, ...p, ...conNecesidades(x),
+        ...(consumos.length ? { consumos: [...(x.consumos || []), ...consumos] } : {}),
         ...(lineas.length ? { observaciones: conRegistro(x.observaciones, lineas) } : {}),
+      });
+      const persistir = (fn) => persist((d) => {
+        const r = fn(d);
+        if (!consumos.length) return r;
+        const resta = {};
+        consumos.forEach((c) => { resta[c.stockId] = (resta[c.stockId] || 0) + c.cantidad; });
+        return { ...r, stock: (r.stock || []).map((a) => (resta[a.id] ? { ...a, cantidad: Math.max(0, a.cantidad - resta[a.id]) } : a)) };
       });
 
       if (item.tipo === "preventivo") {
-        return persist((data) => ({ ...data, ordenes: data.ordenes.map((o) => (o.id === item.id ? aplicar(o, conLog) : o)) }));
+        return persistir((data) => ({ ...data, ordenes: data.ordenes.map((o) => (o.id === item.id ? aplicar(o, conLog) : o)) }));
       }
       if (item.tipo === "servicio") {
         // El servicio guarda su fecha en "fecha"; la agenda la expone como fechaProgramada
         const p = { ...conLog };
         if (p.fechaProgramada !== undefined) { p.fecha = p.fechaProgramada; delete p.fechaProgramada; }
-        return persist((data) => ({ ...data, servicios: data.servicios.map((x) => (x.id === item.id ? aplicar(x, p) : x)) }));
+        return persistir((data) => ({ ...data, servicios: data.servicios.map((x) => (x.id === item.id ? aplicar(x, p) : x)) }));
       }
-      return persist((data) => ({ ...data, solicitudes: data.solicitudes.map((s) => (s.id === item.id ? aplicar(s, conLog) : s)) }));
+      return persistir((data) => ({ ...data, solicitudes: data.solicitudes.map((s) => (s.id === item.id ? aplicar(s, conLog) : s)) }));
     },
   }), [data, persist, usuario]);
 }
@@ -5032,6 +5046,8 @@ function selloCierre(item, usuarioId) {
   return p;
 }
 
+const cantNum = (v) => Number(String(v ?? "").replace(",", ".")) || 0;
+
 /* Motivos para dejar una orden en espera (la falta de material tiene su
    propia opción, porque además genera el pedido de compra). */
 const MOTIVOS_ESPERA = [
@@ -5077,6 +5093,8 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
   const [confirmar, setConfirmar] = useState(false);
   const [enviando, setEnviando] = useState(false);
   const [hecho, setHecho] = useState("");
+  // Material de bodega que se descuenta al finalizar
+  const [usados, setUsados] = useState([]);
 
   if (!tipos.length) {
     return item.estado === "pendiente" && !corrige ? (
@@ -5099,7 +5117,7 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
 
   const limpiar = (msg) => {
     setTipo(""); setTexto(""); setMateriales([]); setMotivo(MOTIVOS_ESPERA[0]);
-    setNuevaFecha(""); setConfirmar(false); setHecho(msg);
+    setNuevaFecha(""); setConfirmar(false); setUsados([]); setHecho(msg);
     setTimeout(() => setHecho(""), 2500);
   };
 
@@ -5122,7 +5140,18 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
       if (tipo === "finalizada") {
         const patch = { estado: "completada", ...selloCierre(item, usuarioId) };
         if (!esPrev) patch.resolucion = t;
-        await acciones.updateActividad(item, patch, { comentario: { texto: t, etiqueta: "finalizada" } });
+        const consumos = usados
+          .filter((u) => u.usar && cantNum(u.cantidad) > 0)
+          .map((u) => ({ art: stock.find((a) => a.id === u.stockId), cantidad: cantNum(u.cantidad), necId: u.necId }))
+          .filter((c) => c.art);
+        const necCargadas = new Set(consumos.map((c) => c.necId).filter(Boolean));
+        await acciones.updateActividad(item, patch, {
+          comentario: { texto: t, etiqueta: "finalizada" },
+          consumos,
+          ...(necCargadas.size ? { mapNecesidades: (n) => (necCargadas.has(n.id)
+            ? { ...n, consumido: true, ...(["pendiente", "comprado"].includes(n.estado) ? { estado: "entregado", fechaEstado: fmtDate(new Date()), horaEstado: fmtHora(new Date()) } : {}) }
+            : n) } : {}),
+        });
         limpiar("");
         onFinalizada?.();
         return;
@@ -5157,11 +5186,16 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
     }
   };
 
+  /* Al elegir Finalizar se proponen los materiales pedidos en la orden que
+     están en el kardex (y no se cancelaron ni se cargaron ya). */
+  const proponerUsados = () => setUsados((item.necesidades || [])
+    .filter((n) => n.stockId && n.estado !== "cancelado" && !n.consumido && stock.some((a) => a.id === n.stockId))
+    .map((n) => ({ necId: n.id, stockId: n.stockId, cantidad: String(n.cantidad || 1), usar: true })));
   const boton = (k) => {
     const e = ETIQUETAS_REGISTRO[k];
     const on = tipo === k;
     return (
-      <button key={k} type="button" onClick={() => { setTipo(on ? "" : k); setConfirmar(false); }}
+      <button key={k} type="button" onClick={() => { setTipo(on ? "" : k); setConfirmar(false); if (!on && k === "finalizada") proponerUsados(); }}
         className="text-[11px] font-semibold px-2.5 py-1.5 rounded-md"
         style={on ? { background: e.color, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.charcoal, background: "white" }}>
         {k === "finalizada" ? "Finalizar" : e.label}
@@ -5196,6 +5230,44 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
           La orden deja de ser correctivo (sale de los indicadores) y pasa a Servicios con el mismo número.
           El supervisor completa proveedor y presupuesto y lo envía a aprobación del cliente.
         </p>
+      )}
+      {tipo === "finalizada" && stock.length > 0 && (
+        <div className="rounded-md p-2 space-y-1.5 bg-white border" style={bLine}>
+          <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Material usado de bodega</p>
+          {usados.length === 0 && (
+            <p className="text-[11px]" style={cSlate}>Si usaste material de bodega, agrégalo: se descuenta al finalizar.</p>
+          )}
+          {usados.map((u, i) => {
+            const art = stock.find((a) => a.id === u.stockId);
+            if (!art) return null;
+            const set = (p) => setUsados(usados.map((x, j) => (j === i ? { ...x, ...p } : x)));
+            const excede = u.usar && cantNum(u.cantidad) > art.cantidad;
+            return (
+              <div key={i}>
+                <div className="flex items-center gap-1.5">
+                  <input type="checkbox" checked={u.usar} onChange={(e) => set({ usar: e.target.checked })} className="shrink-0" />
+                  <div className="flex-1 min-w-0 text-left">
+                    <p className="text-xs font-semibold break-words" style={{ ...cChar, opacity: u.usar ? 1 : 0.5 }}>{art.nombre}</p>
+                    <p className="text-[10px]" style={cSlate}>{u.necId ? "Pedido en la orden" : "Agregado"} · en bodega: {art.cantidad} {art.unidad}</p>
+                  </div>
+                  <input type="text" inputMode="decimal" value={u.cantidad} disabled={!u.usar}
+                    onChange={(e) => set({ cantidad: e.target.value.replace(/[^0-9.,]/g, "") })}
+                    className="w-14 border rounded-md px-1.5 py-1.5 text-xs outline-none bg-white disabled:opacity-50" style={inputStyle} />
+                  <span className="text-[10px] w-8" style={cSlate}>{art.unidad}</span>
+                  {!u.necId && (
+                    <button type="button" onClick={() => setUsados(usados.filter((_, j) => j !== i))} className="p-1" title="Quitar">
+                      <X size={13} color={COLORS.slate} />
+                    </button>
+                  )}
+                </div>
+                {excede && <p className="text-[10px] mt-0.5" style={{ color: COLORS.ambar }}>En bodega solo hay {art.cantidad} {art.unidad}: la existencia quedará en cero.</p>}
+              </div>
+            );
+          })}
+          <SelectorArticulo articulos={stock.filter((a) => !usados.some((u) => u.stockId === a.id))} value=""
+            textoBoton="Agregar material de bodega…"
+            onChange={(id) => setUsados([...usados, { stockId: id, cantidad: "1", usar: true }])} />
+        </div>
       )}
       {tipo === "finalizada" && checklistPend > 0 && (
         <p className="text-[11px] font-semibold" style={{ color: COLORS.rojo }}>
