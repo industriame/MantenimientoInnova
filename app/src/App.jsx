@@ -1751,11 +1751,11 @@ function useAcciones(data, persist, usuario) {
         const nueva = {
           id: uid("sol"), codigo,
           sedeId: item.sedeId, faseId: item.faseId || "", activoId: item.activoId || "",
-          descripcion: `Solución definitiva de ${item.codigo}: ${pendiente}`, criticidad: item.criticidad || "",
+          descripcion: pendiente, criticidad: item.criticidad || "",
           solicitanteId: usuario?.id || "", fecha: fmtDate(ahora), hora: fmtHora(ahora),
           estado: "pendiente", tecnicoId: item.tecnicoId || "",
           fechaProgramada: "", fechaCompletada: "",
-          observaciones: lineaRegistro(autor, `Creada por reparación paliativa en ${item.codigo}: ${pendiente}`, "paliativa"),
+          observaciones: lineaRegistro(autor, `Continuación de ${item.codigo}, cerrada con reparación paliativa`, "paliativa"),
           foto: "", fotoSolicitante: "", resolucion: "",
           materiales: [], materialesEstado: "", consumos: [], reprogramaciones: [],
           calificacion: 0, comentarioCalif: "",
@@ -5465,9 +5465,6 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
                 El equipo queda funcionando, pero falta la solución de fondo. La orden se cierra y se crea una
                 <b> orden correctiva nueva</b> en Sin programar, enlazada a esta, para la solución definitiva.
               </p>
-              <textarea value={falta} onChange={(e) => setFalta(e.target.value)} rows={2}
-                placeholder="¿Qué falta para la solución definitiva? Ej. cambiar la bomba completa"
-                className={`${inputCls} resize-none bg-white`} style={inputStyle} />
             </>
           )}
         </div>
@@ -5493,6 +5490,13 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
       {tipo && (
         <textarea value={texto} onChange={(e) => setTexto(e.target.value)} rows={2} placeholder={placeholder}
           className={`${inputCls} resize-none bg-white`} style={inputStyle} />
+      )}
+      {tipo === "finalizada" && paliativa && (
+        <Field label="¿Qué falta para la solución definitiva?" hint="Será el título de la orden correctiva nueva.">
+          <textarea value={falta} onChange={(e) => setFalta(e.target.value)} rows={2}
+            placeholder="Ej. Cambiar el grifo completo"
+            className={`${inputCls} resize-none bg-white`} style={inputStyle} />
+        </Field>
       )}
       {tipo === "continua" && (
         <p className="text-[11px]" style={cSlate}>
@@ -5979,7 +5983,14 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                 {novedadServicio(item) && <Field label="Detalle de novedad"><ReadOnly>{novedadServicio(item)}</ReadOnly></Field>}
                 {item.detalle && <Field label="Detalle del trabajo"><ReadOnly>{item.detalle}</ReadOnly></Field>}
               </>
-            ) : !esPrev && <Field label="Descripción de la solicitud"><ReadOnly>{item.descripcion}</ReadOnly></Field>
+            ) : !esPrev && (
+              <Field label="Descripción de la solicitud">
+                <ReadOnly>
+                  {item.descripcion}
+                  {item.origenCodigo && <span className="block text-[11px] mt-0.5" style={cSlate}>Continuación de {item.origenCodigo}</span>}
+                </ReadOnly>
+              </Field>
+            )
           )}
 
           {corrige && esCorr && (
