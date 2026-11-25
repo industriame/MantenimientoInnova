@@ -5602,8 +5602,9 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   // Reprogramar está disponible mientras la actividad siga abierta
   // La fecha de un servicio solo la mueve el supervisor
   const puedeReprogramar = ESTADOS_ABIERTOS.includes(item.estado) && !(esServ && rol !== "admin")
-    // Ya iniciada, el técnico reprograma desde la bitácora (deja lo hecho y lo que falta)
-    && (rol === "admin" || item.estado === "programada");
+    // Ya iniciada, se reprograma desde la bitácora (deja lo hecho y lo que falta);
+    // el supervisor además puede mover la fecha en "Corregir datos"
+    && item.estado === "programada";
   const stockSede = (data.stock || []).filter((x) => x.sedeId === item.sedeId);
 
   // Si otro usuario modifica este mismo registro, el formulario se pone al día
