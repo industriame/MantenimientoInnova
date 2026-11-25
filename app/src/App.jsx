@@ -1739,8 +1739,37 @@ function useAcciones(data, persist, usuario) {
         ...(consumos.length ? { consumos: [...(x.consumos || []), ...consumos] } : {}),
         ...(lineas.length ? { observaciones: conRegistro(x.observaciones, lineas) } : {}),
       });
+      /* Reparación paliativa: se crea la orden correctiva para la solución
+         definitiva, enlazada a la original, en el mismo guardado (el número
+         se toma del contador vigente para no repetir códigos). */
+      const derivar = (r) => {
+        if (!opciones.derivar) return r;
+        const n = r.solCounter || 1;
+        const codigo = `SOL-${String(n).padStart(4, "0")}`;
+        const ahora = new Date();
+        const pendiente = opciones.derivar.pendiente;
+        const nueva = {
+          id: uid("sol"), codigo,
+          sedeId: item.sedeId, faseId: item.faseId || "", activoId: item.activoId || "",
+          descripcion: `Solución definitiva de ${item.codigo}: ${pendiente}`, criticidad: item.criticidad || "",
+          solicitanteId: usuario?.id || "", fecha: fmtDate(ahora), hora: fmtHora(ahora),
+          estado: "pendiente", tecnicoId: item.tecnicoId || "",
+          fechaProgramada: "", fechaCompletada: "",
+          observaciones: lineaRegistro(autor, `Creada por reparación paliativa en ${item.codigo}: ${pendiente}`, "paliativa"),
+          foto: "", fotoSolicitante: "", resolucion: "",
+          materiales: [], materialesEstado: "", consumos: [], reprogramaciones: [],
+          calificacion: 0, comentarioCalif: "",
+          origenId: item.id, origenCodigo: item.codigo || "",
+        };
+        const col = item.tipo === "preventivo" ? "ordenes" : item.tipo === "servicio" ? "servicios" : "solicitudes";
+        const linea = lineaRegistro(autor, `Solución definitiva pendiente en ${codigo}`, "paliativa");
+        const conEnlace = (r[col] || []).map((x) => (x.id === item.id
+          ? { ...x, derivadaId: nueva.id, derivadaCodigo: codigo, observaciones: conRegistro(x.observaciones, [linea]) } : x));
+        const base = { ...r, [col]: conEnlace };
+        return { ...base, solicitudes: [nueva, ...(base.solicitudes || [])], solCounter: n + 1 };
+      };
       const persistir = (fn) => persist((d) => {
-        const r = fn(d);
+        const r = derivar(fn(d));
         if (!consumos.length) return r;
         const resta = {};
         consumos.forEach((c) => { resta[c.stockId] = (resta[c.stockId] || 0) + c.cantidad; });
@@ -3301,7 +3330,8 @@ function diffCambios(antes, patch, usuarios) {
 const ETIQUETAS_REGISTRO = {
   inicio: { label: "Inicio", color: COLORS.orange },
   avance: { label: "Avance", color: COLORS.slate },
-  continua: { label: "Continúa otro día", color: "#3B6EA5" },
+  continua: { label: "Reprogramada", color: "#3B6EA5" },
+  paliativa: { label: "Reparación paliativa", color: COLORS.ambar },
   material: { label: "Requiere material", color: COLORS.orange },
   larga: { label: "Tarea larga", color: "#3B6EA5" },
   servicio: { label: "Requiere servicio", color: "#7B5EA7" },
@@ -5173,6 +5203,9 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
   const [hecho, setHecho] = useState("");
   // Material de bodega que se descuenta al finalizar
   const [usados, setUsados] = useState([]);
+  // Cierre definitivo o paliativo (funciona, pero falta la solución de fondo)
+  const [paliativa, setPaliativa] = useState(false);
+  const [falta, setFalta] = useState("");
 
   const iniciar = async () => {
     setEnviando(true);
@@ -5230,9 +5263,9 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
     .filter((c) => c.art) : [];
   const valido = !!tipo && !enviando && (
     tipo === "material" ? mats.length > 0
-    : tipo === "finalizada" ? !!texto.trim() && checklistPend === 0 && sinEntregar.length === 0
+    : tipo === "finalizada" ? !!texto.trim() && checklistPend === 0 && sinEntregar.length === 0 && (!paliativa || !!falta.trim())
     : tipo === "avance" ? !!texto.trim() || consumosSel.length > 0
-    // Continúa otro día: qué se hizo / qué falta y la fecha en que se sigue
+    // Reprogramar: qué se hizo / qué falta y la fecha en que se sigue
     : tipo === "continua" ? !!texto.trim() && !!nuevaFecha && nuevaFecha >= hoyStr
     : !!texto.trim());
   // Pedidos de la orden que se cargan ahora: quedan entregados y consumidos
@@ -5248,7 +5281,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
 
   const limpiar = (msg) => {
     setTipo(""); setTexto(""); setMateriales([]); setMotivo(MOTIVOS_ESPERA[0]);
-    setNuevaFecha(""); setConfirmar(false); setUsados([]); setHecho(msg);
+    setNuevaFecha(""); setConfirmar(false); setUsados([]); setPaliativa(false); setFalta(""); setHecho(msg);
     setTimeout(() => setHecho(""), 2500);
   };
 
@@ -5270,15 +5303,20 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
       }
       if (tipo === "finalizada") {
         const patch = { estado: "completada", ...selloCierre(item, usuarioId) };
-        if (!esPrev) patch.resolucion = t;
+        if (!esPrev) patch.resolucion = paliativa ? `Reparación paliativa: ${t}. Falta: ${falta.trim()}` : t;
+        if (paliativa) { patch.cierre = "paliativo"; patch.pendienteDefinitivo = falta.trim(); }
         await acciones.updateActividad(item, patch, {
-          comentario: { texto: t, etiqueta: "finalizada" }, ...opcionesConsumo(),
+          comentario: paliativa
+            ? { texto: `${t} · Falta para la solución definitiva: ${falta.trim()}`, etiqueta: "paliativa" }
+            : { texto: t, etiqueta: "finalizada" },
+          ...(paliativa ? { derivar: { pendiente: falta.trim() } } : {}),
+          ...opcionesConsumo(),
         });
         limpiar("");
         onFinalizada?.();
         return;
       }
-      // Avance y Continúa otro día siguen En proceso: el trabajo es del técnico
+      // Avance y Reprogramar siguen En proceso: el trabajo es del técnico
       const estadoNuevo = tipo === "avance" || tipo === "continua" ? "en_proceso" : "espera";
       const patch = item.estado === estadoNuevo ? {} : { estado: estadoNuevo };
       patch.motivoEspera = tipo === "material" ? "material" : tipo === "espera" ? MOTIVO_CORTO[motivo] || "" : "";
@@ -5331,7 +5369,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
       <button key={k} type="button" onClick={() => { setTipo(on ? "" : k); setConfirmar(false); if (!on && k === "finalizada" && !usados.length) proponerUsados(); }}
         className="text-[11px] font-semibold px-2.5 py-1.5 rounded-md"
         style={on ? { background: e.color, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.charcoal, background: "white" }}>
-        {k === "finalizada" ? "Finalizar" : e.label}
+        {k === "finalizada" ? "Finalizar" : k === "continua" ? "Reprogramar" : e.label}
       </button>
     );
   };
@@ -5410,6 +5448,30 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
             onChange={(id) => setUsados([...usados, { stockId: id, cantidad: "1", usar: true }])} />
         </div>
       )}
+      {tipo === "finalizada" && (
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-2 gap-1 p-1 rounded-md bg-white border" style={bLine}>
+            {[[false, "Definitiva"], [true, "Paliativa"]].map(([v, l]) => (
+              <button key={l} type="button" onClick={() => { setPaliativa(v); setConfirmar(false); }}
+                className="py-1.5 rounded text-[11px] font-semibold"
+                style={paliativa === v ? { background: v ? COLORS.ambar : COLORS.verde, color: "white" } : { color: COLORS.slate }}>
+                Reparación {l.toLowerCase()}
+              </button>
+            ))}
+          </div>
+          {paliativa && (
+            <>
+              <p className="text-[11px]" style={cSlate}>
+                El equipo queda funcionando, pero falta la solución de fondo. La orden se cierra y se crea una
+                <b> orden correctiva nueva</b> en Sin programar, enlazada a esta, para la solución definitiva.
+              </p>
+              <textarea value={falta} onChange={(e) => setFalta(e.target.value)} rows={2}
+                placeholder="¿Qué falta para la solución definitiva? Ej. cambiar la bomba completa"
+                className={`${inputCls} resize-none bg-white`} style={inputStyle} />
+            </>
+          )}
+        </div>
+      )}
       {tipo === "finalizada" && sinEntregar.length > 0 && (
         <div className="rounded-md p-2 text-[11px]" style={{ background: `${COLORS.rojo}0D`, color: COLORS.rojo }}>
           <p className="font-semibold">No se puede finalizar: hay material pedido que aún no se entrega.</p>
@@ -5459,13 +5521,17 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
         ) : (
           <button type="button" onClick={registrar} disabled={!valido}
             className="w-full py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40"
-            style={{ background: ETIQUETAS_REGISTRO[tipo].color }}>
-            {tipo === "finalizada" ? "Finalizar orden" : tipo === "servicio" ? "Pasar a servicio" : "Registrar"}
+            style={{ background: tipo === "finalizada" && paliativa ? COLORS.ambar : ETIQUETAS_REGISTRO[tipo].color }}>
+            {tipo === "finalizada" ? (paliativa ? "Cerrar como paliativa" : "Finalizar orden")
+              : tipo === "servicio" ? "Pasar a servicio" : tipo === "continua" ? "Reprogramar" : "Registrar"}
           </button>
         )
       )}
       {confirmar && (
-        <p className="text-[11px] text-center" style={cSlate}>Se registrará la fecha y hora de cierre y la orden quedará completada.</p>
+        <p className="text-[11px] text-center" style={cSlate}>
+          Se registrará la fecha y hora de cierre y la orden quedará completada.
+          {paliativa ? " Se creará una orden correctiva nueva para la solución definitiva." : ""}
+        </p>
       )}
       {hecho && (
         <p className="text-[11px] font-semibold flex items-center gap-1" style={{ color: COLORS.verde }}>
@@ -5522,7 +5588,9 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   const puedeEditarTiempo = rol === "admin" && !esServ;
   // Reprogramar está disponible mientras la actividad siga abierta
   // La fecha de un servicio solo la mueve el supervisor
-  const puedeReprogramar = ESTADOS_ABIERTOS.includes(item.estado) && !(esServ && rol !== "admin");
+  const puedeReprogramar = ESTADOS_ABIERTOS.includes(item.estado) && !(esServ && rol !== "admin")
+    // Ya iniciada, el técnico reprograma desde la bitácora (deja lo hecho y lo que falta)
+    && (rol === "admin" || item.estado === "programada");
   const stockSede = (data.stock || []).filter((x) => x.sedeId === item.sedeId);
 
   // Si otro usuario modifica este mismo registro, el formulario se pone al día
@@ -5677,6 +5745,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               <TipoChip tipo={item.tipo} />
               <span className="text-[10px] font-bold" style={cChar}>{item.codigo}</span>
               {item.criticidad && <Chip color={CRITICIDAD[item.criticidad].color}>{CRITICIDAD[item.criticidad].label}</Chip>}
+              {item.cierre === "paliativo" && <Chip color={COLORS.ambar}>Paliativa{item.derivadaCodigo ? ` → ${item.derivadaCodigo}` : ""}</Chip>}
+              {item.origenCodigo && <Chip color={COLORS.ambar}>Definitiva de {item.origenCodigo}</Chip>}
             </div>
             <p className="font-semibold text-sm mt-0.5 truncate" style={cChar}>{item.tarea}</p>
             <p className="text-xs truncate" style={cSlate}>{ubicacionTexto(data.sedes, item)}</p>
