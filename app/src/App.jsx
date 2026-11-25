@@ -3301,6 +3301,7 @@ function diffCambios(antes, patch, usuarios) {
 const ETIQUETAS_REGISTRO = {
   inicio: { label: "Inicio", color: COLORS.orange },
   avance: { label: "Avance", color: COLORS.slate },
+  continua: { label: "Continúa otro día", color: "#3B6EA5" },
   material: { label: "Requiere material", color: COLORS.orange },
   larga: { label: "Tarea larga", color: "#3B6EA5" },
   servicio: { label: "Requiere servicio", color: "#7B5EA7" },
@@ -5121,7 +5122,6 @@ const MOTIVOS_ESPERA = [
   "Decisión del cliente",
   "Sin acceso al área",
   "Falta de personal o herramienta",
-  "Trabajo largo, continúa otro día",
   "Otro",
 ];
 // Lo que se ve en la etiqueta de estado: "En espera · cliente"
@@ -5159,7 +5159,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
   const porIniciar = item.estado === "programada";
   const enCurso = ["en_proceso", "espera"].includes(item.estado);
   const tipos = [
-    ...(enCurso ? ["avance", "material", ...(esCorr ? ["servicio"] : []), "espera", "finalizada"] : []),
+    ...(enCurso ? ["avance", "continua", "material", ...(esCorr ? ["servicio"] : []), "espera", "finalizada"] : []),
     ...(supervisor ? ["correccion"] : []),
   ];
   const corrige = supervisor;
@@ -5192,7 +5192,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
     return (
       <div className="rounded-md p-2.5 space-y-2" style={{ background: `${COLORS.orange}0D`, border: `1px solid ${COLORS.orange}33` }}>
         <p className="text-[11px]" style={cSlate}>
-          Al iniciarla pasa a En proceso y queda anotada la fecha y hora de inicio. Después podrás registrar avances, material, esperas o finalizarla.
+          Al iniciarla pasa a En proceso y queda anotada la fecha y hora de inicio.{esPrev && (item.checklist || []).length > 0 ? " Ahí se abre el procedimiento para llenarlo." : ""} Después podrás registrar avances, material, esperas o finalizarla.
         </p>
         <button type="button" onClick={iniciar} disabled={enviando}
           className="w-full py-2.5 rounded-md text-sm font-semibold text-white disabled:opacity-40" style={{ background: COLORS.orange }}>
@@ -5217,12 +5217,13 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
   const sinEntregar = (item.necesidades || []).filter((n) => ["pendiente", "comprado"].includes(n.estado));
   const checklistPend = esPrev ? avanceChecklist(item.checklist).pendientes : 0;
   const mats = materiales.filter((m) => (m.nombre || "").trim());
-  const conFecha = tipo === "material" || tipo === "espera";
+  const conFecha = tipo === "material" || tipo === "espera" || tipo === "continua";
   const fechaActual = item.fechaProgramada || "";
   const cambiaFecha = conFecha && nuevaFecha && nuevaFecha !== fechaActual;
+  const hoyStr = fmtDate(new Date());
 
   // Material usado de bodega: se puede cargar en cualquier registro de trabajo
-  const conUsados = ["avance", "material", "espera", "finalizada"].includes(tipo);
+  const conUsados = ["avance", "continua", "material", "espera", "finalizada"].includes(tipo);
   const consumosSel = conUsados ? usados
     .filter((u) => u.usar && cantNum(u.cantidad) > 0)
     .map((u) => ({ art: stock.find((a) => a.id === u.stockId), cantidad: cantNum(u.cantidad), necId: u.necId }))
@@ -5231,6 +5232,8 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
     tipo === "material" ? mats.length > 0
     : tipo === "finalizada" ? !!texto.trim() && checklistPend === 0 && sinEntregar.length === 0
     : tipo === "avance" ? !!texto.trim() || consumosSel.length > 0
+    // Continúa otro día: qué se hizo / qué falta y la fecha en que se sigue
+    : tipo === "continua" ? !!texto.trim() && !!nuevaFecha && nuevaFecha >= hoyStr
     : !!texto.trim());
   // Pedidos de la orden que se cargan ahora: quedan entregados y consumidos
   const opcionesConsumo = () => {
@@ -5275,10 +5278,12 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
         onFinalizada?.();
         return;
       }
-      const estadoNuevo = tipo === "avance" ? "en_proceso" : "espera";
+      // Avance y Continúa otro día siguen En proceso: el trabajo es del técnico
+      const estadoNuevo = tipo === "avance" || tipo === "continua" ? "en_proceso" : "espera";
       const patch = item.estado === estadoNuevo ? {} : { estado: estadoNuevo };
       patch.motivoEspera = tipo === "material" ? "material" : tipo === "espera" ? MOTIVO_CORTO[motivo] || "" : "";
-      const motivoFinal = tipo === "material" ? "Falta de repuesto o material" : motivo;
+      const motivoFinal = tipo === "material" ? "Falta de repuesto o material"
+        : tipo === "continua" ? "Trabajo no terminado, continúa otro día" : motivo;
       if (cambiaFecha) {
         patch.fechaProgramada = nuevaFecha;
         patch.reprogramaciones = [...(item.reprogramaciones || []), {
@@ -5290,7 +5295,8 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
         }];
       }
       const cuerpo = tipo === "material" ? textoComentario({ materiales: mats, texto: t })
-        : tipo === "espera" ? `${motivo}${t ? `: ${t}` : ""}` : t;
+        : tipo === "espera" ? `${motivo}${t ? `: ${t}` : ""}`
+        : tipo === "continua" ? `Sigue el ${fmtDMY(nuevaFecha)}: ${t}` : t;
       const necesidades = tipo === "material" ? mats.map((m) => ({
         id: uid("nec"), nombre: m.nombre.trim(),
         cantidad: Number(String(m.cantidad || 1).replace(",", ".")) || 1,
@@ -5306,7 +5312,8 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
       await acciones.updateActividad(item, patch, {
         comentario: cuerpo ? { texto: cuerpo, etiqueta: tipo } : null, necesidades, ...conc,
       });
-      limpiar(tipo === "material" ? "Material pedido: quedó en Pendientes de compra" : "Registrado en la orden");
+      limpiar(tipo === "material" ? "Material pedido: quedó en Pendientes de compra"
+        : tipo === "continua" ? `Reagendada para el ${fmtDMY(nuevaFecha)}` : "Registrado en la orden");
     } finally {
       setEnviando(false);
     }
@@ -5331,6 +5338,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
 
   const placeholder = {
     avance: "Qué se hizo hoy, qué se encontró, qué falta…",
+    continua: "Qué se alcanzó a hacer hoy y qué falta para terminar…",
     material: "Para qué se necesita (opcional)…",
     servicio: "Qué hay que hacer y por qué requiere un servicio: alcance, obra, proveedor externo…",
     espera: "Detalle del motivo…",
@@ -5424,9 +5432,15 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
         <textarea value={texto} onChange={(e) => setTexto(e.target.value)} rows={2} placeholder={placeholder}
           className={`${inputCls} resize-none bg-white`} style={inputStyle} />
       )}
+      {tipo === "continua" && (
+        <p className="text-[11px]" style={cSlate}>
+          La orden sigue <b>En proceso</b> (no es una espera) y pasa en el calendario al día en que la vas a continuar.
+        </p>
+      )}
       {conFecha && (
-        <Field label="Nueva fecha (opcional)" hint={`Programada: ${fechaActual || "—"}. Si la cambias, queda como reprogramación.`}>
-          <input type="date" value={nuevaFecha} onChange={(e) => setNuevaFecha(e.target.value)}
+        <Field label={tipo === "continua" ? "¿Qué día continúas?" : "Nueva fecha (opcional)"}
+          hint={`Programada: ${fechaActual || "—"}. ${tipo === "continua" ? "Queda como reprogramación." : "Si la cambias, queda como reprogramación."}`}>
+          <input type="date" value={nuevaFecha} min={tipo === "continua" ? hoyStr : undefined} onChange={(e) => setNuevaFecha(e.target.value)}
             className="w-full border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle} />
         </Field>
       )}
@@ -5919,7 +5933,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               {item.comentarioCalif && <p className="text-xs mt-1.5" style={cChar}>“{item.comentarioCalif}”</p>}
             </div>
           )}
-          {esPrev && (item.checklist || []).length > 0 && (
+          {/* El procedimiento se llena una vez iniciada la orden */}
+          {esPrev && (item.checklist || []).length > 0 && (corrige || !["programada", "pendiente"].includes(item.estado)) && (
             <ChecklistEjecucion
               items={item.checklist}
               readOnly={item.estado === "completada"}
