@@ -5316,11 +5316,15 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
         onFinalizada?.();
         return;
       }
-      // Avance y Reprogramar siguen En proceso: el trabajo es del técnico
-      const estadoNuevo = tipo === "avance" || tipo === "continua" ? "en_proceso" : "espera";
+      /* Avance y Reprogramar dejan la orden En proceso (el trabajo es del
+         técnico), salvo que haya material pedido sin entregar: entonces
+         sigue "En espera · material" hasta que llegue. */
+      const esperaMaterial = (tipo === "avance" || tipo === "continua") && sinEntregar.length > 0;
+      const estadoNuevo = (tipo === "avance" || tipo === "continua") && !esperaMaterial ? "en_proceso" : "espera";
       const patch = item.estado === estadoNuevo ? {} : { estado: estadoNuevo };
-      patch.motivoEspera = tipo === "material" ? "material" : tipo === "espera" ? MOTIVO_CORTO[motivo] || "" : "";
+      patch.motivoEspera = tipo === "material" || esperaMaterial ? "material" : tipo === "espera" ? MOTIVO_CORTO[motivo] || "" : "";
       const motivoFinal = tipo === "material" ? "Falta de repuesto o material"
+        : esperaMaterial && tipo === "continua" ? "Falta de repuesto o material (aún no llega)"
         : tipo === "continua" ? "Trabajo no terminado, continúa otro día" : motivo;
       if (cambiaFecha) {
         patch.fechaProgramada = nuevaFecha;
@@ -5498,7 +5502,12 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
             className={`${inputCls} resize-none bg-white`} style={inputStyle} />
         </Field>
       )}
-      {tipo === "continua" && (
+      {(tipo === "continua" || tipo === "avance") && sinEntregar.length > 0 ? (
+        <p className="text-[11px] rounded-md p-2" style={{ background: `${COLORS.ambar}14`, color: COLORS.charcoal }}>
+          Hay material pedido que aún no llega ({sinEntregar.map((n) => textoNecesidad(n)).join("; ")}): la orden
+          seguirá <b>En espera · material</b>{tipo === "continua" ? " y pasa en el calendario a la nueva fecha" : ""}.
+        </p>
+      ) : tipo === "continua" && (
         <p className="text-[11px]" style={cSlate}>
           La orden sigue <b>En proceso</b> (no es una espera) y pasa en el calendario al día en que la vas a continuar.
         </p>
@@ -9821,6 +9830,10 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
           ...(ingreso ? { stockId, nombreBodega: ingreso.nombre, ingresoNuevo: !ingreso.stockId } : {}),
         })),
         observaciones: conRegistro(o.observaciones, [linea]),
+        // Llegó (o se canceló) lo último que faltaba: la etiqueta avisa que ya se puede seguir
+        ...(o.estado === "espera" && o.motivoEspera === "material" && ["entregado", "cancelado"].includes(estado)
+          && !(o.necesidades || []).some((n) => n.id !== r.n.id && ["pendiente", "comprado"].includes(n.estado))
+          ? { motivoEspera: "material listo" } : {}),
       })),
       ...(ingreso ? { stock: ingreso.stockId
         ? (d.stock || []).map((a) => {
