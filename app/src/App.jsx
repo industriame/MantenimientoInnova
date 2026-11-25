@@ -1710,8 +1710,13 @@ function useAcciones(data, persist, usuario) {
          más reciente de la orden, no sobre la copia que tenía la pantalla. */
       const autor = usuario?.nombre || "Sistema";
       const coment = opciones.comentario;
+      /* Si el cambio de estado viene con su anotación (Iniciar, Avance, En
+         espera…), la anotación ya lo explica: la línea "Estado: A → B" queda
+         solo en el historial para no repetir en la bitácora. */
+      const explicaEstado = (coment?.texto || "").trim() && coment?.etiqueta;
       const lineas = [
-        ...movimientos.map((m) => lineaRegistro(autor, `${m.campo}: ${m.antes} → ${m.despues}`)),
+        ...movimientos.filter((m) => !(explicaEstado && m.campo === CAMPOS_SEGUIDOS.estado))
+          .map((m) => lineaRegistro(autor, `${m.campo}: ${m.antes} → ${m.despues}`)),
         ...((coment?.texto || "").trim() ? [lineaRegistro(autor, coment.texto, coment.etiqueta)] : []),
         ...(opciones.consumos?.length ? [lineaRegistro(autor, opciones.consumos.map((c) => `${c.art.nombre} × ${c.cantidad} ${c.art.unidad || "u"}`).join("; "), "consumo")] : []),
       ];
@@ -1771,13 +1776,15 @@ function Chip({ children, color = COLORS.charcoal, solid, className = "" }) {
   );
 }
 
-function EstadoChip({ estado }) {
+function EstadoChip({ estado, motivo }) {
   const e = ESTADOS[estado] || ESTADOS.pendiente;
+  // En espera muestra por qué: "En espera · material"
+  const sufijo = estado === "espera" && motivo ? ` · ${motivo}` : "";
   return (
     <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap"
       style={{ background: `${e.color}1A`, color: e.color }}>
       <span className="w-1.5 h-1.5 rounded-full" style={{ background: e.color }} />
-      {e.label}
+      {e.label}{sufijo}
     </span>
   );
 }
@@ -3292,6 +3299,7 @@ function diffCambios(antes, patch, usuarios) {
    muestra como "Observación anterior". La etiqueta permite luego extraer, por
    ejemplo, todo lo marcado como [Requiere material] en el mes. */
 const ETIQUETAS_REGISTRO = {
+  inicio: { label: "Inicio", color: COLORS.orange },
   avance: { label: "Avance", color: COLORS.slate },
   material: { label: "Requiere material", color: COLORS.orange },
   larga: { label: "Tarea larga", color: "#3B6EA5" },
@@ -5116,6 +5124,14 @@ const MOTIVOS_ESPERA = [
   "Trabajo largo, continúa otro día",
   "Otro",
 ];
+// Lo que se ve en la etiqueta de estado: "En espera · cliente"
+const MOTIVO_CORTO = {
+  "Decisión del cliente": "cliente",
+  "Sin acceso al área": "acceso",
+  "Falta de personal o herramienta": "personal",
+  "Trabajo largo, continúa otro día": "continúa",
+  "Otro": "otro",
+};
 
 /* Estados de un pedido de material. Lo gestiona el supervisor desde
    Bodega → Pendientes de compra. */
@@ -5136,14 +5152,17 @@ const ESTADOS_NECESIDAD = {
      · Finalizar        → Completada; el texto queda como resolución
    Material y espera aceptan una fecha nueva, que se guarda como
    reprogramación. El supervisor, además, puede dejar una corrección. */
-function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
+function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
   const esPrev = item.tipo === "preventivo";
   const esCorr = item.tipo === "correctivo";
-  const abierta = ESTADOS_ABIERTOS.includes(item.estado);
+  // Programada: primero hay que iniciarla; después se registra lo que pasa
+  const porIniciar = item.estado === "programada";
+  const enCurso = ["en_proceso", "espera"].includes(item.estado);
   const tipos = [
-    ...(abierta ? ["avance", "material", ...(esCorr ? ["servicio"] : []), "espera", "finalizada"] : []),
-    ...(corrige ? ["correccion"] : []),
+    ...(enCurso ? ["avance", "material", ...(esCorr ? ["servicio"] : []), "espera", "finalizada"] : []),
+    ...(supervisor ? ["correccion"] : []),
   ];
+  const corrige = supervisor;
   const [tipo, setTipo] = useState("");
   const [texto, setTexto] = useState("");
   const [materiales, setMateriales] = useState([]);
@@ -5154,6 +5173,34 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
   const [hecho, setHecho] = useState("");
   // Material de bodega que se descuenta al finalizar
   const [usados, setUsados] = useState([]);
+
+  const iniciar = async () => {
+    setEnviando(true);
+    try {
+      const ahora = new Date();
+      const que = item.tipo === "servicio" ? "el servicio" : esPrev ? "la orden de trabajo" : "la revisión de la orden";
+      await acciones.updateActividad(item, {
+        estado: "en_proceso",
+        ...(item.fechaInicio ? {} : { fechaInicio: fmtDate(ahora), horaInicio: fmtHora(ahora) }),
+      }, { comentario: { texto: `Se inicia ${que} ${item.codigo || ""}`.trim(), etiqueta: "inicio" } });
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  if (porIniciar) {
+    return (
+      <div className="rounded-md p-2.5 space-y-2" style={{ background: `${COLORS.orange}0D`, border: `1px solid ${COLORS.orange}33` }}>
+        <p className="text-[11px]" style={cSlate}>
+          Al iniciarla pasa a En proceso y queda anotada la fecha y hora de inicio. Después podrás registrar avances, material, esperas o finalizarla.
+        </p>
+        <button type="button" onClick={iniciar} disabled={enviando}
+          className="w-full py-2.5 rounded-md text-sm font-semibold text-white disabled:opacity-40" style={{ background: COLORS.orange }}>
+          Iniciar orden
+        </button>
+      </div>
+    );
+  }
 
   if (!tipos.length) {
     return item.estado === "pendiente" && !corrige ? (
@@ -5230,6 +5277,7 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
       }
       const estadoNuevo = tipo === "avance" ? "en_proceso" : "espera";
       const patch = item.estado === estadoNuevo ? {} : { estado: estadoNuevo };
+      patch.motivoEspera = tipo === "material" ? "material" : tipo === "espera" ? MOTIVO_CORTO[motivo] || "" : "";
       const motivoFinal = tipo === "material" ? "Falta de repuesto o material" : motivo;
       if (cambiaFecha) {
         patch.fechaProgramada = nuevaFecha;
@@ -5292,7 +5340,7 @@ function RegistrarAvance({ item, acciones, stock, corrige, onFinalizada }) {
 
   return (
     <div className="rounded-md p-2.5 space-y-2" style={{ background: `${COLORS.orange}0D`, border: `1px solid ${COLORS.orange}33` }}>
-      <p className="text-[11px] font-semibold uppercase tracking-wide" style={cChar}>Registrar avance</p>
+      <p className="text-[11px] font-semibold uppercase tracking-wide" style={cChar}>Registrar en la bitácora</p>
       <div className="flex gap-1 flex-wrap">{tipos.map(boton)}</div>
 
       {tipo === "material" && (
@@ -5433,7 +5481,12 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   /* El supervisor puede corregir cualquier dato directamente sobre la tarjeta.
      Es lo que permite arreglar registros capturados a destiempo —sin señal en
      sitio, cargados al día siguiente— sin salir de la orden. */
-  const corrige = rol === "admin";
+  /* El supervisor trabaja la orden igual que el técnico (el estado lo
+     mueve la bitácora). Con "Corregir datos" abre el modo corrección para
+     arreglar estado, fechas, ubicación, textos o el propio registro. */
+  const esSupervisor = rol === "admin";
+  const [corrigiendo, setCorrigiendo] = useState(false);
+  const corrige = esSupervisor && corrigiendo;
   const [txt, setTxt] = useState(esServ ? item.trabajo || "" : esPrev ? item.tarea || "" : item.descripcion || "");
   const [detalle, setDetalle] = useState(item.detalle || "");
   const [criticidad, setCriticidad] = useState(item.criticidad || "");
@@ -5616,13 +5669,22 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
           </div>
         </div>
         <span className="flex items-center gap-2 shrink-0">
-          <EstadoChip estado={item.estado} />
+          <EstadoChip estado={item.estado} motivo={item.motivoEspera} />
           <BotonDetalle item={item} />
         </span>
       </button>
 
       {open && (
         <div className="px-2.5 pb-2.5 space-y-2.5 border-t pt-2.5" style={bLine}>
+          {esSupervisor && (
+            <div className="flex justify-end">
+              <button type="button" onClick={() => setCorrigiendo(!corrigiendo)}
+                className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md border"
+                style={corrigiendo ? { background: COLORS.rojo, borderColor: COLORS.rojo, color: "white" } : { borderColor: COLORS.line, color: COLORS.charcoal }}>
+                <Pencil size={11} /> {corrigiendo ? "Salir de corrección" : "Corregir datos"}
+              </button>
+            </div>
+          )}
           {!corrige ? (
             <p className="text-xs" style={cSlate}>
               Programada: {item.fechaProgramada || "—"}
@@ -5878,11 +5940,11 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             </select>
           </Field>}
 
-          <Field label="Registro de la orden">
+          <Field label="Bitácora de la orden" hint={corrige ? "Modo corrección: puedes corregir o borrar cada línea." : undefined}>
             <RegistroOrden texto={item.observaciones}
               onEditar={corrige ? (t) => acciones.updateActividad(item, { observaciones: t }, { sinRegistro: true }) : undefined} />
           </Field>
-          <RegistrarAvance item={item} acciones={acciones} stock={stockSede} corrige={corrige}
+          <RegistrarAvance item={item} acciones={acciones} stock={stockSede} supervisor={esSupervisor}
             onFinalizada={() => { if (onCompletada) onCompletada(); else setOpen(false); }} />
 
           {/* La resolución sale del comentario de "Finalizar". El supervisor la
