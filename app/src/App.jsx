@@ -5205,6 +5205,8 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
   const [usados, setUsados] = useState([]);
   // Cierre definitivo o paliativo (funciona, pero falta la solución de fondo)
   const [paliativa, setPaliativa] = useState(false);
+  // Pedidos que el técnico marca "Ya no se necesita" para poder finalizar
+  const [noReq, setNoReq] = useState([]);
   const [falta, setFalta] = useState("");
 
   const iniciar = async () => {
@@ -5247,7 +5249,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
   const conStock = stock.filter((a) => Number(a.cantidad) > 0);
   const sinExistencias = stock.filter((a) => !(Number(a.cantidad) > 0));
   // Material pedido que aún no llega: la orden no se puede finalizar
-  const sinEntregar = (item.necesidades || []).filter((n) => ["pendiente", "comprado"].includes(n.estado));
+  const sinEntregar = (item.necesidades || []).filter((n) => ["pendiente", "comprado"].includes(n.estado) && !n.noRequerido);
   const checklistPend = esPrev ? avanceChecklist(item.checklist).pendientes : 0;
   const mats = materiales.filter((m) => (m.nombre || "").trim());
   const conFecha = tipo === "material" || tipo === "espera" || tipo === "continua";
@@ -5263,7 +5265,8 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
     .filter((c) => c.art) : [];
   const valido = !!tipo && !enviando && (
     tipo === "material" ? mats.length > 0
-    : tipo === "finalizada" ? !!texto.trim() && checklistPend === 0 && sinEntregar.length === 0 && (!paliativa || !!falta.trim())
+    : tipo === "finalizada" ? !!texto.trim() && checklistPend === 0
+      && sinEntregar.every((n) => noReq.includes(n.id)) && (!paliativa || !!falta.trim())
     : tipo === "avance" ? !!texto.trim() || consumosSel.length > 0
     // Reprogramar: qué se hizo / qué falta y la fecha en que se sigue
     : tipo === "continua" ? !!texto.trim() && !!nuevaFecha && nuevaFecha >= hoyStr
@@ -5281,7 +5284,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
 
   const limpiar = (msg) => {
     setTipo(""); setTexto(""); setMateriales([]); setMotivo(MOTIVOS_ESPERA[0]);
-    setNuevaFecha(""); setConfirmar(false); setUsados([]); setPaliativa(false); setFalta(""); setHecho(msg);
+    setNuevaFecha(""); setConfirmar(false); setUsados([]); setPaliativa(false); setFalta(""); setNoReq([]); setHecho(msg);
     setTimeout(() => setHecho(""), 2500);
   };
 
@@ -5305,12 +5308,29 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
         const patch = { estado: "completada", ...selloCierre(item, usuarioId) };
         if (!esPrev) patch.resolucion = paliativa ? `Reparación paliativa: ${t}. Falta: ${falta.trim()}` : t;
         if (paliativa) { patch.cierre = "paliativo"; patch.pendienteDefinitivo = falta.trim(); }
+        /* Material pedido que ya no se necesita: si no se compró, el pedido
+           se cancela; si ya se compró, sigue en Pendientes de compra para
+           ingresarlo a bodega, pero deja de frenar la orden. */
+        const dejados = sinEntregar.filter((n) => noReq.includes(n.id));
+        const notaMat = dejados.length
+          ? ` · Material que ya no se necesita: ${dejados.map((n) => `${textoNecesidad(n)}${n.estado === "comprado" ? " (ya comprado, queda para bodega)" : " (pedido cancelado)"}`).join("; ")}`
+          : "";
+        const conc = opcionesConsumo();
+        const mapCons = conc.mapNecesidades || ((n) => n);
+        const ahoraNR = new Date();
+        conc.mapNecesidades = (n) => {
+          const m = mapCons(n);
+          if (!noReq.includes(n.id) || m.consumido) return m;
+          return m.estado === "pendiente"
+            ? { ...m, estado: "cancelado", noRequerido: true, fechaEstado: fmtDate(ahoraNR), horaEstado: fmtHora(ahoraNR), actualizadoPor: usuarioId }
+            : { ...m, noRequerido: true };
+        };
         await acciones.updateActividad(item, patch, {
           comentario: paliativa
-            ? { texto: `${t} · Falta para la solución definitiva: ${falta.trim()}`, etiqueta: "paliativa" }
-            : { texto: t, etiqueta: "finalizada" },
+            ? { texto: `${t} · Falta para la solución definitiva: ${falta.trim()}${notaMat}`, etiqueta: "paliativa" }
+            : { texto: `${t}${notaMat}`, etiqueta: "finalizada" },
           ...(paliativa ? { derivar: { pendiente: falta.trim() } } : {}),
-          ...opcionesConsumo(),
+          ...conc,
         });
         limpiar("");
         onFinalizada?.();
@@ -5474,16 +5494,33 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
         </div>
       )}
       {tipo === "finalizada" && sinEntregar.length > 0 && (
-        <div className="rounded-md p-2 text-[11px]" style={{ background: `${COLORS.rojo}0D`, color: COLORS.rojo }}>
-          <p className="font-semibold">No se puede finalizar: hay material pedido que aún no se entrega.</p>
-          <ul className="mt-1 space-y-0.5">
-            {sinEntregar.map((n) => (
-              <li key={n.id}>· {textoNecesidad(n)} — {ESTADOS_NECESIDAD[n.estado].label.toLowerCase()}</li>
-            ))}
-          </ul>
-          <p className="mt-1" style={cSlate}>
-            Cuando el supervisor lo marque como entregado entra a la bodega y aquí podrás cargarlo. Si ya no hace falta, el supervisor lo cancela en Bodega → Pendientes de compra.
+        <div className="rounded-md p-2 text-[11px] space-y-1.5" style={{ background: `${COLORS.rojo}0D` }}>
+          <p className="font-semibold" style={{ color: COLORS.rojo }}>Hay material pedido que aún no se entrega.</p>
+          <p style={cSlate}>
+            Para finalizar, espera a que llegue o marca lo que ya no se necesita (por ejemplo, si encontraste otra solución).
           </p>
+          {sinEntregar.map((n) => {
+            const on = noReq.includes(n.id);
+            return (
+              <div key={n.id} className="flex items-center justify-between gap-2 rounded-md bg-white border px-2 py-1.5" style={bLine}>
+                <span className="min-w-0 text-left">
+                  <span style={{ ...cChar, textDecoration: on ? "line-through" : "none" }}>
+                    {textoNecesidad(n)} <span style={cSlate}>· {ESTADOS_NECESIDAD[n.estado].label.toLowerCase()}</span>
+                  </span>
+                  {on && (
+                    <span className="block text-[10px]" style={cSlate}>
+                      {n.estado === "comprado" ? "Ya comprado: el supervisor lo ingresa a bodega." : "Se cancela el pedido."}
+                    </span>
+                  )}
+                </span>
+                <button type="button" onClick={() => setNoReq(on ? noReq.filter((x) => x !== n.id) : [...noReq, n.id])}
+                  className="shrink-0 text-[10px] font-semibold px-2 py-1 rounded-md border"
+                  style={on ? { background: COLORS.slate, borderColor: COLORS.slate, color: "white" } : { borderColor: COLORS.line, color: COLORS.charcoal }}>
+                  {on ? "Ya no se necesita ✓" : "Ya no se necesita"}
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
       {tipo === "finalizada" && checklistPend > 0 && (
@@ -9921,7 +9958,10 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
                       {r.n.fechaEstado && r.n.estado !== "pendiente" ? ` · ${e.label} el ${r.n.fechaEstado}` : ""}
                     </p>
                   </div>
-                  <Chip color={e.color}>{e.label}</Chip>
+                  <span className="flex flex-col items-end gap-1 shrink-0">
+                    <Chip color={e.color}>{e.label}</Chip>
+                    {r.n.noRequerido && <Chip color={COLORS.slate}>Ya no se necesita</Chip>}
+                  </span>
                 </div>
                 {editable && (r.n.valorCompra > 0 || r.n.nombreBodega) && (
                   <p className="text-[10px] mt-0.5" style={cSlate}>
