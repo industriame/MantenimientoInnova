@@ -10078,12 +10078,12 @@ const textoNecesidad = (n) => `${n.nombre} × ${n.cantidad} ${n.unidad || "u"}`;
 /* Datos al marcar un pedido. Comprado: cantidad y valor de la compra.
    Entregado: a qué artículo de la bodega de la sede ingresa (uno parecido
    que ya exista o uno nuevo con el nombre corregido), cantidad y valor. */
-function FormNecesidad({ r, modo, stockSede, sede, onConfirm, onCancel }) {
+function FormNecesidad({ r, modo, stockSede, sede, valorSugerido, onConfirm, onCancel }) {
   const n = r.n;
   const sugerido = (n.stockId && stockSede.find((a) => a.id === n.stockId))
     || stockSede.find((a) => claveArticulo(a.nombre) === claveArticulo(n.nombre));
   const [cantidad, setCantidad] = useState(String(n.cantidadComprada ?? n.cantidad ?? 1));
-  const [valor, setValor] = useState(n.valorCompra ? String(n.valorCompra) : "");
+  const [valor, setValor] = useState(n.valorCompra ? String(n.valorCompra) : valorSugerido > 0 ? String(Math.round(valorSugerido * 100) / 100) : "");
   const [sel, setSel] = useState(sugerido?.id || "");
   const [nombre, setNombre] = useState(n.nombre || "");
   const [unidad, setUnidad] = useState(n.unidad || "u");
@@ -10177,7 +10177,47 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
     .filter((r) => coincideArticulo(`${r.n.nombre} ${r.orden.codigo || ""}`, q))
     .sort((a, b) => `${b.n.fecha} ${b.n.hora || ""}`.localeCompare(`${a.n.fecha} ${a.n.hora || ""}`));
 
-  const [form, setForm] = useState(null);   // { id, modo: "comprado" | "entregado" }
+  const [form, setForm] = useState(null);   // { r, modo: "comprado" | "entregado" }
+  const [orden, setOrden] = useState({ col: "estado", asc: true });
+
+  /* Valor de referencia por unidad: lo pagado antes por el mismo artículo
+     (promedio de compras entregadas o compradas), si no hay, el costo del
+     kardex (promedio entre sedes); si es nuevo, el que anote el supervisor. */
+  const historial = useMemo(() => {
+    const m = new Map();
+    necesidadesDe(data, null).forEach(({ n }) => {
+      const cant = Number(n.cantidadComprada ?? n.cantidad) || 0;
+      if (!(Number(n.valorCompra) > 0) || !cant || !["comprado", "entregado"].includes(n.estado)) return;
+      const k = claveArticulo(n.nombreBodega || n.nombre);
+      const g = m.get(k) || { suma: 0, n: 0 };
+      g.suma += Number(n.valorCompra) / cant; g.n += 1;
+      m.set(k, g);
+    });
+    return m;
+  }, [data]);
+  const kardexCosto = useMemo(() => {
+    const m = new Map();
+    (data.stock || []).forEach((a) => {
+      if (!(Number(a.costoUnitario) > 0)) return;
+      const k = claveArticulo(a.nombre);
+      const g = m.get(k) || { suma: 0, n: 0 };
+      g.suma += Number(a.costoUnitario); g.n += 1;
+      m.set(k, g);
+    });
+    return m;
+  }, [data]);
+  const referencia = (n) => {
+    const k = claveArticulo(n.nombre);
+    const h = historial.get(k);
+    if (h) return { unit: h.suma / h.n, fuente: `Prom. histórico (${h.n})` };
+    const kx = kardexCosto.get(k);
+    if (kx) return { unit: kx.suma / kx.n, fuente: "Costo kardex" };
+    if (Number(n.valorReferencia) > 0) return { unit: Number(n.valorReferencia), fuente: "Referencia", manual: true };
+    return { unit: 0, fuente: "", manual: true };
+  };
+  const guardarRef = (r, v) => persist((d) => ({ ...d, [r.col]: (d[r.col] || []).map((o) => (o.id !== r.orden.id ? o : {
+    ...o, necesidades: (o.necesidades || []).map((n) => (n.id === r.n.id ? { ...n, valorReferencia: Number(String(v).replace(",", ".")) || 0 } : n)),
+  })) }));
 
   /* Cambia el estado del pedido y lo anota en la orden. La orden no cambia
      de estado: solo queda informada. Al entregar, el material entra a la
@@ -10222,14 +10262,40 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
     setForm(null);
   };
 
-  const filtros = [["abiertos", "Por atender"], ["pendiente", "Pendientes"], ["comprado", "Comprados"], ["entregado", "Entregados"], ["cancelado", "Cancelados"], ["todos", "Todos"]];
-  const btn = "text-[11px] font-semibold px-2 py-1 rounded-md border bg-white";
+  const ORDEN_NEC = ["pendiente", "comprado", "entregado", "cancelado"];
+  const filas = visibles.slice().sort((a, b) => {
+    const k = {
+      material: (r) => r.n.nombre.toLowerCase(),
+      orden: (r) => r.orden.codigo || "",
+      sede: (r) => sedeNombre(data.sedes, r.orden.sedeId),
+      fecha: (r) => `${r.n.fecha} ${r.n.hora || ""}`,
+      valor: (r) => referencia(r.n).unit * (Number(r.n.cantidad) || 0),
+      estado: (r) => `${ORDEN_NEC.indexOf(r.n.estado)}${r.n.fecha}`,
+    }[orden.col];
+    const va = k(a); const vb = k(b);
+    const res = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "es");
+    return orden.asc ? res : -res;
+  });
+  const totalRef = filas.filter((r) => ["pendiente", "comprado"].includes(r.n.estado))
+    .reduce((a, r) => a + referencia(r.n).unit * (Number(r.n.cantidad) || 0), 0);
+  const th = "px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left whitespace-nowrap";
+  const filtroCls = "w-full border rounded px-1.5 py-1 text-[11px] font-normal normal-case tracking-normal bg-white";
+  const encabezado = (col, label, extra = "") => (
+    <th className={`${th} ${extra}`} style={cSlate}>
+      <button type="button" onClick={() => setOrden((o) => ({ col, asc: o.col === col ? !o.asc : true }))}
+        className="inline-flex items-center gap-0.5 uppercase" style={orden.col === col ? cChar : cSlate}>
+        {label}{orden.col === col ? (orden.asc ? " ▲" : " ▼") : ""}
+      </button>
+    </th>
+  );
+  const btn = "text-[10px] font-semibold px-1.5 py-1 rounded border bg-white whitespace-nowrap";
+  const vacio = <th className="px-2 pb-1.5" />;
 
   return (
     <div className="mt-4">
       <p className="text-xs mb-3" style={cSlate}>
         {editable
-          ? "Material que pidieron los técnicos al registrar “Requiere material” en una orden. Márcalo como comprado y luego entregado: queda en el registro de la orden y se avisa al técnico."
+          ? "Material que pidieron los técnicos al registrar “Requiere material”. Márcalo como comprado y luego entregado: queda en el registro de la orden y se avisa al técnico."
           : "Material pedido en las órdenes de tus sedes y en qué va la compra."}
       </p>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
@@ -10242,81 +10308,133 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
           sub={`${cuenta(delMes, "cancelado")} cancelados`} />
       </div>
 
-      <div className="flex gap-2 mb-2 flex-wrap">
-        <div className="flex-1 min-w-48 flex items-center gap-1.5 border rounded-md px-2.5 bg-white" style={inputStyle}>
-          <Search size={14} color={COLORS.slate} className="shrink-0" />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar material u orden…"
-            className="flex-1 min-w-0 py-2 text-sm outline-none bg-transparent" style={cChar} />
-        </div>
-        {sedes.length > 1 && (
-          <select value={fSede} onChange={(e) => setFSede(e.target.value)} className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
-            <option value="todas">Todas las sedes</option>
-            {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
-          </select>
-        )}
-      </div>
-      <div className="flex gap-1 flex-wrap mb-3">
-        {filtros.map(([k, l]) => (
-          <button key={k} onClick={() => setFEstado(k)} className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
-            style={fEstado === k ? { background: COLORS.charcoal, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
-            {l}
-          </button>
-        ))}
+      <div className="overflow-x-auto border rounded-md bg-white" style={bLine}>
+        <table className="w-full text-xs text-left" style={{ minWidth: editable ? 900 : 700 }}>
+          <thead>
+            <tr style={{ background: COLORS.cream }}>
+              {encabezado("material", "Material")}
+              {encabezado("orden", "Orden")}
+              {encabezado("sede", "Sede")}
+              {encabezado("fecha", "Pedido")}
+              {editable && encabezado("valor", "Valor ref.", "text-right")}
+              {encabezado("estado", "Estado")}
+              {editable && <th className={th} style={cSlate}>Acciones</th>}
+            </tr>
+            <tr style={{ background: COLORS.cream }}>
+              <th className="px-2 pb-1.5" colSpan={2}>
+                <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar material u orden…" className={filtroCls} style={inputStyle} />
+              </th>
+              <th className="px-2 pb-1.5">
+                <select value={fSede} onChange={(e) => setFSede(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todas">Todas</option>
+                  {sedes.map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                </select>
+              </th>
+              {vacio}
+              {editable && vacio}
+              <th className="px-2 pb-1.5">
+                <select value={fEstado} onChange={(e) => setFEstado(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="abiertos">Por atender</option>
+                  <option value="todos">Todos</option>
+                  {ORDEN_NEC.map((e) => <option key={e} value={e}>{ESTADOS_NECESIDAD[e].label}</option>)}
+                </select>
+              </th>
+              {editable && vacio}
+            </tr>
+          </thead>
+          <tbody>
+            {filas.length === 0 && (
+              <tr><td colSpan={editable ? 7 : 5} className="px-2 py-4 text-center" style={cSlate}>
+                {todas.length ? "Ningún pedido coincide con el filtro." : "No hay material pedido en las órdenes."}
+              </td></tr>
+            )}
+            {filas.map((r) => {
+              const e = ESTADOS_NECESIDAD[r.n.estado] || ESTADOS_NECESIDAD.pendiente;
+              const ref = referencia(r.n);
+              const cant = Number(r.n.cantidad) || 0;
+              const abierto = ["pendiente", "comprado"].includes(r.n.estado);
+              return (
+                <tr key={r.n.id} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  <td className="px-2 py-1.5" style={{ maxWidth: 240 }}>
+                    <span className="font-semibold break-words" style={cChar}>{r.n.nombre}</span>
+                    <span style={cSlate}> × {r.n.cantidad} {r.n.unidad || "u"}</span>
+                    <span className="block text-[9px]" style={{ color: r.n.stockId || r.n.kardex ? COLORS.slate : COLORS.orange }}>
+                      {r.n.stockId || r.n.kardex ? "Kardex" : "Artículo nuevo"}{r.n.nombreBodega ? ` · en bodega como “${r.n.nombreBodega}”` : ""}
+                    </span>
+                  </td>
+                  <td className="px-2 py-1.5 whitespace-nowrap">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="font-bold" style={cOrange}>{r.orden.codigo}</span>
+                      <BotonDetalle item={{ ...r.orden, tipo: r.tipo, tarea: r.orden.tarea || r.orden.descripcion || tituloServicio(r.orden), fechaProgramada: r.orden.fechaProgramada || r.orden.fecha }} size={12} />
+                    </span>
+                  </td>
+                  <td className="px-2 py-1.5 whitespace-nowrap" style={cChar}>{sedeNombre(data.sedes, r.orden.sedeId)}</td>
+                  <td className="px-2 py-1.5 whitespace-nowrap" style={cSlate}>
+                    {r.n.fecha}
+                    <span className="block text-[9px]">{usuarioNombre(data.usuarios, r.n.usuarioId).split(" ")[0]}</span>
+                  </td>
+                  {editable && (
+                    <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                      {ref.manual && abierto ? (
+                        <span className="inline-flex items-center gap-1 justify-end">
+                          <span className="text-[10px]" style={cSlate}>$</span>
+                          <CampoVivo type="number" min="0" step="0.01" inputMode="decimal" value={r.n.valorReferencia ?? ""} placeholder="c/u"
+                            onCommit={(v) => guardarRef(r, v)}
+                            className="w-16 border rounded px-1.5 py-1 text-[11px] text-right bg-white" style={inputStyle} />
+                        </span>
+                      ) : ref.unit > 0 ? (
+                        <span className="text-[11px]" style={cChar}>{money(ref.unit)} c/u</span>
+                      ) : <span style={cSlate}>—</span>}
+                      {ref.unit > 0 && <span className="block text-[10px] font-bold" style={cOrange}>{money(ref.unit * cant)}</span>}
+                      <span className="block text-[9px]" style={cSlate}>{ref.fuente || (abierto ? "Anota un valor" : "")}</span>
+                    </td>
+                  )}
+                  <td className="px-2 py-1.5">
+                    <Chip color={e.color}>{e.label}</Chip>
+                    {r.n.noRequerido && <span className="block text-[9px] mt-0.5" style={cSlate}>{r.n.estado === "cancelado" ? "Anulado por la orden" : "Anulado · pasa a bodega"}</span>}
+                    {editable && r.n.valorCompra > 0 && <span className="block text-[9px] mt-0.5" style={cSlate}>Compra {money(r.n.valorCompra)}</span>}
+                    {r.n.fechaEstado && r.n.estado !== "pendiente" && <span className="block text-[9px]" style={cSlate}>{r.n.fechaEstado}</span>}
+                  </td>
+                  {editable && (
+                    <td className="px-2 py-1.5">
+                      {abierto && (
+                        <div className="flex gap-1">
+                          {r.n.estado === "pendiente" && (
+                            <button onClick={() => setForm({ r, modo: "comprado" })} className={btn} style={{ borderColor: "#3B6EA5", color: "#3B6EA5" }}>Comprado</button>
+                          )}
+                          <button onClick={() => setForm({ r, modo: "entregado" })} className={btn} style={{ borderColor: COLORS.verde, color: COLORS.verde }}>Entregado</button>
+                          <button onClick={() => cambiar(r, "cancelado")} className={btn} style={{ borderColor: COLORS.line, color: COLORS.slate }}>Cancelar</button>
+                        </div>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+          {editable && filas.length > 0 && (
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.cream }}>
+                <td colSpan={4} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>{filas.length} pedido(s)</td>
+                <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                  <span className="font-bold" style={cOrange}>{money(totalRef)}</span>
+                  <span className="block text-[9px]" style={cSlate}>por comprar o entregar</span>
+                </td>
+                <td colSpan={2} />
+              </tr>
+            </tfoot>
+          )}
+        </table>
       </div>
 
-      {visibles.length === 0 ? (
-        <Empty>{todas.length ? "Ningún pedido coincide con el filtro." : "No hay material pedido en las órdenes."}</Empty>
-      ) : (
-        <div className="space-y-2">
-          {visibles.map((r) => {
-            const e = ESTADOS_NECESIDAD[r.n.estado] || ESTADOS_NECESIDAD.pendiente;
-            return (
-              <div key={r.n.id} className="border rounded-md p-2.5 bg-white text-left" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${e.color}` }}>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold break-words" style={cChar}>
-                      {r.n.nombre} <span className="font-normal" style={cSlate}>× {r.n.cantidad} {r.n.unidad || "u"}</span>
-                    </p>
-                    <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-                      <TipoChip tipo={r.tipo} />
-                      <span className="text-[10px] font-bold" style={cOrange}>{r.orden.codigo}</span>
-                      <span className="text-[11px] truncate" style={cChar}>{r.orden.tarea || r.orden.descripcion || r.orden.trabajo || ""}</span>
-                    </div>
-                    <p className="text-[10px] mt-0.5" style={cSlate}>
-                      {sedeNombre(data.sedes, r.orden.sedeId)} · Pedido el {r.n.fecha}{r.n.hora ? ` ${r.n.hora}` : ""} por {usuarioNombre(data.usuarios, r.n.usuarioId)}
-                      {" · "}<span style={{ color: r.n.stockId || r.n.kardex ? COLORS.slate : COLORS.orange }}>{r.n.stockId || r.n.kardex ? "Del kardex" : "No está en el kardex"}</span>
-                      {r.n.fechaEstado && r.n.estado !== "pendiente" ? ` · ${e.label} el ${r.n.fechaEstado}` : ""}
-                    </p>
-                  </div>
-                  <span className="flex flex-col items-end gap-1 shrink-0">
-                    <Chip color={e.color}>{e.label}</Chip>
-                    {r.n.noRequerido && <Chip color={COLORS.slate}>{r.n.estado === "cancelado" ? "Anulado por la orden" : "Anulado · pasa a bodega"}</Chip>}
-                  </span>
-                </div>
-                {editable && (r.n.valorCompra > 0 || r.n.nombreBodega) && (
-                  <p className="text-[10px] mt-0.5" style={cSlate}>
-                    {r.n.valorCompra > 0 ? `Compra: ${money(r.n.valorCompra)}` : ""}
-                    {r.n.valorCompra > 0 && r.n.nombreBodega ? " · " : ""}
-                    {r.n.nombreBodega ? `En bodega como “${r.n.nombreBodega}”` : ""}
-                  </p>
-                )}
-                {editable && form?.id === r.n.id ? (
-                  <FormNecesidad r={r} modo={form.modo} sede={sedeNombre(data.sedes, r.orden.sedeId)} stockSede={(data.stock || []).filter((a) => a.sedeId === r.orden.sedeId)}
-                    onCancel={() => setForm(null)}
-                    onConfirm={(extra, ingreso) => cambiar(r, form.modo, extra, ingreso)} />
-                ) : editable && ["pendiente", "comprado"].includes(r.n.estado) && (
-                  <div className="flex gap-1.5 mt-2 flex-wrap">
-                    {r.n.estado === "pendiente" && (
-                      <button onClick={() => setForm({ id: r.n.id, modo: "comprado" })} className={btn} style={{ borderColor: "#3B6EA5", color: "#3B6EA5" }}>Comprado</button>
-                    )}
-                    <button onClick={() => setForm({ id: r.n.id, modo: "entregado" })} className={btn} style={{ borderColor: COLORS.verde, color: COLORS.verde }}>Entregado</button>
-                    <button onClick={() => cambiar(r, "cancelado")} className={btn} style={{ borderColor: COLORS.line, color: COLORS.slate }}>Cancelar</button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+      {editable && form && (
+        <Modal title={`${form.modo === "entregado" ? "Entregar" : "Comprar"} · ${form.r.n.nombre}`} onClose={() => setForm(null)}>
+          <FormNecesidad r={form.r} modo={form.modo} sede={sedeNombre(data.sedes, form.r.orden.sedeId)}
+            stockSede={(data.stock || []).filter((a) => a.sedeId === form.r.orden.sedeId)}
+            valorSugerido={referencia(form.r.n).unit * (Number(form.r.n.cantidad) || 0)}
+            onCancel={() => setForm(null)}
+            onConfirm={(extra, ingreso) => cambiar(form.r, form.modo, extra, ingreso)} />
+        </Modal>
       )}
     </div>
   );
