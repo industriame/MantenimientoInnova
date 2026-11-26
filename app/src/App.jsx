@@ -3684,7 +3684,7 @@ function SelectorArticulo({ articulos, value, onChange, onNuevo, textoBoton }) {
   const lista = useRef(null);
   const sel = articulos.find((x) => x.id === value);
   const filtrados = articulos
-    .filter((x) => coincideArticulo(x.nombre, q))
+    .filter((x) => coincideArticulo(`${x.sku || ""} ${x.nombre}`, q))
     .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
 
   // Cerrar al tocar fuera
@@ -3742,7 +3742,9 @@ function SelectorArticulo({ articulos, value, onChange, onNuevo, textoBoton }) {
                 onClick={() => elegir(x)} onMouseEnter={() => setActivo(i)}
                 className="w-full flex items-start justify-between gap-3 px-2.5 py-2 text-left border-b last:border-b-0"
                 style={{ borderColor: COLORS.line, background: i === activo ? `${COLORS.orange}12` : "white" }}>
-                <span className="text-xs min-w-0 break-words" style={{ ...cChar, fontWeight: x.id === value ? 700 : 500 }}>{x.nombre}</span>
+                <span className="text-xs min-w-0 break-words" style={{ ...cChar, fontWeight: x.id === value ? 700 : 500 }}>
+                  {x.sku && <span className="font-mono text-[10px] mr-1.5" style={cSlate}>{x.sku}</span>}{x.nombre}
+                </span>
                 <span className="text-[10px] shrink-0 text-right" style={{ color: x.detalle ? COLORS.slate : x.cantidad > 0 ? COLORS.slate : COLORS.rojo, maxWidth: "55%" }}>
                   {x.detalle || existencia(x)}
                 </span>
@@ -5344,7 +5346,8 @@ function RegistrarAvance({ item, data, acciones, stock, supervisor, onFinalizada
     const grupos = new Map();
     ((data && data.stock) || stock).forEach((a) => {
       const k = claveArticulo(a.nombre);
-      const g = grupos.get(k) || { nombre: a.nombre, unidad: a.unidad || "u", enSede: null, otras: 0 };
+      const g = grupos.get(k) || { nombre: a.nombre, unidad: a.unidad || "u", enSede: null, otras: 0, sku: "" };
+      if (a.sku && !g.sku) g.sku = a.sku;
       if (a.sedeId === item.sedeId) g.enSede = a; else g.otras += Number(a.cantidad) || 0;
       grupos.set(k, g);
     });
@@ -5354,7 +5357,7 @@ function RegistrarAvance({ item, data, acciones, stock, supervisor, onFinalizada
       const ped = pedidosDe(g.nombre);
       lista.push({
         id: g.enSede ? g.enSede.id : `kdx:${k}`, stockId: g.enSede ? g.enSede.id : "", kardex: true,
-        nombre: g.enSede ? g.enSede.nombre : g.nombre, unidad: g.enSede ? g.enSede.unidad : g.unidad, cantidad: 0,
+        nombre: g.enSede ? g.enSede.nombre : g.nombre, unidad: g.enSede ? g.enSede.unidad : g.unidad, cantidad: 0, sku: g.sku,
         detalle: [g.otras > 0 ? `Sin stock aquí · ${g.otras} ${g.unidad} en otras sedes` : "Sin stock", ped].filter(Boolean).join(" · "),
       });
     });
@@ -10058,6 +10061,29 @@ const FILTROS_BODEGA = [
    tildes ni espacios de más). */
 const claveArticulo = (nombre) => sinTildes(nombre).replace(/\s+/g, " ").trim();
 
+/* SKU del kardex: un código por artículo (MAT-0001…), el mismo en todas las
+   sedes. Los registros de un mismo artículo (mismo nombre) comparten el
+   código; los que no tienen se completan con el siguiente número libre, en
+   orden alfabético. Devuelve el mismo arreglo si no hubo cambios. */
+function asignarSkus(stock = []) {
+  const porClave = new Map();
+  let max = 0;
+  stock.forEach((a) => {
+    const m = /^MAT-(\d+)$/.exec(a.sku || "");
+    if (m) max = Math.max(max, Number(m[1]));
+    const k = claveArticulo(a.nombre);
+    if (a.sku && !porClave.has(k)) porClave.set(k, a.sku);
+  });
+  if (stock.every((a) => a.sku && a.sku === porClave.get(claveArticulo(a.nombre)))) return stock;
+  [...new Set(stock.map((a) => claveArticulo(a.nombre)))].sort((x, y) => x.localeCompare(y, "es")).forEach((k) => {
+    if (!porClave.has(k)) { max += 1; porClave.set(k, `MAT-${String(max).padStart(4, "0")}`); }
+  });
+  return stock.map((a) => {
+    const sku = porClave.get(claveArticulo(a.nombre));
+    return a.sku === sku ? a : { ...a, sku };
+  });
+}
+
 /* Bodega consolidada: una fila por artículo con la cantidad de cada sede en
    su propia columna. Admin edita; el técnico solo consulta y no ve costos. */
 /* Pedidos de material de todas las órdenes (preventivas, correctivas y
@@ -10213,11 +10239,11 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
             : Number(a.costoUnitario) || 0;
           return { ...a, cantidad: cant, costoUnitario: Math.round(costo * 100) / 100 };
         })
-        : [...(d.stock || []), {
+        : asignarSkus([...(d.stock || []), {
           id: stockId, sedeId: r.orden.sedeId, nombre: ingreso.nombre, unidad: ingreso.unidad || "u",
           cantidad: ingreso.cantidad, costoUnitario: ingreso.valor > 0 ? Math.round((ingreso.valor / ingreso.cantidad) * 100) / 100 : 0, minimo: 0,
           creadoDesde: { codigo: r.orden.codigo || "", fecha: fmtDate(ahora), usuarioId: user?.id || "" },
-        }] } : {}),
+        }]) } : {}),
     }));
     setForm(null);
   };
@@ -10415,14 +10441,24 @@ function InventarioBodega({ data, persist, sedes, editable }) {
     const bajo = enColumnas.some((x) => x.cantidad > 0 && x.cantidad <= x.minimo);
     return {
       ...g, nombre: base.nombre, unidad: base.unidad, costoUnitario: Number(base.costoUnitario) || 0, minimo: base.minimo,
+      sku: g.registros.find((x) => x.sku)?.sku || "",
       costoVaria: costos.size > 1, enColumnas, cantidad, valor: valorDe(enColumnas),
       estado: cantidad <= 0 ? "agotado" : bajo ? "bajo" : "disponible",
     };
   });
 
+  /* Los artículos sin SKU (los que ya existían, o creados por otra vía)
+     reciben su código la primera vez que el supervisor abre la bodega. */
+  const faltanSku = editable && (data.stock || []).some((a) => !a.sku);
+  useEffect(() => {
+    if (faltanSku) persist((d) => { const st = asignarSkus(d.stock || []); return st === d.stock ? d : { ...d, stock: st }; });
+  }, [faltanSku]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Un mismo SKU en dos artículos distintos (por edición manual)
+  const skuRepetido = new Set(articulos.map((a) => a.sku).filter((x, i, arr) => x && arr.indexOf(x) !== i));
+
   const enAlcance = articulos.filter((a) => a.enColumnas.length > 0);
   const visibles = enAlcance
-    .filter((a) => coincideArticulo(a.nombre, q))
+    .filter((a) => coincideArticulo(`${a.sku} ${a.nombre}`, q))
     .filter((a) => fEstado === "todos"
       || (fEstado === "disponible" ? a.estado !== "agotado" : a.estado === fEstado))
     .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
@@ -10436,9 +10472,9 @@ function InventarioBodega({ data, persist, sedes, editable }) {
     const reg = a.porSede[sedeId];
     if (reg) return setRegistros([reg.id], { cantidad });
     if (!cantidad) return;
-    persist((data) => ({ ...data, stock: [...(data.stock || []), {
-      id: uid("stk"), sedeId, nombre: a.nombre, unidad: a.unidad, cantidad, costoUnitario: a.costoUnitario, minimo: a.minimo || 0,
-    }] }));
+    persist((data) => ({ ...data, stock: asignarSkus([...(data.stock || []), {
+      id: uid("stk"), sedeId, nombre: a.nombre, unidad: a.unidad, cantidad, costoUnitario: a.costoUnitario, minimo: a.minimo || 0, sku: a.sku || "",
+    }]) }));
   };
   // Borrar: con una sede filtrada solo se quita de esa sede; si no, de todas
   const borrar = (a) => {
@@ -10464,6 +10500,15 @@ function InventarioBodega({ data, persist, sedes, editable }) {
       className={`${cellInput} resize-none overflow-hidden leading-snug font-semibold`} style={{ ...bLine, ...cChar, fieldSizing: "content" }} />
   ) : (
     <span className="break-words font-semibold" style={cChar}>{a.nombre}</span>
+  );
+  const campoSku = (a) => (
+    <span className="flex items-center gap-1 mb-0.5">
+      {editable ? (
+        <CampoVivo value={a.sku} onCommit={(v) => v.trim() && setRegistros(ids(a), { sku: v.trim().toUpperCase() })}
+          className="border rounded px-1 py-0.5 text-[10px] font-mono w-20 bg-white" style={{ borderColor: COLORS.line, ...cSlate }} />
+      ) : <span className="text-[10px] font-mono" style={cSlate}>{a.sku || "—"}</span>}
+      {skuRepetido.has(a.sku) && <Chip color={COLORS.rojo}>SKU repetido</Chip>}
+    </span>
   );
   // Artículos que nacieron de una compra pedida en una orden
   const chipOrigen = (a) => {
@@ -10563,7 +10608,7 @@ function InventarioBodega({ data, persist, sedes, editable }) {
           return (
             <div key={a.key} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${est.color}` }}>
               <div className="flex items-start gap-2">
-                <div className="flex-1 min-w-0 text-sm">{campoNombre(a)}{chipOrigen(a)}</div>
+                <div className="flex-1 min-w-0 text-sm">{campoSku(a)}{campoNombre(a)}{chipOrigen(a)}</div>
                 {editable && <DeleteBtn onConfirm={() => borrar(a)} />}
               </div>
               <div className="flex items-center justify-between gap-2 mt-1.5">
@@ -10601,7 +10646,7 @@ function InventarioBodega({ data, persist, sedes, editable }) {
         <table className="w-full border-collapse" style={{ minWidth: 420 + columnas.length * 90 + (editable ? 260 : 0) }}>
           <thead>
             <tr style={{ background: COLORS.charcoal }}>
-              <th className={th} style={{ color: "white", width: "30%" }}>Artículo</th>
+              <th className={th} style={{ color: "white", width: "30%" }}>SKU · Artículo</th>
               <th className={th} style={{ color: "white" }}>Unidad</th>
               {editable && <th className={th} style={{ color: "white" }}>Costo unit.</th>}
               {columnas.map((s) => (
@@ -10618,7 +10663,7 @@ function InventarioBodega({ data, persist, sedes, editable }) {
               const est = META_ESTADO[a.estado];
               return (
                 <tr key={a.key} style={{ background: i % 2 ? COLORS.paper : "white", borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className={td} style={{ minWidth: 200 }}>{campoNombre(a)}{chipOrigen(a)}</td>
+                  <td className={td} style={{ minWidth: 200 }}>{campoSku(a)}{campoNombre(a)}{chipOrigen(a)}</td>
                   <td className={td}>{campoUnidad(a, 64)}</td>
                   {editable && <td className={td}>{campoCosto(a, 74)}</td>}
                   {columnas.map((s) => (
@@ -10681,7 +10726,7 @@ function InventarioBodega({ data, persist, sedes, editable }) {
             <button disabled={!nuevo.nombre.trim() || !nuevo.sedeId
                 || !!mapa.get(claveArticulo(nuevo.nombre))?.porSede[nuevo.sedeId]}
               onClick={() => {
-                persist((data) => ({ ...data, stock: [...(data.stock || []), { ...nuevo, id: uid("stk"), nombre: nuevo.nombre.trim() }] }));
+                persist((data) => ({ ...data, stock: asignarSkus([...(data.stock || []), { ...nuevo, id: uid("stk"), nombre: nuevo.nombre.trim() }]) }));
                 setNuevo(null);
               }}
               className="w-full py-2.5 rounded-md font-semibold text-sm text-white disabled:opacity-40" style={{ background: COLORS.orange }}>
