@@ -8119,11 +8119,8 @@ function FormDefinirServicio({ srv, onSave, onClose, textoBoton }) {
 
   return (
     <div className="space-y-3">
-      {novedad && (
-        <div className="rounded-md p-2.5" style={{ background: COLORS.cream }}>
-          <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Detalle de novedad · de la solicitud</p>
-          <p className="text-xs whitespace-pre-wrap" style={cChar}>{novedad}</p>
-        </div>
+      {srv.origenCodigo && (
+        <p className="text-[11px]" style={cSlate}>Creado desde <b style={cChar}>{srv.origenCodigo}</b>{novedad ? ` · ${novedad}` : ""}</p>
       )}
       <Field label="Trabajo a realizar" hint="Título corto que identifica el servicio. Lo define el supervisor.">
         <input autoFocus={!trabajo} value={trabajo} onChange={(e) => setTrabajo(e.target.value)} className={inputCls} style={inputStyle} />
@@ -8212,8 +8209,7 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
 
   return (
     <div className="space-y-3">
-      <p className="text-[11px] font-semibold uppercase tracking-wide" style={cSlate}>Solicitud</p>
-      {area("descripcion", "Detalle de novedad", 2, srv.desdeSolicitud ? "Heredado de la solicitud." : undefined)}
+      {srv.origenCodigo && <p className="text-[11px]" style={cSlate}>Creado desde <b style={cChar}>{srv.origenCodigo}</b></p>}
       <Field label="Ubicación">
         <div className="space-y-1.5">
           <select value={f.sedeId} onChange={(e) => set({ sedeId: e.target.value, faseId: "", activoId: "" })} className={sel} style={inputStyle}>
@@ -8232,7 +8228,7 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
         </div>
       </Field>
       <div className="grid grid-cols-2 gap-2">
-        <Field label="Fecha y hora de solicitud">
+        <Field label="Fecha y hora de creación">
           <div className="flex gap-1.5">
             <input type="date" value={f.fechaReporte} onChange={(e) => set({ fechaReporte: e.target.value })}
               className="flex-1 min-w-0 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
@@ -8247,9 +8243,8 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
           </select>
         </Field>
       </div>
-      <FotoUploader foto={f.fotoSolicitante} onChange={(v) => set({ fotoSolicitante: v })} label="Foto de la solicitud" carpeta="solicitudes" />
+      {f.fotoSolicitante && <FotoUploader foto={f.fotoSolicitante} onChange={(v) => set({ fotoSolicitante: v })} label="Foto de la solicitud" carpeta="solicitudes" />}
 
-      <p className="text-[11px] font-semibold uppercase tracking-wide pt-2 border-t" style={{ ...cSlate, ...bLine }}>Servicio</p>
       <Field label="Trabajo a realizar">
         <input value={f.trabajo} onChange={(e) => set({ trabajo: e.target.value })} className={inputCls} style={inputStyle} />
       </Field>
