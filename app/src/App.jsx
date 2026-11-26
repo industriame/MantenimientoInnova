@@ -3521,18 +3521,22 @@ function registroHTML(texto, esc) {
 
 /* Lista de materiales que hacen falta: del kardex (aunque no haya
    existencias) o escritos a mano si no están, cada uno con cantidad y unidad. */
-function ListaMateriales({ materiales = [], onChange, stock = [], textoBoton }) {
+function ListaMateriales({ materiales = [], onChange, stock = [], textoBoton, pedidosDe }) {
   const setMat = (i, p) => onChange(materiales.map((m, j) => (j === i ? { ...m, ...p } : m)));
   const agregar = (m) => onChange([...materiales, { cantidad: "1", ...m }]);
+  const origen = (m) => (m.stockId ? "Del kardex" : m.kardex ? "Del kardex (sin registro en esta sede)" : "No está en el kardex");
   return (
         <div className="rounded-md p-2 space-y-1.5" style={{ background: COLORS.cream }}>
           {materiales.map((m, i) => (
             <div key={i} className="flex items-center gap-1.5">
               <div className="flex-1 min-w-0 text-left">
                 <p className="text-xs font-semibold break-words" style={cChar}>{m.nombre}</p>
-                <p className="text-[10px]" style={{ color: m.stockId ? COLORS.slate : COLORS.orange }}>
-                  {m.stockId ? "Del kardex" : "No está en el kardex"}
+                <p className="text-[10px]" style={{ color: m.stockId || m.kardex ? COLORS.slate : COLORS.orange }}>
+                  {origen(m)}
                 </p>
+                {pedidosDe?.(m.nombre) && (
+                  <p className="text-[10px] font-semibold" style={{ color: COLORS.ambar }}>{pedidosDe(m.nombre)}</p>
+                )}
               </div>
               <input type="text" inputMode="decimal" value={m.cantidad} placeholder="Cant."
                 onChange={(e) => setMat(i, { cantidad: e.target.value.replace(/[^0-9.,]/g, "") })}
@@ -3547,7 +3551,10 @@ function ListaMateriales({ materiales = [], onChange, stock = [], textoBoton }) 
           ))}
           <SelectorArticulo articulos={stock} value=""
             textoBoton={materiales.length ? "Agregar otro material…" : textoBoton || "Buscar en el kardex o escribir el material…"}
-            onChange={(id) => { const a = stock.find((x) => x.id === id); if (a) agregar({ stockId: a.id, nombre: a.nombre, unidad: a.unidad || "u" }); }}
+            onChange={(id) => {
+              const a = stock.find((x) => x.id === id);
+              if (a) agregar({ stockId: a.stockId !== undefined ? a.stockId : a.id, kardex: !!a.kardex, nombre: a.nombre, unidad: a.unidad || "u" });
+            }}
             onNuevo={(nombre) => agregar({ nombre, unidad: "u" })} />
         </div>
   );
@@ -3595,7 +3602,7 @@ function textoComentario(valor) {
   const partes = [];
   const mats = (valor.materiales || []).filter((m) => (m.nombre || "").trim());
   if (mats.length) {
-    partes.push(mats.map((m) => `${m.nombre.trim()} × ${String(m.cantidad || 1).replace(",", ".")} ${(m.unidad || "u").trim()}${m.stockId ? "" : " (no está en el kardex)"}`).join("; "));
+    partes.push(mats.map((m) => `${m.nombre.trim()} × ${String(m.cantidad || 1).replace(",", ".")} ${(m.unidad || "u").trim()}${m.stockId || m.kardex ? "" : " (no está en el kardex)"}`).join("; "));
   }
   if ((valor.texto || "").trim()) partes.push(valor.texto.trim());
   return partes.join(" · ");
@@ -3736,8 +3743,8 @@ function SelectorArticulo({ articulos, value, onChange, onNuevo, textoBoton }) {
                 className="w-full flex items-start justify-between gap-3 px-2.5 py-2 text-left border-b last:border-b-0"
                 style={{ borderColor: COLORS.line, background: i === activo ? `${COLORS.orange}12` : "white" }}>
                 <span className="text-xs min-w-0 break-words" style={{ ...cChar, fontWeight: x.id === value ? 700 : 500 }}>{x.nombre}</span>
-                <span className="text-[10px] shrink-0 text-right" style={{ color: x.cantidad > 0 ? COLORS.slate : COLORS.rojo }}>
-                  {existencia(x)}
+                <span className="text-[10px] shrink-0 text-right" style={{ color: x.detalle ? COLORS.slate : x.cantidad > 0 ? COLORS.slate : COLORS.rojo, maxWidth: "55%" }}>
+                  {x.detalle || existencia(x)}
                 </span>
               </button>
             ))}
@@ -5252,7 +5259,7 @@ const ESTADOS_NECESIDAD = {
      · Finalizar        → Completada; el texto queda como resolución
    Material y espera aceptan una fecha nueva, que se guarda como
    reprogramación. El supervisor, además, puede dejar una corrección. */
-function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
+function RegistrarAvance({ item, data, acciones, stock, supervisor, onFinalizada }) {
   const esPrev = item.tipo === "preventivo";
   const esCorr = item.tipo === "correctivo";
   // Programada: primero hay que iniciarla; después se registra lo que pasa
@@ -5320,7 +5327,45 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
 
   // Bodega de la sede: con existencias se usa; sin existencias se pide
   const conStock = stock.filter((a) => Number(a.cantidad) > 0);
-  const sinExistencias = stock.filter((a) => !(Number(a.cantidad) > 0));
+  /* Catálogo para "Requiere material": el kardex de TODAS las sedes (por
+     nombre) menos lo que esta sede sí tiene, más lo que ya está pedido en
+     otras órdenes aunque no esté en el kardex. Así se repite el mismo nombre
+     y se ve si ya hay un pedido en curso. */
+  const pedidosAbiertos = necesidadesDe(data || {}, null).filter(({ n, orden }) =>
+    ["pendiente", "comprado"].includes(n.estado) && !n.noRequerido && orden.id !== item.id);
+  const pedidosDe = (nombre) => {
+    const k = claveArticulo(nombre || "");
+    const ps = pedidosAbiertos.filter(({ n }) => claveArticulo(n.nombre) === k);
+    if (!ps.length) return "";
+    const codigos = [...new Set(ps.map(({ orden }) => orden.codigo))];
+    return `Ya pedido en ${codigos.slice(0, 3).join(", ")}${codigos.length > 3 ? "…" : ""} (${ps.map(({ n }) => ESTADOS_NECESIDAD[n.estado].label.toLowerCase()).filter((v, i, a) => a.indexOf(v) === i).join(" / ")})`;
+  };
+  const sinExistencias = (() => {
+    const grupos = new Map();
+    ((data && data.stock) || stock).forEach((a) => {
+      const k = claveArticulo(a.nombre);
+      const g = grupos.get(k) || { nombre: a.nombre, unidad: a.unidad || "u", enSede: null, otras: 0 };
+      if (a.sedeId === item.sedeId) g.enSede = a; else g.otras += Number(a.cantidad) || 0;
+      grupos.set(k, g);
+    });
+    const lista = [];
+    grupos.forEach((g, k) => {
+      if (g.enSede && Number(g.enSede.cantidad) > 0) return;   // esta sede lo tiene: se carga como usado
+      const ped = pedidosDe(g.nombre);
+      lista.push({
+        id: g.enSede ? g.enSede.id : `kdx:${k}`, stockId: g.enSede ? g.enSede.id : "", kardex: true,
+        nombre: g.enSede ? g.enSede.nombre : g.nombre, unidad: g.enSede ? g.enSede.unidad : g.unidad, cantidad: 0,
+        detalle: [g.otras > 0 ? `Sin stock aquí · ${g.otras} ${g.unidad} en otras sedes` : "Sin stock", ped].filter(Boolean).join(" · "),
+      });
+    });
+    // Pedidos en curso de material que no está en el kardex
+    pedidosAbiertos.forEach(({ n }) => {
+      const k = claveArticulo(n.nombre);
+      if (grupos.has(k) || lista.some((x) => x.id === `ped:${k}`)) return;
+      lista.push({ id: `ped:${k}`, stockId: "", kardex: false, nombre: n.nombre, unidad: n.unidad || "u", cantidad: 0, detalle: pedidosDe(n.nombre) });
+    });
+    return lista;
+  })();
   // Material pedido que aún no llega: la orden no se puede finalizar
   const sinEntregar = (item.necesidades || []).filter((n) => ["pendiente", "comprado"].includes(n.estado) && !n.noRequerido);
   const checklistPend = esPrev ? avanceChecklist(item.checklist).pendientes : 0;
@@ -5449,7 +5494,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
       const necesidades = tipo === "material" ? mats.map((m) => ({
         id: uid("nec"), nombre: m.nombre.trim(),
         cantidad: Number(String(m.cantidad || 1).replace(",", ".")) || 1,
-        unidad: (m.unidad || "u").trim(), stockId: m.stockId || "",
+        unidad: (m.unidad || "u").trim(), stockId: m.stockId || "", kardex: !!(m.stockId || m.kardex),
         estado: "pendiente", fecha: fmtDate(new Date()), hora: fmtHora(new Date()), usuarioId,
       })) : undefined;
       const conc = opcionesConsumo();
@@ -5506,7 +5551,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
             Solo lo que <b>no hay en bodega</b> o no está en el kardex: queda en Pendientes de compra.
             Lo que sí hay en bodega cárgalo abajo, en “Material usado de bodega”.
           </p>
-          <ListaMateriales materiales={materiales} onChange={setMateriales}
+          <ListaMateriales materiales={materiales} onChange={setMateriales} pedidosDe={pedidosDe}
             stock={sinExistencias} textoBoton="Buscar en el kardex (sin existencias) o escribir el material…" />
         </>
       )}
@@ -6198,7 +6243,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             <RegistroOrden texto={item.observaciones}
               onEditar={corrige ? (t) => acciones.updateActividad(item, { observaciones: t }, { sinRegistro: true }) : undefined} />
           </Field>
-          <RegistrarAvance item={item} acciones={acciones} stock={stockSede} supervisor={esSupervisor}
+          <RegistrarAvance item={item} data={data} acciones={acciones} stock={stockSede} supervisor={esSupervisor}
             onFinalizada={() => { if (onCompletada) onCompletada(); else setOpen(false); }} />
 
           {/* La resolución sale del comentario de "Finalizar". El supervisor la
@@ -10239,7 +10284,7 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
                     </div>
                     <p className="text-[10px] mt-0.5" style={cSlate}>
                       {sedeNombre(data.sedes, r.orden.sedeId)} · Pedido el {r.n.fecha}{r.n.hora ? ` ${r.n.hora}` : ""} por {usuarioNombre(data.usuarios, r.n.usuarioId)}
-                      {" · "}<span style={{ color: r.n.stockId ? COLORS.slate : COLORS.orange }}>{r.n.stockId ? "Del kardex" : "No está en el kardex"}</span>
+                      {" · "}<span style={{ color: r.n.stockId || r.n.kardex ? COLORS.slate : COLORS.orange }}>{r.n.stockId || r.n.kardex ? "Del kardex" : "No está en el kardex"}</span>
                       {r.n.fechaEstado && r.n.estado !== "pendiente" ? ` · ${e.label} el ${r.n.fechaEstado}` : ""}
                     </p>
                   </div>
