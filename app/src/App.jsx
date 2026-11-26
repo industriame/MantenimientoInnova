@@ -61,9 +61,10 @@ const ROLES = {
   solicitante: { label: "Solicitante", desc: "Reporta novedades de su sede", color: COLORS.orange, sedes: "una" },
   tecnico: { label: "Técnico de Mantenimiento", desc: "Ejecuta actividades en sus sedes", color: COLORS.charcoal, sedes: "varias" },
   admin: { label: "Supervisor Administrador", desc: "Control total del sistema", color: COLORS.verde, sedes: "todas" },
-  cliente: { label: "Cliente", desc: "Revisa y aprueba costos, sin edición", color: "#3B6EA5", sedes: "todas" },
+  // Retirado: se conserva solo para reconocer usuarios antiguos; no se ofrece al crear usuarios
+  cliente: { label: "Cliente (retirado)", desc: "Perfil retirado", color: "#3B6EA5", sedes: "todas", retirado: true },
 };
-const ROL_IDS = Object.keys(ROLES);
+const ROL_IDS = Object.keys(ROLES).filter((r) => !ROLES[r].retirado);
 const rolDe = (u) => ROLES[u?.rol] || ROLES.solicitante;
 
 // --- Estados de actividad (comunes a preventivo y correctivo) ---
@@ -295,14 +296,13 @@ function seedData() {
 
   const usuarios = [
     { id: uid("usr"), nombre: "Luis Zambrano", rol: "admin", clave: "admin2026", sedeIds: [] },
-    { id: uid("usr"), nombre: "Innova Schools (Dirección)", rol: "cliente", clave: "innova2026", sedeIds: [] },
     { id: uid("usr"), nombre: "Cristian Vargas", rol: "tecnico", clave: "campo2026", sedeIds: [sedes[0].id, sedes[1].id] },
     { id: uid("usr"), nombre: "Juan", rol: "tecnico", clave: "juan2026", sedeIds: [sedes[2].id, sedes[3].id] },
     { id: uid("usr"), nombre: "Patricia Mejía", rol: "solicitante", clave: "quitumbe26", sedeIds: [sedes[0].id] },
     { id: uid("usr"), nombre: "Andrea Castro", rol: "solicitante", clave: "calderon26", sedeIds: [sedes[1].id] },
   ];
-  const admin = usuarios[0], cristian = usuarios[2], juan = usuarios[3];
-  const patricia = usuarios[4], andrea = usuarios[5];
+  const admin = usuarios[0], cristian = usuarios[1], juan = usuarios[2];
+  const patricia = usuarios[3], andrea = usuarios[4];
 
   const flat = flattenActivos(sedes);
   const hoy = new Date();
@@ -8395,42 +8395,89 @@ function BotonDevolverSolicitud({ srv, acciones }) {
   );
 }
 
-/* Servicios por etapa. Todo servicio nace de una solicitud (Pasar a
-   servicio). El supervisor lo define, el cliente lo aprueba y el supervisor
-   asigna proveedor y fecha. En modo "cliente" es la misma vista, de solo
-   consulta, salvo aprobar o rechazar lo que está en aprobación. */
-function AdminServicios({ data, persist, user, modo = "admin" }) {
-  const esCliente = modo === "cliente";
+/* Servicios: una sola tabla para el supervisor, que define, aprueba,
+   programa y cierra cada servicio. Se filtra y ordena desde los encabezados
+   y se seleccionan varios para la proforma (PDF), enviarlos a aprobación,
+   aprobarlos o rechazarlos. */
+const ORDEN_ESTADO_SRV = ["por_definir", "por_aprobar", "aprobada", "programada", "en_proceso", "completada", "rechazada"];
+function AdminServicios({ data, persist, user }) {
   const acciones = useAcciones(data, persist, user);
-  const [modal, setModal] = useState(null);     // {srv, enviar} para definir/editar
-  const [cerrar, setCerrar] = useState(null);   // servicio aprobado por definir
-
-  const [fSede, setFSede] = useState("todas");
-  const [q, setQ] = useState("");
-  const servicios = (data.servicios || []).filter((s) => (fSede === "todas" || s.sedeId === fSede) && coincideBusqueda(s, data, q));
-  const set = (id, patch) => persist((data) => ({ ...data, servicios: (data.servicios || []).map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
-
-  // Agrupación por etapa, en el mismo orden que preventivos y correctivos
-  const porDefinir = servicios.filter((s) => s.estado === "por_definir");
-  const porAprobar = servicios.filter((s) => s.estado === "por_aprobar");
-  const aprobados = servicios.filter((s) => s.estado === "aprobada");
-  const programados = servicios.filter((s) => s.estado === "programada");
-  const enEjecucion = servicios.filter((s) => s.estado === "en_proceso");
-  const finalizados = servicios.filter((s) => s.estado === "completada");
-  const rechazados = servicios.filter((s) => s.estado === "rechazada");
-
-  const [gestionar, setGestionar] = useState(null);   // id del servicio en curso desplegado
-  // Selección para la proforma (servicios por definir ya completos o en aprobación)
+  const [modal, setModal] = useState(null);       // {srv, enviar} para completar/editar
+  const [cerrar, setCerrar] = useState(null);     // aprobado: proveedor y fecha
+  const [gestionar, setGestionar] = useState(null);
   const [sel, setSel] = useState([]);
   const [progPdf, setProgPdf] = useState("");
+  const [rechazo, setRechazo] = useState(null);   // texto del motivo mientras se rechaza
+  // Filtros y orden desde los encabezados
+  const [fTexto, setFTexto] = useState("");
+  const [fSede, setFSede] = useState("todas");
+  const [fTipo, setFTipo] = useState("todos");
+  const [fEstado, setFEstado] = useState("todos");
+  const [orden, setOrden] = useState({ col: "estado", asc: true });
+
+  const set = (ids, fn) => persist((d) => ({ ...d, servicios: (d.servicios || []).map((x) => (ids.includes(x.id) ? fn(x) : x)) }));
   const completo = (s) => !!(s.trabajo || "").trim() && Number(s.presupuesto) > 0;
-  const enTramite = [...porDefinir, ...porAprobar];
-  const seleccionados = enTramite.filter((s) => sel.includes(s.id));
-  const totalSel = seleccionados.reduce((a, s) => a + (Number(s.presupuesto) || 0), 0);
+  const valor = (s) => (s.presupuestoAprobado != null && !["por_definir", "por_aprobar", "rechazada"].includes(s.estado)
+    ? Number(s.presupuestoAprobado) : Number(s.presupuesto) || 0);
+
+  const todos = data.servicios || [];
+  const tiposUsados = [...new Set(todos.map((s) => s.tipoProveedor).filter(Boolean))].sort();
+  const t = fTexto.trim().toLowerCase();
+  const visibles = todos
+    .filter((s) => fSede === "todas" || s.sedeId === fSede)
+    .filter((s) => fTipo === "todos" || (s.tipoProveedor || "") === fTipo)
+    .filter((s) => fEstado === "todos" || (fEstado === "activos" ? !["completada", "rechazada"].includes(s.estado) : s.estado === fEstado))
+    .filter((s) => !t || [s.codigo, s.origenCodigo, tituloServicio(s), s.detalle, s.proveedor, ubicacionTexto(data.sedes, s)]
+      .some((v) => String(v || "").toLowerCase().includes(t)))
+    .sort((a, b) => {
+      const k = {
+        codigo: (x) => x.codigo || "",
+        sede: (x) => sedeNombre(data.sedes, x.sedeId),
+        trabajo: (x) => tituloServicio(x).toLowerCase(),
+        tipo: (x) => x.tipoProveedor || "",
+        proveedor: (x) => x.proveedor || "",
+        valor: (x) => valor(x),
+        fecha: (x) => x.fecha || "",
+        estado: (x) => `${ORDEN_ESTADO_SRV.indexOf(x.estado)}`.padStart(2, "0") + (x.codigo || ""),
+      }[orden.col];
+      const va = k(a); const vb = k(b);
+      const r = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "es");
+      return orden.asc ? r : -r;
+    });
+  const seleccionados = todos.filter((s) => sel.includes(s.id));
+  const totalSel = seleccionados.reduce((a, s) => a + valor(s), 0);
+  const totalVis = visibles.reduce((a, s) => a + valor(s), 0);
   const alternar = (id) => setSel((x) => (x.includes(id) ? x.filter((y) => y !== id) : [...x, id]));
-  /* Proforma: PDF con el detalle de cada servicio y la suma total. Los que
-     estaban por definir pasan juntos a aprobación del cliente. */
-  const generarProforma = async () => {
+  const todosMarcados = visibles.length > 0 && visibles.every((s) => sel.includes(s.id));
+
+  const ahora = () => `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
+  const registrar = (x, texto, de, a) => ({
+    observaciones: conRegistro(x.observaciones, [lineaRegistro(user?.nombre, texto)]),
+    log: [...(x.log || []), { id: uid("log"), titulo: "Estado", detalle: `${ESTADOS[de]?.label || de} → ${ESTADOS[a]?.label || a}`, usuarioId: user?.id || "", sello: ahora() }],
+  });
+  // Acciones en lote: cada una aplica solo a los seleccionados que pueden recibirla
+  const paraEnviar = seleccionados.filter((s) => s.estado === "por_definir" && completo(s));
+  const paraAprobar = seleccionados.filter((s) => (s.estado === "por_aprobar" || s.estado === "por_definir") && completo(s));
+  const paraRechazar = seleccionados.filter((s) => ["por_definir", "por_aprobar"].includes(s.estado));
+  const enviar = () => {
+    const ids = paraEnviar.map((s) => s.id);
+    set(ids, (x) => ({ ...x, estado: "por_aprobar", ...registrar(x, "Enviado a aprobación", x.estado, "por_aprobar") }));
+    setSel([]);
+  };
+  const aprobar = () => {
+    const ids = paraAprobar.map((s) => s.id);
+    set(ids, (x) => ({ ...x, estado: "aprobada", presupuestoAprobado: Number(x.presupuesto) || 0, decididoEn: ahora(),
+      ...registrar(x, `Aprobado por ${money(x.presupuesto || 0)}`, x.estado, "aprobada") }));
+    setSel([]);
+  };
+  const rechazar = () => {
+    const ids = paraRechazar.map((s) => s.id);
+    const motivo = (rechazo || "").trim();
+    set(ids, (x) => ({ ...x, estado: "rechazada", motivoRechazo: motivo, decididoEn: ahora(),
+      ...registrar(x, `Rechazado: ${motivo}`, x.estado, "rechazada") }));
+    setSel([]); setRechazo(null);
+  };
+  const proforma = async () => {
     if (!seleccionados.length) return;
     setProgPdf("Preparando…");
     try {
@@ -8440,239 +8487,197 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
       a.href = url; a.download = `proforma-servicios-${fmtDate(new Date())}.pdf`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      const enviar = seleccionados.filter((s) => s.estado === "por_definir").map((s) => s.id);
-      if (enviar.length) {
-        const ahora = `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
-        persist((d) => ({ ...d, servicios: (d.servicios || []).map((x) => (enviar.includes(x.id) ? {
-          ...x, estado: "por_aprobar",
-          observaciones: conRegistro(x.observaciones, [lineaRegistro(user?.nombre, `Enviado a aprobación en proforma (${seleccionados.map((y) => y.codigo).join(", ")})`)]),
-          log: [...(x.log || []), { id: uid("log"), titulo: "Estado", detalle: "Por definir → En aprobación (proforma)", usuarioId: user?.id || "", sello: ahora }],
-        } : x)) }));
-      }
-      setSel([]);
     } catch (e) {
       console.error("[proforma]", e);
     } finally { setProgPdf(""); }
   };
 
-  /* Fila compacta: código, estado, título y monto en una línea; ubicación,
-     proveedor y fecha en la segunda. El detalle completo se abre con (i). */
-  const tarjeta = (srv, extra) => (
-    <div key={srv.id} className="border rounded-md px-2.5 py-2 text-left" style={{ ...cardStyle, borderLeft: `3px solid ${ESTADOS[srv.estado]?.color || COLORS.line}` }}>
-      <div className="flex items-center gap-2">
-        <span className="text-[10px] font-bold shrink-0" style={cChar}>{srv.codigo}</span>
-        <p className="text-xs font-semibold truncate flex-1 min-w-0" style={cChar} title={tituloServicio(srv)}>{tituloServicio(srv)}</p>
-        <span className="text-xs font-bold shrink-0" style={cOrange}>
-          {!srv.presupuesto && !srv.presupuestoAprobado ? "—"
-            : ["por_definir", "por_aprobar", "rechazada"].includes(srv.estado) ? money(srv.presupuesto)
-            : money(srv.presupuestoAprobado ?? srv.presupuesto)}
-        </span>
-      </div>
-      <div className="flex items-center gap-2 mt-1">
-        <p className="text-[10px] truncate flex-1 min-w-0" style={cSlate}>
-          {sedeNombre(data.sedes, srv.sedeId)}
-          {srv.tipoProveedor ? ` · ${srv.tipoProveedor}` : ""}
-          {srv.proveedor ? ` · ${srv.proveedor}` : ""}
-          {srv.fecha ? ` · ${srv.fecha}` : ""}
-        </p>
-        <div className="flex items-center gap-2 shrink-0">
-          <EstadoChip estado={srv.estado} />
-          <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }} size={13} />
-          {!esCliente && (
-            <button onClick={() => setModal({ srv })} title="Editar la ficha del servicio"><Pencil size={12} color={COLORS.slate} /></button>
-          )}
-          {!esCliente && (
-            <DeleteBtn onConfirm={() => {
-              marcarBorrado("servicios", srv.id);
-              persist((data) => ({ ...data, servicios: (data.servicios || []).filter((x) => x.id !== srv.id) }));
-            }} />
-          )}
-        </div>
-      </div>
-      {srv.motivoRechazo && (
-        <p className="text-[10px] mt-1.5 rounded px-2 py-1" style={{ background: `${COLORS.rojo}12`, color: COLORS.charcoal }}>
-          <b>Rechazado:</b> {srv.motivoRechazo}
-        </p>
-      )}
-      {extra}
-    </div>
+  const th = "px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left whitespace-nowrap";
+  const filtroCls = "w-full border rounded px-1.5 py-1 text-[11px] font-normal normal-case tracking-normal bg-white";
+  const encabezado = (col, label, extra = "") => (
+    <th className={`${th} ${extra}`} style={cSlate}>
+      <button type="button" onClick={() => setOrden((o) => ({ col, asc: o.col === col ? !o.asc : true }))}
+        className="inline-flex items-center gap-0.5 uppercase" style={orden.col === col ? cChar : cSlate}>
+        {label}{orden.col === col ? (orden.asc ? " ▲" : " ▼") : ""}
+      </button>
+    </th>
   );
-
-  const botonAccion = (texto, color, onClick) => (
-    <button onClick={onClick} className="w-full mt-1.5 text-[11px] font-semibold py-1.5 rounded text-white" style={{ background: color }}>
-      {texto}
-    </button>
+  const accion = (texto, color, onClick) => (
+    <button type="button" onClick={onClick} className="text-[11px] font-semibold whitespace-nowrap" style={{ color }}>{texto}</button>
   );
-
-  // Programados y en ejecución: el supervisor los despliega para trabajarlos; el cliente solo los consulta
-  const enCurso = (srv) => tarjeta(srv, !esCliente && (
-    gestionar === srv.id ? (
-      <div className="mt-2">
-        <TarjetaActividad
-          item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }}
-          data={data} acciones={acciones} rol="admin" abiertoInicial onCompletada={() => setGestionar(null)} />
-        <button onClick={() => setGestionar(null)} className="w-full mt-1 text-[10px] font-semibold" style={cSlate}>Ocultar</button>
-      </div>
-    ) : botonAccion("Gestionar", COLORS.slate, () => setGestionar(srv.id))
-  ));
-
-  // El cliente revisa la ficha completa solo al desplegarla para decidir
-  const enAprobacion = (srv) => !esCliente ? tarjeta(srv, <BotonDevolverSolicitud srv={srv} acciones={acciones} />) : gestionar === srv.id ? (
-    <div key={srv.id}>
-      <TarjetaServicioCliente srv={srv} data={data} onDecidir={(patch) => { set(srv.id, patch); setGestionar(null); }} />
-      <button onClick={() => setGestionar(null)} className="w-full mt-1 text-[10px] font-semibold" style={cSlate}>Ocultar</button>
-    </div>
-  ) : tarjeta(srv, botonAccion("Revisar y decidir", ESTADOS.por_aprobar.color, () => setGestionar(srv.id)));
+  const btnLote = "text-[11px] font-semibold px-2.5 py-1.5 rounded-md text-white disabled:opacity-40";
 
   return (
-    <div className="mt-4 space-y-3">
+    <div className="mt-4 space-y-2">
       <p className="text-xs" style={cSlate}>
-        {esCliente
-          ? "Servicios externos por etapa. En \"En aprobación\" decides si se autorizan; el resto es para consulta."
-          : "Los servicios nacen de un correctivo (\"Requiere servicio\" en la bitácora). Complétalos, agrúpalos en una proforma para enviarlos a aprobación y, una vez aprobados, asigna el proveedor y la fecha."}
+        Los servicios nacen de un correctivo ("Requiere servicio" en la bitácora). Complétalos, selecciona varios para la
+        proforma, envíalos a aprobación o apruébalos, y luego asigna proveedor y fecha. Filtra y ordena desde los encabezados.
       </p>
 
-      <FiltroSedeBusqueda sedes={data.sedes} fSede={fSede} setFSede={setFSede} q={q} setQ={setQ}
-        placeholder="Buscar por código, trabajo, proveedor o ubicación…" />
+      {/* Barra de acciones sobre lo seleccionado */}
+      <div className="flex items-center gap-1.5 flex-wrap rounded-md p-2" style={{ background: COLORS.cream }}>
+        <span className="text-xs mr-auto" style={cChar}>
+          {seleccionados.length ? <>{seleccionados.length} seleccionado(s) · <b style={cOrange}>{money(totalSel)}</b></> : "Selecciona servicios para actuar sobre varios a la vez."}
+        </span>
+        <button disabled={!seleccionados.length || !!progPdf} onClick={proforma} className={btnLote} style={{ background: COLORS.charcoal }}>
+          {progPdf || "Proforma PDF"}
+        </button>
+        <button disabled={!paraEnviar.length} onClick={enviar} className={btnLote} style={{ background: ESTADOS.por_aprobar.color }}>
+          Enviar a aprobación{paraEnviar.length ? ` (${paraEnviar.length})` : ""}
+        </button>
+        <button disabled={!paraAprobar.length} onClick={aprobar} className={btnLote} style={{ background: COLORS.verde }}>
+          Aprobar{paraAprobar.length ? ` (${paraAprobar.length})` : ""}
+        </button>
+        <button disabled={!paraRechazar.length} onClick={() => setRechazo("")} className={btnLote} style={{ background: COLORS.rojo }}>
+          Rechazar{paraRechazar.length ? ` (${paraRechazar.length})` : ""}
+        </button>
+      </div>
+      {rechazo !== null && (
+        <div className="flex gap-1.5 items-center rounded-md p-2" style={{ background: `${COLORS.rojo}0D` }}>
+          <input autoFocus value={rechazo} onChange={(e) => setRechazo(e.target.value)} placeholder="Motivo del rechazo"
+            className="flex-1 min-w-0 border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+          <button onClick={() => setRechazo(null)} className="text-[11px] font-semibold px-2" style={cSlate}>Cancelar</button>
+          <button disabled={!rechazo.trim()} onClick={rechazar} className={btnLote} style={{ background: COLORS.rojo }}>Confirmar rechazo</button>
+        </div>
+      )}
 
-      {esCliente ? (
-        <>
-          <SeccionPlegable titulo="Por definir (supervisor)" count={porDefinir.length} color={ESTADOS.por_definir.color}>
-            {porDefinir.map((s) => tarjeta(s))}
-            {porDefinir.length === 0 && <Empty>Nada por definir.</Empty>}
-          </SeccionPlegable>
-          <SeccionPlegable titulo="En aprobación · tu decisión" count={porAprobar.length} color={ESTADOS.por_aprobar.color} defaultOpen>
-            {porAprobar.map(enAprobacion)}
-            {porAprobar.length === 0 && <Empty>Sin servicios esperando aprobación.</Empty>}
-          </SeccionPlegable>
-        </>
-      ) : (
-        <SeccionPlegable titulo="Por definir y en aprobación · proformas" count={enTramite.length}
-          color={ESTADOS.por_definir.color} defaultOpen={enTramite.length > 0}
-          nota="Completa cada servicio, selecciona los que van juntos y genera la proforma: se descarga el PDF con el total y los que estaban por definir pasan a aprobación del cliente.">
-          {enTramite.length === 0 ? <Empty>Nada por definir ni en aprobación.</Empty> : (
-            <div className="space-y-2">
-              <div className="overflow-x-auto border rounded-md bg-white" style={bLine}>
-                <table className="w-full text-xs text-left" style={{ minWidth: 640 }}>
-                  <thead>
-                    <tr style={{ background: COLORS.cream }}>
-                      {["", "Código", "Sede", "Trabajo", "Tipo de proveedor", "Presupuesto", "Estado", ""].map((h, i) => (
-                        <th key={i} className={`px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide ${h === "Presupuesto" ? "text-right" : "text-left"}`} style={cSlate}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {enTramite.map((s) => {
-                      const ok = completo(s);
-                      return (
-                        <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.line}`, background: sel.includes(s.id) ? `${COLORS.orange}0D` : "white" }}>
-                          <td className="px-2 py-1.5">
-                            <input type="checkbox" checked={sel.includes(s.id)} disabled={!ok} onChange={() => alternar(s.id)}
-                              title={ok ? "Incluir en la proforma" : "Completa trabajo y presupuesto para poder incluirlo"} />
-                          </td>
-                          <td className="px-2 py-1.5 font-bold whitespace-nowrap" style={cChar}>
-                            {s.codigo}
-                            {s.origenCodigo && <span className="block text-[9px] font-semibold" style={cSlate}>de {s.origenCodigo}</span>}
-                          </td>
-                          <td className="px-2 py-1.5 whitespace-nowrap" style={cChar}>{sedeNombre(data.sedes, s.sedeId)}</td>
-                          <td className="px-2 py-1.5" style={cChar}>
-                            {s.trabajo || <span style={{ color: COLORS.orange }}>Sin definir</span>}
-                            {s.detalle && <span className="block text-[10px] line-clamp-2" style={cSlate}>{s.detalle}</span>}
-                          </td>
-                          <td className="px-2 py-1.5" style={cSlate}>{s.tipoProveedor || "—"}</td>
-                          <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap" style={cOrange}>{Number(s.presupuesto) > 0 ? money(s.presupuesto) : "—"}</td>
-                          <td className="px-2 py-1.5"><EstadoChip estado={s.estado} /></td>
-                          <td className="px-2 py-1.5 whitespace-nowrap">
-                            <div className="flex items-center gap-2 justify-end">
-                              {s.estado === "por_definir" && (
-                                <button onClick={() => setModal({ srv: s, enviar: true })} className="text-[11px] font-semibold" style={cOrange}>
-                                  {ok ? "Modificar" : "Completar"}
-                                </button>
-                              )}
-                              <BotonDetalle item={{ ...s, tipo: "servicio", tarea: tituloServicio(s), fechaProgramada: s.fecha }} size={13} />
-                              <button onClick={() => setModal({ srv: s })} title="Editar la ficha del servicio"><Pencil size={12} color={COLORS.slate} /></button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <div className="flex items-center justify-between gap-2 flex-wrap rounded-md p-2" style={{ background: COLORS.cream }}>
-                <span className="text-xs" style={cChar}>
-                  {seleccionados.length ? <>{seleccionados.length} seleccionado(s) · Total <b style={cOrange}>{money(totalSel)}</b></> : "Selecciona servicios completos para la proforma."}
-                </span>
-                <button disabled={!seleccionados.length || !!progPdf} onClick={generarProforma}
-                  className="text-xs font-semibold px-3 py-2 rounded-md text-white disabled:opacity-40" style={{ background: COLORS.orange }}>
-                  {progPdf || (seleccionados.some((s) => s.estado === "por_definir") ? "Generar proforma y enviar a aprobación" : "Generar proforma (PDF)")}
-                </button>
-              </div>
-              {porDefinir.some((s) => servicioDevolvible(s)) && (
-                <div className="space-y-1">
-                  {porDefinir.filter((s) => servicioDevolvible(s)).map((s) => (
-                    <div key={s.id} className="flex items-center gap-2 text-[11px]" style={cSlate}>
-                      <span className="font-bold" style={cChar}>{s.codigo}</span>
-                      <div className="flex-1"><BotonDevolverSolicitud srv={s} acciones={acciones} /></div>
+      <div className="overflow-x-auto border rounded-md bg-white" style={bLine}>
+        <table className="w-full text-xs text-left" style={{ minWidth: 980 }}>
+          <thead>
+            <tr style={{ background: COLORS.cream }}>
+              <th className={th}>
+                <input type="checkbox" checked={todosMarcados} title="Seleccionar todo lo filtrado"
+                  onChange={() => setSel(todosMarcados ? sel.filter((id) => !visibles.some((s) => s.id === id)) : [...new Set([...sel, ...visibles.map((s) => s.id)])])} />
+              </th>
+              {encabezado("codigo", "Código")}
+              {encabezado("sede", "Sede")}
+              {encabezado("trabajo", "Trabajo")}
+              {encabezado("tipo", "Tipo de proveedor")}
+              {encabezado("proveedor", "Proveedor")}
+              {encabezado("valor", "Valor", "text-right")}
+              {encabezado("fecha", "Fecha")}
+              {encabezado("estado", "Estado")}
+              <th className={th} />
+            </tr>
+            <tr style={{ background: COLORS.cream }}>
+              <th className="px-2 pb-1.5" />
+              <th className="px-2 pb-1.5" colSpan={1}>
+                <input value={fTexto} onChange={(e) => setFTexto(e.target.value)} placeholder="Buscar…" className={filtroCls} style={inputStyle} />
+              </th>
+              <th className="px-2 pb-1.5">
+                <select value={fSede} onChange={(e) => setFSede(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todas">Todas</option>
+                  {data.sedes.map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                </select>
+              </th>
+              <th className="px-2 pb-1.5" />
+              <th className="px-2 pb-1.5">
+                <select value={fTipo} onChange={(e) => setFTipo(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todos">Todos</option>
+                  {tiposUsados.map((x) => <option key={x} value={x}>{x}</option>)}
+                </select>
+              </th>
+              <th className="px-2 pb-1.5" />
+              <th className="px-2 pb-1.5" />
+              <th className="px-2 pb-1.5" />
+              <th className="px-2 pb-1.5">
+                <select value={fEstado} onChange={(e) => setFEstado(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todos">Todos</option>
+                  <option value="activos">Abiertos</option>
+                  {ORDEN_ESTADO_SRV.map((e) => <option key={e} value={e}>{ESTADOS[e]?.label || e}</option>)}
+                </select>
+              </th>
+              <th className="px-2 pb-1.5" />
+            </tr>
+          </thead>
+          <tbody>
+            {visibles.length === 0 && (
+              <tr><td colSpan={10} className="px-2 py-4 text-center" style={cSlate}>Ningún servicio coincide con los filtros.</td></tr>
+            )}
+            {visibles.map((s) => {
+              const ok = completo(s);
+              return (
+                <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.line}`, background: sel.includes(s.id) ? `${COLORS.orange}0D` : "white" }}>
+                  <td className="px-2 py-1.5"><input type="checkbox" checked={sel.includes(s.id)} onChange={() => alternar(s.id)} /></td>
+                  <td className="px-2 py-1.5 font-bold whitespace-nowrap" style={cChar}>
+                    {s.codigo}
+                    {s.origenCodigo && <span className="block text-[9px] font-semibold" style={cSlate}>de {s.origenCodigo}</span>}
+                  </td>
+                  <td className="px-2 py-1.5 whitespace-nowrap" style={cChar}>{sedeNombre(data.sedes, s.sedeId)}</td>
+                  <td className="px-2 py-1.5" style={{ ...cChar, maxWidth: 260 }}>
+                    {s.trabajo || <span style={{ color: COLORS.orange }}>Sin definir</span>}
+                    {s.detalle && <span className="text-[10px] line-clamp-2" style={cSlate}>{s.detalle}</span>}
+                    {s.motivoRechazo && s.estado === "rechazada" && <span className="block text-[10px]" style={{ color: COLORS.rojo }}>Rechazo: {s.motivoRechazo}</span>}
+                  </td>
+                  <td className="px-2 py-1.5" style={cSlate}>{s.tipoProveedor || "—"}</td>
+                  <td className="px-2 py-1.5" style={cSlate}>{s.proveedor || "—"}</td>
+                  <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                    <b style={cOrange}>{valor(s) > 0 ? money(valor(s)) : "—"}</b>
+                    {s.presupuestoAprobado != null && Number(s.presupuestoAprobado) !== Number(s.presupuesto) && !["por_definir", "por_aprobar"].includes(s.estado) && (
+                      <span className="block text-[9px]" style={cSlate}>est. {money(s.presupuesto || 0)}</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1.5 whitespace-nowrap" style={cSlate}>{s.fecha || "—"}</td>
+                  <td className="px-2 py-1.5"><EstadoChip estado={s.estado} /></td>
+                  <td className="px-2 py-1.5">
+                    <div className="flex items-center gap-2 justify-end">
+                      {s.estado === "por_definir" && accion(ok ? "Modificar" : "Completar", COLORS.orange, () => setModal({ srv: s, enviar: true }))}
+                      {s.estado === "aprobada" && accion("Programar", COLORS.orange, () => setCerrar(s))}
+                      {["programada", "en_proceso"].includes(s.estado) && accion("Gestionar", COLORS.charcoal, () => setGestionar(s.id))}
+                      <BotonDetalle item={{ ...s, tipo: "servicio", tarea: tituloServicio(s), fechaProgramada: s.fecha }} size={13} />
+                      <button onClick={() => setModal({ srv: s })} title="Editar la ficha del servicio"><Pencil size={12} color={COLORS.slate} /></button>
+                      <DeleteBtn onConfirm={() => {
+                        marcarBorrado("servicios", s.id);
+                        persist((d) => ({ ...d, servicios: (d.servicios || []).filter((x) => x.id !== s.id) }));
+                      }} />
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          {visibles.length > 0 && (
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.cream }}>
+                <td colSpan={6} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>{visibles.length} servicio(s)</td>
+                <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap" style={cOrange}>{money(totalVis)}</td>
+                <td colSpan={3} />
+              </tr>
+            </tfoot>
           )}
-        </SeccionPlegable>
-      )}
+        </table>
+      </div>
 
-      <SeccionPlegable titulo="Aprobados · por definir proveedor y fecha" count={aprobados.length} color={ESTADOS.aprobada.color}>
-        {aprobados.map((s) => tarjeta(s, !esCliente &&
-          botonAccion("Definir proveedor y fecha", COLORS.orange, () => setCerrar(s))))}
-        {aprobados.length === 0 && <Empty>Nada aprobado pendiente de programar.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="Programados" count={programados.length} color={COLORS.ambar}>
-        {programados.map(enCurso)}
-        {programados.length === 0 && <Empty>Sin servicios programados.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange}>
-        {enEjecucion.map(enCurso)}
-        {enEjecucion.length === 0 && <Empty>Sin servicios en ejecución.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="Finalizados" count={finalizados.length} color={COLORS.verde} defaultOpen={false}>
-        {finalizados.slice(0, 5).map((s) => tarjeta(s))}
-        {finalizados.length > 5 && (
-          <p className="text-[11px] text-center" style={cSlate}>{finalizados.length - 5} más en Reportes.</p>
-        )}
-        {finalizados.length === 0 && <Empty>Aún no hay servicios finalizados.</Empty>}
-      </SeccionPlegable>
-
-      {rechazados.length > 0 && (
-        <SeccionPlegable titulo="Rechazados" count={rechazados.length} color={COLORS.rojo} defaultOpen={false}
-          nota="No consumen presupuesto, pero quedan registrados para consulta.">
-          {rechazados.map((s) => tarjeta(s))}
-        </SeccionPlegable>
-      )}
-
-      {!esCliente && modal && (
-        <Modal title={`${modal.enviar ? "Definir" : "Editar"} ${modal.srv.codigo}`} onClose={() => setModal(null)} wide>
+      {modal && (
+        <Modal title={`${modal.enviar ? "Completar" : "Editar"} ${modal.srv.codigo}`} onClose={() => setModal(null)} wide>
           {modal.enviar ? (
-            <FormDefinirServicio srv={modal.srv} onClose={() => setModal(null)}
-              textoBoton="Guardar"
-              onSave={(f) => set(modal.srv.id, f)} />
+            <FormDefinirServicio srv={modal.srv} onClose={() => setModal(null)} textoBoton="Guardar"
+              onSave={(f) => set([modal.srv.id], (x) => ({ ...x, ...f }))} />
           ) : (
-            <FormEditarServicio srv={modal.srv} data={data} onClose={() => setModal(null)}
-              onSave={(patch, opciones) => acciones.updateActividad({ ...modal.srv, tipo: "servicio" }, patch, opciones)} />
+            <>
+              <BotonDevolverSolicitud srv={modal.srv} acciones={acciones} />
+              <FormEditarServicio srv={modal.srv} data={data} onClose={() => setModal(null)}
+                onSave={(patch, opciones) => acciones.updateActividad({ ...modal.srv, tipo: "servicio" }, patch, opciones)} />
+            </>
           )}
         </Modal>
       )}
-
-      {!esCliente && cerrar && (
+      {cerrar && (
         <Modal title={`Programar ${cerrar.codigo}`} onClose={() => setCerrar(null)} wide>
           <FormCerrarServicio srv={cerrar} onClose={() => setCerrar(null)}
-            onConfirm={(patch) => set(cerrar.id, patch)} />
+            onConfirm={(patch) => set([cerrar.id], (x) => ({ ...x, ...patch }))} />
         </Modal>
       )}
+      {gestionar && (() => {
+        const srv = todos.find((x) => x.id === gestionar);
+        if (!srv) return null;
+        return (
+          <Modal title={`Gestionar ${srv.codigo}`} onClose={() => setGestionar(null)} wide>
+            <TarjetaActividad item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }}
+              data={data} acciones={acciones} rol="admin" abiertoInicial onCompletada={() => setGestionar(null)} />
+          </Modal>
+        );
+      })()}
     </div>
   );
 }
@@ -8823,65 +8828,6 @@ function AdminPreventivos({ data, persist, user }) {
 
 /* Decisión del cliente sobre un servicio externo: puede aprobarlo por el
    valor solicitado o por uno distinto, dejarlo en espera o rechazarlo. */
-function TarjetaServicioCliente({ srv, data, onDecidir }) {
-  const [valor, setValor] = useState(srv.presupuesto);
-  const [motivo, setMotivo] = useState("");
-  const [rechazando, setRechazando] = useState(false);
-  const ahora = () => `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
-
-  return (
-    <div className="border rounded-md p-3" style={{ ...cardStyle, borderLeft: `3px solid #7B5EA7` }}>
-      <FichaServicio srv={srv} data={data} />
-
-      <div className="flex items-center justify-between gap-2 mt-2.5 pt-2.5 border-t" style={bLine}>
-        <span className="text-xs" style={cSlate}>Presupuesto solicitado</span>
-        <span className="text-base font-bold" style={cOrange}>{money(srv.presupuesto)}</span>
-      </div>
-
-      {!rechazando ? (
-        <>
-          <Field label="Aprobar por (USD)" hint="Puedes ajustar el monto autorizado.">
-            <input type="number" min="0" step="0.01" value={valor} onChange={(e) => setValor(e.target.value)}
-              className="w-full border rounded-md px-2 py-2 text-sm outline-none" style={inputStyle} />
-          </Field>
-          <div className="grid grid-cols-3 gap-1.5 mt-2">
-            <button onClick={() => onDecidir({ estado: "aprobada", presupuestoAprobado: Number(valor) || 0, decididoEn: ahora() })}
-              className="text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.verde }}>
-              Aprobar
-            </button>
-            <button onClick={() => onDecidir({ estado: "por_aprobar", enEspera: true, decididoEn: ahora() })}
-              className="text-xs font-semibold py-2 rounded-md border" style={{ borderColor: COLORS.ambar, color: COLORS.ambar }}>
-              En espera
-            </button>
-            <button onClick={() => setRechazando(true)}
-              className="text-xs font-semibold py-2 rounded-md border" style={{ borderColor: COLORS.rojo, color: COLORS.rojo }}>
-              Rechazar
-            </button>
-          </div>
-        </>
-      ) : (
-        <div className="mt-2">
-          <Field label="Motivo del rechazo">
-            <textarea value={motivo} onChange={(e) => setMotivo(e.target.value)} rows={2}
-              placeholder="Por qué no se autoriza este servicio" className={`${inputCls} resize-none`} style={inputStyle} />
-          </Field>
-          <div className="flex gap-1.5 mt-2">
-            <button onClick={() => setRechazando(false)}
-              className="flex-1 text-xs font-semibold py-2 rounded-md border" style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
-              Cancelar
-            </button>
-            <button disabled={!motivo.trim()}
-              onClick={() => onDecidir({ estado: "rechazada", motivoRechazo: motivo.trim(), decididoEn: ahora() })}
-              className="flex-1 text-xs font-semibold py-2 rounded-md text-white disabled:opacity-40" style={{ background: COLORS.rojo }}>
-              Confirmar rechazo
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /* Agrupa los tres tipos de actividad en un solo apartado. */
 function AdminActividades({ data, persist, persistYa, user }) {
   const [sub, setSub] = useState("preventivos");
@@ -12528,47 +12474,6 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
   );
 }
 
-function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
-  const [tab, setTab] = useState("dashboard");
-  const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
-
-  const serviciosPorAprobar = (data.servicios || []).filter((s) => s.estado === "por_aprobar");
-  const bandeja = serviciosPorAprobar.length;
-
-  const tabs = [
-    { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
-    { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
-    { id: "planual", label: "Plan anual", icon: <CalendarDays size={14} /> },
-    { id: "servicios", label: bandeja ? `Servicios (${bandeja} por aprobar)` : "Servicios", icon: <Wrench size={14} /> },
-    { id: "presupuesto", label: "Presupuesto", icon: <Wallet size={14} /> },
-    { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
-  ];
-
-  const pendientesCliente = getPendientes(data);
-
-  return (
-   <ProveedorDetalle data={data}>
-    <div className="w-full max-w-screen-2xl mx-auto px-4 lg:px-8 pb-16">
-      <AppHeader user={user} onLogout={onLogout} ultimaSync={ultimaSync} sedesTexto="Todas las sedes · Solo lectura" />
-      <Tabs tabs={tabs} active={tab} onChange={setTab} />
-
-      {tab === "dashboard" && <Dashboard data={data} persist={persist} sedes={data.sedes} mes={mes} onMesChange={setMes} mostrarPresupuesto mostrarCosto mostrarSatisfaccion />}
-      {tab === "presupuesto" && <VistaPresupuesto data={data} mes={mes} onMesChange={setMes} />}
-      {tab === "reportes" && <VistaReportes data={data} sedes={data.sedes} user={user} />}
-
-      {tab === "programacion" && (
-        <PanelProgramacion data={data} sedes={data.sedes} pendientes={pendientesCliente}
-          nota="Vista de solo lectura: aquí puedes consultar toda la programación, pero no puedes activar ni editar nada." />
-      )}
-
-      {tab === "planual" && <VistaPlanAnual data={data} sedes={data.sedes} />}
-
-      {tab === "servicios" && <AdminServicios data={data} persist={persist} user={user} modo="cliente" />}
-    </div>
-   </ProveedorDetalle>
-  );
-}
-
 /* ============================================================================
    18. APP  (una puerta de entrada, el rol decide la vista)
    ========================================================================= */
@@ -12850,7 +12755,16 @@ export default function App() {
     switch (user.rol) {
       case "solicitante": return <VistaSolicitante data={data} persist={persist} persistYa={persistYa} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
       case "tecnico": return <VistaTecnico data={data} persist={persist} persistYa={persistYa} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
-      case "cliente": return <VistaCliente data={data} persist={persist} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
+      // El perfil Cliente se retiró: todo lo gestiona el supervisor
+      case "cliente": return (
+        <div className="min-h-screen flex items-center justify-center p-6">
+          <div className="max-w-sm text-center space-y-3">
+            <p className="text-sm font-semibold" style={cChar}>Este perfil ya no está disponible.</p>
+            <p className="text-xs" style={cSlate}>La aprobación de servicios ahora la gestiona el supervisor. Si necesitas acceso, pídeselo al administrador.</p>
+            <button onClick={() => setUser(null)} className="text-xs font-semibold px-3 py-2 rounded-md border" style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>Salir</button>
+          </div>
+        </div>
+      );
       default: return <VistaAdmin data={data} persist={persist} persistYa={persistYa} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
     }
   };
