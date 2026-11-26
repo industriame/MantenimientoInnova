@@ -1101,6 +1101,22 @@ function preventivoPendiente(plan, rel, mes = mesKey(fmtDate(new Date())), ap = 
 
 /* --- Pendientes: preventivo sin OT abierta (reaparece tras completarse) +
    correctivo en estado 'pendiente' --------------------------------------- */
+/* Siguiente número de un tipo de orden (SOL, OT, SRV). Se calcula al
+   guardar, sobre los datos más recientes, y nunca por debajo del código más
+   alto que ya existe: así dos altas casi seguidas no repiten número aunque el
+   contador del dispositivo esté atrasado. */
+const CONTADOR_DE = { SOL: "solCounter", OT: "otCounter", SRV: "srvCounter" };
+function siguienteNumero(d, prefijo) {
+  const re = new RegExp(`^${prefijo}-(\\d+)$`);
+  let max = 0;
+  ["solicitudes", "servicios", "ordenes"].forEach((col) => (d[col] || []).forEach((x) => {
+    const m = re.exec(x.codigo || "");
+    if (m) max = Math.max(max, Number(m[1]));
+  }));
+  return Math.max(Number(d[CONTADOR_DE[prefijo]]) || 1, max + 1);
+}
+const codigoDe = (prefijo, n) => `${prefijo}-${String(n).padStart(4, "0")}`;
+
 function getPendientes(data) {
   const items = [];
 
@@ -1744,8 +1760,8 @@ function useAcciones(data, persist, usuario) {
          se toma del contador vigente para no repetir códigos). */
       const derivar = (r) => {
         if (!opciones.derivar) return r;
-        const n = r.solCounter || 1;
-        const codigo = `SOL-${String(n).padStart(4, "0")}`;
+        const n = siguienteNumero(r, "SOL");
+        const codigo = codigoDe("SOL", n);
         const ahora = new Date();
         const pendiente = opciones.derivar.pendiente;
         const nueva = {
@@ -1772,8 +1788,8 @@ function useAcciones(data, persist, usuario) {
          al correctivo, que se queda en espera o cerrado como paliativo. */
       const conServicio = (r) => {
         if (!opciones.servicio) return r;
-        const n = r.srvCounter || 1;
-        const codigo = `SRV-${String(n).padStart(4, "0")}`;
+        const n = siguienteNumero(r, "SRV");
+        const codigo = codigoDe("SRV", n);
         const ahora = new Date();
         const { detalle } = opciones.servicio;
         const nuevo = {
@@ -4897,10 +4913,9 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
 
   const crearSolicitud = async (ubic, form) => {
     const now = new Date();
-    const n = data.solCounter || 1;
-    const nueva = {
+        const nueva = {
       id: uid("sol"),
-      codigo: `SOL-${String(n).padStart(4, "0")}`,
+      codigo: "",
       sedeId: sede.id, faseId: ubic.faseId, activoId: ubic.activoId,
       descripcion: form.descripcion, criticidad: form.criticidad || "",
       solicitanteId: form.solicitanteId || user.id, fecha: fmtDate(now), hora: fmtHora(now),
@@ -4921,9 +4936,14 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
        Antes el mensaje salía de inmediato: si el guardado fallaba (señal
        intermitente en campo), el solicitante creía que había quedado
        registrada y la solicitud desaparecía al siguiente refresco. */
-    const ok = await persistYa((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    let codigo = "";
+    const ok = await persistYa((data) => {
+      const n = siguienteNumero(data, "SOL");
+      codigo = codigoDe("SOL", n);
+      return { ...data, solicitudes: [{ ...nueva, codigo }, ...data.solicitudes], solCounter: n + 1 };
+    });
     setMsg(ok
-      ? `Solicitud ${nueva.codigo} enviada.`
+      ? `Solicitud ${codigo} enviada.`
       : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
     setTimeout(() => setMsg(""), ok ? 4000 : 8000);
   };
@@ -6379,11 +6399,10 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
             observaciones: conRegistro(x.observaciones, [lineaRegistro(user?.nombre, `Activada · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)}${fecha ? ` · Programada para ${fmtDMY(fecha)}` : " · sin fecha"}`)]) } : x),
       }));
     } else {
-      const n = data.otCounter || 1;
-      persist((data) => ({
+      persist((data) => { const n = siguienteNumero(data, "OT"); return {
         ...data,
         ordenes: [...data.ordenes, {
-          id: uid("ot"), codigo: `OT-${String(n).padStart(4, "0")}`,
+          id: uid("ot"), codigo: codigoDe("OT", n),
           planId: item.planId, tarea: item.tarea, checklist: checklistDesdePasos(item.procedimientoPasos),
           categoria: item.categoria, frecuencia: item.frecuencia,
           duracionValor, duracionUnidad,
@@ -6394,7 +6413,7 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
           materiales: [], materialesEstado: "", consumos: [], createdAt: fmtDate(new Date()),
         }],
         otCounter: n + 1,
-      }));
+      }; });
     }
     setMsg("Actividad activada y asignada a ti. Ya aparece en el calendario.");
     setTimeout(() => setMsg(""), 4000);
@@ -6402,9 +6421,8 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
 
   const crearHallazgo = async (form) => {
     const now = new Date();
-    const n = data.solCounter || 1;
-    const nueva = {
-      id: uid("sol"), codigo: `SOL-${String(n).padStart(4, "0")}`,
+        const nueva = {
+      id: uid("sol"), codigo: "",
       sedeId: form.sedeId, faseId: form.faseId, activoId: form.activoId,
       descripcion: form.descripcion, criticidad: form.criticidad || "",
       solicitanteId: form.solicitanteId || user.id, fecha: fmtDate(now), hora: fmtHora(now),
@@ -6419,9 +6437,14 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
       calificacion: 0, comentarioCalif: "",
     };
     setMsg("Enviando…");
-    const ok = await persistYa((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    let codigo = "";
+    const ok = await persistYa((data) => {
+      const n = siguienteNumero(data, "SOL");
+      codigo = codigoDe("SOL", n);
+      return { ...data, solicitudes: [{ ...nueva, codigo }, ...data.solicitudes], solCounter: n + 1 };
+    });
     setMsg(ok
-      ? `Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`
+      ? `Novedad ${codigo} reportada. Queda pendiente de programación.`
       : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
     setTimeout(() => setMsg(""), ok ? 4000 : 8000);
   };
@@ -7583,9 +7606,8 @@ function AdminProgramacion({ data, persist, user, foco }) {
             observaciones: conRegistro(s.observaciones, [lineaRegistro(user?.nombre, `Activada · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)}${fecha ? ` · Programada para ${fmtDMY(fecha)}` : " · sin fecha"}`)]) } : s),
       }));
     } else {
-      const n = data.otCounter || 1;
       const orden = {
-        id: uid("ot"), codigo: `OT-${String(n).padStart(4, "0")}`,
+        id: uid("ot"), codigo: "",
         planId: item.planId, tarea: item.tarea, checklist: checklistDesdePasos(item.procedimientoPasos),
         categoria: item.categoria, frecuencia: item.frecuencia,
         duracionValor, duracionUnidad,
@@ -7595,7 +7617,7 @@ function AdminProgramacion({ data, persist, user, foco }) {
         observaciones: lineaRegistro(user?.nombre, `Orden creada desde el plan · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)} · Programada para ${fmtDMY(fecha)}`),
         materiales: [], materialesEstado: "", consumos: [], createdAt: fmtDate(new Date()),
       };
-      persist((data) => ({ ...data, ordenes: [...data.ordenes, orden], otCounter: n + 1 }));
+      persist((data) => { const n = siguienteNumero(data, "OT"); return { ...data, ordenes: [...data.ordenes, { ...orden, codigo: codigoDe("OT", n) }], otCounter: n + 1 }; });
     }
     setActivar(null);
   };
@@ -7839,8 +7861,6 @@ function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
 
 function AdminCorrectivos({ data, persist, persistYa, user }) {
   const acciones = useAcciones(data, persist, user);
-  const [fSede, setFSede] = useState("todas");
-  const [q, setQ] = useState("");
   const [nuevo, setNuevo] = useState(false);
   const [msg, setMsg] = useState("");
 
@@ -7849,9 +7869,8 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
      igual que una solicitud del usuario, para que pase por Programación. */
   const crearCorrectivo = async (form) => {
     const now = new Date();
-    const n = data.solCounter || 1;
-    const nueva = {
-      id: uid("sol"), codigo: `SOL-${String(n).padStart(4, "0")}`,
+        const nueva = {
+      id: uid("sol"), codigo: "",
       sedeId: form.sedeId, faseId: form.faseId, activoId: form.activoId,
       descripcion: form.descripcion, criticidad: form.criticidad || "",
       solicitanteId: form.solicitanteId || user.id,
@@ -7867,28 +7886,20 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
       consumos: [], reprogramaciones: [], calificacion: 0, comentarioCalif: "",
     };
     setMsg("Enviando…");
-    const ok = await persistYa((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    let codigo = "";
+    const ok = await persistYa((data) => {
+      const n = siguienteNumero(data, "SOL");
+      codigo = codigoDe("SOL", n);
+      return { ...data, solicitudes: [{ ...nueva, codigo }, ...data.solicitudes], solCounter: n + 1 };
+    });
     setMsg(ok
-      ? `Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`
+      ? `Novedad ${codigo} reportada. Queda pendiente de programación.`
       : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
     setTimeout(() => setMsg(""), ok ? 4000 : 8000);
   };
 
   /* Mismas etapas que preventivos y servicios, para que las tres pestañas se
      lean igual: sin programar → programadas → en ejecución → resueltas. */
-  const visibles = data.solicitudes.filter((s) => (fSede === "todas" || s.sedeId === fSede) && coincideBusqueda(s, data, q));
-  const sinProgramar = visibles.filter((s) => s.estado === "pendiente")
-    .sort((a, b) => (CRITICIDAD[b.criticidad]?.nivel || 0) - (CRITICIDAD[a.criticidad]?.nivel || 0));
-  const programadas = visibles.filter((s) => s.estado === "programada")
-    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
-  const enEjecucion = visibles.filter((s) => ["en_proceso", "espera"].includes(s.estado))
-    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
-  const finalizadas = visibles.filter((s) => s.estado === "completada")
-    .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
-  const tarjetaAct = (sol) => (
-    <TarjetaActividad key={sol.id} rol="admin" data={data} acciones={acciones}
-      item={{ ...sol, tipo: "correctivo", tarea: sol.descripcion }} permitirReasignar />
-  );
 
   return (
     <div className="mt-4 space-y-5">
@@ -7904,37 +7915,13 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
         </div>
       )}
 
-      <FiltroSedeBusqueda sedes={data.sedes} fSede={fSede} setFSede={setFSede} q={q} setQ={setQ} />
-
       {nuevo && (
         <ModalReportarNovedad data={data} sedes={data.sedes} user={user} elegirSolicitante
           onSubmit={crearCorrectivo} onClose={() => setNuevo(false)} />
       )}
 
-      <SeccionPlegable titulo="Sin Programar" count={sinProgramar.length} color={COLORS.slate}
-        nota="Reportadas, aún sin técnico ni fecha. Se programan desde Programación.">
-        {sinProgramar.map(tarjetaAct)}
-        {sinProgramar.length === 0 && <Empty>Nada esperando programación.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="Programadas" count={programadas.length} color={COLORS.ambar}>
-        {programadas.map(tarjetaAct)}
-        {programadas.length === 0 && <Empty>Sin correctivos programados.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange}>
-        {enEjecucion.map(tarjetaAct)}
-        {enEjecucion.length === 0 && <Empty>Sin correctivos en ejecución.</Empty>}
-      </SeccionPlegable>
-
-
-      <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
-        {finalizadas.slice(0, 5).map(tarjetaAct)}
-        {finalizadas.length > 5 && (
-          <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Reportes.</p>
-        )}
-        {finalizadas.length === 0 && <Empty>Aún no hay correctivos resueltos.</Empty>}
-      </SeccionPlegable>
+      <TablaActividades data={data} tipo="correctivo" acciones={acciones}
+        filas={data.solicitudes.map((x) => ({ ...x, key: x.id, titulo: x.descripcion }))} />
     </div>
   );
 }
@@ -8698,49 +8685,194 @@ function AdminServicios({ data, persist, user }) {
   );
 }
 
+/* Tabla de actividades (preventivos o correctivos) para el supervisor, igual
+   que Servicios: filtros en los encabezados, orden al tocar cada columna y la
+   orden se abre en una ventana. "filas" ya viene armado por cada pestaña. */
+const ORDEN_ESTADO_ACT = ["pendiente", "programada", "en_proceso", "espera", "completada"];
+function TablaActividades({ data, filas, tipo, acciones, onActivar }) {
+  const hoy = fmtDate(new Date());
+  const [abrir, setAbrir] = useState(null);       // id de la orden abierta
+  const [fTexto, setFTexto] = useState("");
+  const [fSede, setFSede] = useState("todas");
+  const [fTec, setFTec] = useState("todos");
+  const [fEstado, setFEstado] = useState("abiertos");
+  const [orden, setOrden] = useState({ col: "estado", asc: true });
+  const esCorr = tipo === "correctivo";
+  const atrasada = (r) => ESTADOS_ABIERTOS.includes(r.estado) && r.fechaProgramada && r.fechaProgramada < hoy;
+  const diasAtraso = (r) => Math.round((new Date(`${hoy}T00:00:00`) - new Date(`${r.fechaProgramada}T00:00:00`)) / 86400000);
+  const tecnicos = data.usuarios.filter((u) => u.rol === "tecnico");
+
+  const t = fTexto.trim().toLowerCase();
+  const visibles = filas
+    .filter((r) => fSede === "todas" || r.sedeId === fSede)
+    .filter((r) => fTec === "todos" || (fTec === "sin" ? !r.tecnicoId : r.tecnicoId === fTec))
+    .filter((r) => fEstado === "todos" ? true
+      : fEstado === "abiertos" ? r.estado !== "completada"
+      : fEstado === "atrasadas" ? atrasada(r)
+      : r.estado === fEstado)
+    .filter((r) => !t || [r.codigo, r.titulo, ubicacionTexto(data.sedes, r)].some((v) => String(v || "").toLowerCase().includes(t)))
+    .sort((a, b) => {
+      const k = {
+        codigo: (x) => x.codigo || "~",
+        sede: (x) => sedeNombre(data.sedes, x.sedeId),
+        titulo: (x) => (x.titulo || "").toLowerCase(),
+        criticidad: (x) => -(CRITICIDAD[x.criticidad]?.nivel || 0),
+        tecnico: (x) => (x.tecnicoId ? usuarioNombre(data.usuarios, x.tecnicoId) : "~"),
+        fecha: (x) => x.fechaProgramada || "9999",
+        estado: (x) => `${atrasada(x) ? 0 : 1}${ORDEN_ESTADO_ACT.indexOf(x.estado)}${x.fechaProgramada || "9999"}`,
+      }[orden.col];
+      const va = k(a); const vb = k(b);
+      const r = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "es");
+      return orden.asc ? r : -r;
+    });
+
+  const th = "px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left whitespace-nowrap";
+  const filtroCls = "w-full border rounded px-1.5 py-1 text-[11px] font-normal normal-case tracking-normal bg-white";
+  const encabezado = (col, label) => (
+    <th className={th} style={cSlate}>
+      <button type="button" onClick={() => setOrden((o) => ({ col, asc: o.col === col ? !o.asc : true }))}
+        className="inline-flex items-center gap-0.5 uppercase" style={orden.col === col ? cChar : cSlate}>
+        {label}{orden.col === col ? (orden.asc ? " ▲" : " ▼") : ""}
+      </button>
+    </th>
+  );
+  const vacio = <th className="px-2 pb-1.5" />;
+  const abierta = abrir && (tipo === "preventivo" ? data.ordenes : data.solicitudes).find((x) => x.id === abrir);
+
+  return (
+    <div className="space-y-2">
+      <div className="overflow-x-auto border rounded-md bg-white" style={bLine}>
+        <table className="w-full text-xs text-left" style={{ minWidth: esCorr ? 920 : 860 }}>
+          <thead>
+            <tr style={{ background: COLORS.cream }}>
+              {encabezado("codigo", "Código")}
+              {encabezado("sede", "Sede")}
+              {encabezado("titulo", esCorr ? "Descripción" : "Tarea")}
+              {esCorr && encabezado("criticidad", "Criticidad")}
+              {encabezado("tecnico", "Técnico")}
+              {encabezado("fecha", "Programada")}
+              {encabezado("estado", "Estado")}
+              <th className={th} />
+            </tr>
+            <tr style={{ background: COLORS.cream }}>
+              <th className="px-2 pb-1.5" colSpan={1}>
+                <input value={fTexto} onChange={(e) => setFTexto(e.target.value)} placeholder="Buscar…" className={filtroCls} style={inputStyle} />
+              </th>
+              <th className="px-2 pb-1.5">
+                <select value={fSede} onChange={(e) => setFSede(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todas">Todas</option>
+                  {data.sedes.map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                </select>
+              </th>
+              {vacio}
+              {esCorr && vacio}
+              <th className="px-2 pb-1.5">
+                <select value={fTec} onChange={(e) => setFTec(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todos">Todos</option>
+                  <option value="sin">Sin asignar</option>
+                  {tecnicos.map((u) => <option key={u.id} value={u.id}>{u.nombre}</option>)}
+                </select>
+              </th>
+              {vacio}
+              <th className="px-2 pb-1.5">
+                <select value={fEstado} onChange={(e) => setFEstado(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="abiertos">Abiertas</option>
+                  <option value="atrasadas">Atrasadas</option>
+                  <option value="todos">Todas</option>
+                  {ORDEN_ESTADO_ACT.map((e) => <option key={e} value={e}>{ESTADOS[e]?.label || e}</option>)}
+                </select>
+              </th>
+              {vacio}
+            </tr>
+          </thead>
+          <tbody>
+            {visibles.length === 0 && (
+              <tr><td colSpan={esCorr ? 8 : 7} className="px-2 py-4 text-center" style={cSlate}>Nada coincide con los filtros.</td></tr>
+            )}
+            {visibles.map((r) => (
+              <tr key={r.key} style={{ borderTop: `1px solid ${COLORS.line}`, background: atrasada(r) ? `${COLORS.rojo}08` : "white" }}>
+                <td className="px-2 py-1.5 font-bold whitespace-nowrap" style={cChar}>
+                  {r.codigo || <span style={cSlate}>—</span>}
+                  {r.origenCodigo && <span className="block text-[9px] font-semibold" style={cSlate}>de {r.origenCodigo}</span>}
+                  {r.servicioCodigo && <span className="block text-[9px] font-semibold" style={{ color: "#7B5EA7" }}>{r.servicioCodigo}</span>}
+                </td>
+                <td className="px-2 py-1.5" style={cChar}>
+                  {sedeNombre(data.sedes, r.sedeId)}
+                  <span className="block text-[10px]" style={cSlate}>{ubicacionTexto(data.sedes, r).split(" · ").slice(0, -1).join(" · ")}</span>
+                </td>
+                <td className="px-2 py-1.5" style={{ ...cChar, maxWidth: 300 }}>
+                  <span className="line-clamp-2">{r.titulo}</span>
+                  {r.cierre === "paliativo" && <span className="text-[9px] font-semibold" style={{ color: COLORS.ambar }}>Paliativa</span>}
+                </td>
+                {esCorr && (
+                  <td className="px-2 py-1.5">
+                    {r.criticidad && CRITICIDAD[r.criticidad] ? <Chip color={CRITICIDAD[r.criticidad].color}>{CRITICIDAD[r.criticidad].label}</Chip> : <span style={cSlate}>—</span>}
+                  </td>
+                )}
+                <td className="px-2 py-1.5 whitespace-nowrap" style={r.tecnicoId ? cChar : cSlate}>{r.tecnicoId ? usuarioNombre(data.usuarios, r.tecnicoId) : "Sin asignar"}</td>
+                <td className="px-2 py-1.5 whitespace-nowrap" style={atrasada(r) ? { color: COLORS.rojo, fontWeight: 600 } : cSlate}>
+                  {r.fechaProgramada || "—"}
+                  {atrasada(r) && <span className="block text-[9px]">{diasAtraso(r)} día(s) de atraso</span>}
+                </td>
+                <td className="px-2 py-1.5"><EstadoChip estado={r.estado} motivo={r.motivoEspera} /></td>
+                <td className="px-2 py-1.5 whitespace-nowrap text-right">
+                  {r.plan ? (
+                    <button type="button" onClick={() => onActivar(r.plan)} className="text-[11px] font-semibold" style={cOrange}>Activar</button>
+                  ) : (
+                    <button type="button" onClick={() => setAbrir(r.id)} className="text-[11px] font-semibold" style={cChar}>Abrir</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          {visibles.length > 0 && (
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.cream }}>
+                <td colSpan={esCorr ? 8 : 7} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>
+                  {visibles.length} {tipo === "preventivo" ? "preventivo(s)" : "correctivo(s)"}
+                  {visibles.some(atrasada) ? ` · ${visibles.filter(atrasada).length} atrasada(s)` : ""}
+                </td>
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
+
+      {abierta && (
+        <Modal title={`${abierta.codigo}`} onClose={() => setAbrir(null)} wide>
+          <TarjetaActividad item={{ ...abierta, tipo, ...(esCorr ? { tarea: abierta.descripcion } : {}) }}
+            data={data} acciones={acciones} rol="admin" permitirReasignar abiertoInicial onCompletada={() => setAbrir(null)} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 function AdminPreventivos({ data, persist, user }) {
   const acciones = useAcciones(data, persist, user);
   const [activar, setActivar] = useState(null);
-  const [fSede, setFSede] = useState("todas");
-  const [q, setQ] = useState("");
   const hoy = fmtDate(new Date());
-
-  const coincide = (x, texto) => {
-    if (fSede !== "todas" && x.sedeId !== fSede) return false;
-    if (!q.trim()) return true;
-    const t = q.trim().toLowerCase();
-    return (texto || "").toLowerCase().includes(t) ||
-      (x.codigo || "").toLowerCase().includes(t) ||
-      ubicacionTexto(data.sedes, x).toLowerCase().includes(t);
-  };
 
   // Aún sin orden generada
   const sinProgramar = ordenarPorUrgencia(
-    getPendientes(data).filter((p) => p.tipo === "preventivo" && coincide(p, p.tarea))
+    getPendientes(data).filter((p) => p.tipo === "preventivo")
   );
 
   // Órdenes vivas, separando las que quedaron con fecha vencida
   const abiertas = data.ordenes
-    .filter((o) => ESTADOS_ABIERTOS.includes(o.estado) && coincide(o, o.tarea))
+    .filter((o) => ESTADOS_ABIERTOS.includes(o.estado))
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
 
   const atrasadas = abiertas.filter((o) => o.fechaProgramada && o.fechaProgramada < hoy);
   const alDia = abiertas.filter((o) => !o.fechaProgramada || o.fechaProgramada >= hoy);
 
-  const programadas = alDia.filter((o) => o.estado === "programada");
-  const enEjecucion = alDia.filter((o) => ["en_proceso", "espera"].includes(o.estado));
-
-  const finalizadas = data.ordenes
-    .filter((o) => o.estado === "completada" && coincide(o, o.tarea))
-    .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
 
   const confirmar = ({ tecnicoId, fecha, duracionValor, duracionUnidad }) => {
     const item = activar;
-    const n = data.otCounter || 1;
-    persist((data) => ({
+    persist((data) => { const n = siguienteNumero(data, "OT"); return {
       ...data,
       ordenes: [...data.ordenes, {
-        id: uid("ot"), codigo: `OT-${String(n).padStart(4, "0")}`,
+        id: uid("ot"), codigo: codigoDe("OT", n),
         planId: item.planId, tarea: item.tarea, checklist: checklistDesdePasos(item.procedimientoPasos),
         categoria: item.categoria, frecuencia: item.frecuencia,
         duracionValor, duracionUnidad,
@@ -8752,31 +8884,17 @@ function AdminPreventivos({ data, persist, user }) {
         createdAt: fmtDate(new Date()),
       }],
       otCounter: n + 1,
-    }));
+    }; });
     setActivar(null);
   };
 
-  const tarjeta = (o) => (
-    <TarjetaActividad key={o.id} item={{ ...o, tipo: "preventivo" }} data={data}
-      acciones={acciones} rol="admin" permitirReasignar />
-  );
 
   return (
     <div className="mt-4">
       <p className="text-xs mb-3" style={cSlate}>
-        Preventivos que siguen abiertos. Los completados se consultan en Reportes.
+        Preventivos del plan: los "Sin programar" se activan desde la tabla. Filtra y ordena desde los encabezados.
       </p>
 
-      <div className="flex gap-2 mb-3 flex-wrap">
-        <input value={q} onChange={(e) => setQ(e.target.value)}
-          placeholder="Buscar por tarea, código o activo…"
-          className="flex-1 min-w-44 border rounded-md px-3 py-2 text-sm outline-none" style={inputStyle} />
-        <select value={fSede} onChange={(e) => setFSede(e.target.value)}
-          className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
-          <option value="todas">Todas las sedes</option>
-          {data.sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
-        </select>
-      </div>
 
       <div className="grid grid-cols-3 gap-3 mb-4">
         <Stat label="Sin Programar" value={sinProgramar.length} icon={<ClipboardList size={14} />} color={COLORS.slate} sub="Sin orden generada" />
@@ -8785,53 +8903,10 @@ function AdminPreventivos({ data, persist, user }) {
         <Stat label="Vigentes" value={alDia.length} icon={<CalendarDays size={14} />} color={COLORS.orange} sub="Programadas o en curso" />
       </div>
 
-      {atrasadas.length > 0 && (
-        <div className="mb-3">
-          <SeccionPlegable titulo="Atrasadas" count={atrasadas.length} color={COLORS.rojo}
-            nota="Su fecha ya pasó, así que no aparecen en el calendario del mes en curso. Ábrelas y usa Reprogramar para moverlas a una fecha válida; el cambio queda en el historial.">
-            {atrasadas.map((o) => (
-              <div key={o.id} className="rounded-md" style={{ boxShadow: `0 0 0 1.5px ${COLORS.rojo}55` }}>
-                <div className="flex items-center gap-1.5 px-2.5 pt-2">
-                  <AlertTriangle size={11} color={COLORS.rojo} />
-                  <span className="text-[10px] font-semibold" style={{ color: COLORS.rojo }}>
-                    Programada el {o.fechaProgramada} · {Math.round((new Date(`${hoy}T00:00:00`) - new Date(`${o.fechaProgramada}T00:00:00`)) / 86400000)} día(s) de atraso
-                  </span>
-                </div>
-                {tarjeta(o)}
-              </div>
-            ))}
-          </SeccionPlegable>
-        </div>
-      )}
-
-      <div className="space-y-3">
-        <SeccionPlegable titulo="Sin Programar" count={sinProgramar.length} color={COLORS.slate}>
-          {sinProgramar.map((item) => (
-            <TarjetaPendiente key={item.key} item={item} sedes={data.sedes} usuarios={data.usuarios}
-              onActivar={() => setActivar(item)} />
-          ))}
-          {sinProgramar.length === 0 && <Empty>Todo el plan preventivo está activado.</Empty>}
-        </SeccionPlegable>
-
-        <SeccionPlegable titulo="Programadas" count={programadas.length} color={COLORS.ambar}>
-          {programadas.map(tarjeta)}
-          {programadas.length === 0 && <Empty>Sin preventivos programados.</Empty>}
-        </SeccionPlegable>
-
-        <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange}>
-          {enEjecucion.map(tarjeta)}
-          {enEjecucion.length === 0 && <Empty>Sin órdenes preventivas en ejecución.</Empty>}
-        </SeccionPlegable>
-
-
-        <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
-          {finalizadas.slice(0, 5).map(tarjeta)}
-          {finalizadas.length > 5 && (
-            <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Reportes.</p>
-          )}
-          {finalizadas.length === 0 && <Empty>Aún no hay preventivos completados.</Empty>}
-        </SeccionPlegable>
-      </div>
+      <TablaActividades data={data} tipo="preventivo" acciones={acciones} onActivar={setActivar} filas={[
+        ...sinProgramar.map((p) => ({ ...p, key: p.key, codigo: "", titulo: p.tarea, estado: "pendiente", plan: p })),
+        ...data.ordenes.map((o) => ({ ...o, key: o.id, titulo: o.tarea })),
+      ]} />
 
       {activar && (
         <Modal title="Activar preventivo" onClose={() => setActivar(null)}>
@@ -12655,6 +12730,14 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
   const solicitud = detalle && (data.solicitudes || []).find((s) => s.id === detalle.id);
   const servicio = detalle && !solicitud && (data.servicios || []).find((s) => s.id === detalle.id);
 
+  /* Estado actual de la orden de cada aviso, para verlo sin abrirla */
+  const ordenDe = (x) => {
+    if (x.orden) {
+      const col = x.orden.tipo === "preventivo" ? "ordenes" : x.orden.tipo === "servicio" ? "servicios" : "solicitudes";
+      return (data[col] || []).find((o) => o.id === x.orden.id);
+    }
+    return (data.solicitudes || []).find((o) => o.id === x.id) || (data.servicios || []).find((o) => o.id === x.id);
+  };
   const fila = (x, leida) => (
     <button key={x.id} onClick={() => abrirDetalle(x)}
       className="w-full text-left border rounded-md p-2.5 hover:shadow-sm transition-shadow"
@@ -12670,8 +12753,11 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
           )}
           <span className="text-[11px] font-semibold" style={cChar}>{sedeNombre(data.sedes, x.sedeId)}</span>
         </div>
-        <span className="text-[10px]" style={cSlate}>
-          {esSolicitante ? "Finalizada el " : ""}{x.fecha}{x.hora ? ` · ${x.hora}` : ""}
+        <span className="flex items-center gap-1.5">
+          {!esSolicitante && ordenDe(x) && <EstadoChip estado={ordenDe(x).estado} motivo={ordenDe(x).motivoEspera} />}
+          <span className="text-[10px]" style={cSlate}>
+            {esSolicitante ? "Finalizada el " : ""}{x.fecha}{x.hora ? ` · ${x.hora}` : ""}
+          </span>
         </span>
       </div>
       <p className="text-xs mt-1" style={cChar}>{x.texto.length > 140 ? `${x.texto.slice(0, 138)}…` : x.texto}</p>
