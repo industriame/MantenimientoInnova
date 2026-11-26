@@ -8749,6 +8749,9 @@ function TablaActividades({ data, filas, tipo, acciones, onActivar }) {
   const atrasada = (r) => ESTADOS_ABIERTOS.includes(r.estado) && r.fechaProgramada && r.fechaProgramada < hoy;
   const diasAtraso = (r) => Math.round((new Date(`${hoy}T00:00:00`) - new Date(`${r.fechaProgramada}T00:00:00`)) / 86400000);
   const tecnicos = data.usuarios.filter((u) => u.rol === "tecnico");
+  // Correctivos: valor de materiales = usado de bodega + pedido abierto (valor ref.)
+  const referencia = useMemo(() => referenciasDe(data), [data]);
+  const mats = new Map(esCorr ? filas.map((r) => [r.key, valorMaterialesOrden(r, referencia)]) : []);
 
   const t = fTexto.trim().toLowerCase();
   const visibles = filas
@@ -8767,6 +8770,7 @@ function TablaActividades({ data, filas, tipo, acciones, onActivar }) {
         criticidad: (x) => -(CRITICIDAD[x.criticidad]?.nivel || 0),
         tecnico: (x) => (x.tecnicoId ? usuarioNombre(data.usuarios, x.tecnicoId) : "~"),
         fecha: (x) => x.fechaProgramada || "9999",
+        materiales: (x) => mats.get(x.key)?.total || 0,
         estado: (x) => `${atrasada(x) ? 0 : 1}${ORDEN_ESTADO_ACT.indexOf(x.estado)}${x.fechaProgramada || "9999"}`,
       }[orden.col];
       const va = k(a); const vb = k(b);
@@ -8790,7 +8794,7 @@ function TablaActividades({ data, filas, tipo, acciones, onActivar }) {
   return (
     <div className="space-y-2">
       <div className="overflow-x-auto border rounded-md bg-white" style={bLine}>
-        <table className="w-full text-xs text-left" style={{ minWidth: esCorr ? 920 : 860 }}>
+        <table className="w-full text-xs text-left" style={{ minWidth: esCorr ? 1010 : 860 }}>
           <thead>
             <tr style={{ background: COLORS.cream }}>
               {encabezado("codigo", "Código")}
@@ -8800,6 +8804,7 @@ function TablaActividades({ data, filas, tipo, acciones, onActivar }) {
               {encabezado("tecnico", "Técnico")}
               {encabezado("fecha", "Programada")}
               {encabezado("estado", "Estado")}
+              {esCorr && encabezado("materiales", "Materiales")}
               <th className={th} />
             </tr>
             <tr style={{ background: COLORS.cream }}>
@@ -8830,12 +8835,13 @@ function TablaActividades({ data, filas, tipo, acciones, onActivar }) {
                   {ORDEN_ESTADO_ACT.map((e) => <option key={e} value={e}>{ESTADOS[e]?.label || e}</option>)}
                 </select>
               </th>
+              {esCorr && vacio}
               {vacio}
             </tr>
           </thead>
           <tbody>
             {visibles.length === 0 && (
-              <tr><td colSpan={esCorr ? 8 : 7} className="px-2 py-4 text-center" style={cSlate}>Nada coincide con los filtros.</td></tr>
+              <tr><td colSpan={esCorr ? 9 : 7} className="px-2 py-4 text-center" style={cSlate}>Nada coincide con los filtros.</td></tr>
             )}
             {visibles.map((r) => (
               <tr key={r.key} style={{ borderTop: `1px solid ${COLORS.line}`, background: atrasada(r) ? `${COLORS.rojo}08` : "white" }}>
@@ -8863,6 +8869,18 @@ function TablaActividades({ data, filas, tipo, acciones, onActivar }) {
                   {atrasada(r) && <span className="block text-[9px]">{diasAtraso(r)} día(s) de atraso</span>}
                 </td>
                 <td className="px-2 py-1.5"><EstadoChip estado={r.estado} motivo={r.motivoEspera} /></td>
+                {esCorr && (() => {
+                  const m = mats.get(r.key);
+                  return (
+                    <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                      {m.total > 0 ? <span className="font-bold" style={cOrange}>{money(m.total)}</span> : <span style={cSlate}>—</span>}
+                      {m.usado > 0 && m.pedido > 0 && (
+                        <span className="block text-[9px]" style={cSlate}>usado {money(m.usado)} · pedido {money(m.pedido)}</span>
+                      )}
+                      {m.pedido > 0 && !m.usado && <span className="block text-[9px]" style={cSlate}>pedido (ref.)</span>}
+                    </td>
+                  );
+                })()}
                 <td className="px-2 py-1.5 whitespace-nowrap text-right">
                   {r.plan ? (
                     <button type="button" onClick={() => onActivar(r.plan)} className="text-[11px] font-semibold" style={cOrange}>Activar</button>
@@ -8876,10 +8894,16 @@ function TablaActividades({ data, filas, tipo, acciones, onActivar }) {
           {visibles.length > 0 && (
             <tfoot>
               <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.cream }}>
-                <td colSpan={esCorr ? 8 : 7} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>
+                <td colSpan={7} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>
                   {visibles.length} {tipo === "preventivo" ? "preventivo(s)" : "correctivo(s)"}
                   {visibles.some(atrasada) ? ` · ${visibles.filter(atrasada).length} atrasada(s)` : ""}
                 </td>
+                {esCorr && (
+                  <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap" style={cOrange}>
+                    {money(visibles.reduce((s, r) => s + (mats.get(r.key)?.total || 0), 0))}
+                  </td>
+                )}
+                {esCorr && <td />}
               </tr>
             </tfoot>
           )}
@@ -10101,6 +10125,89 @@ function necesidadesDe(data, sedeIds) {
 }
 const textoNecesidad = (n) => `${n.nombre} × ${n.cantidad} ${n.unidad || "u"}`;
 
+/* Valor de referencia por unidad de un material pedido: lo pagado antes por
+   el mismo artículo (promedio de compras entregadas o compradas); si no hay,
+   el costo del kardex (promedio entre sedes); si es nuevo, el que anote el
+   supervisor. Devuelve una función n → { unit, fuente, manual }. */
+function referenciasDe(data) {
+  const acumular = (m, k, v) => { const g = m.get(k) || { suma: 0, n: 0 }; g.suma += v; g.n += 1; m.set(k, g); };
+  const historial = new Map();
+  necesidadesDe(data, null).forEach(({ n }) => {
+    const cant = Number(n.cantidadComprada ?? n.cantidad) || 0;
+    if (!(Number(n.valorCompra) > 0) || !cant || !["comprado", "entregado"].includes(n.estado)) return;
+    acumular(historial, claveArticulo(n.nombreBodega || n.nombre), Number(n.valorCompra) / cant);
+  });
+  const kardex = new Map();
+  (data.stock || []).forEach((a) => { if (Number(a.costoUnitario) > 0) acumular(kardex, claveArticulo(a.nombre), Number(a.costoUnitario)); });
+  return (n) => {
+    const k = claveArticulo(n.nombre);
+    const h = historial.get(k);
+    if (h) return { unit: h.suma / h.n, fuente: `Prom. histórico (${h.n})` };
+    const kx = kardex.get(k);
+    if (kx) return { unit: kx.suma / kx.n, fuente: "Costo kardex" };
+    if (Number(n.valorReferencia) > 0) return { unit: Number(n.valorReferencia), fuente: "Referencia", manual: true };
+    return { unit: 0, fuente: "", manual: true };
+  };
+}
+
+/* Valor de los materiales de una orden: lo usado de bodega (consumos) más lo
+   pedido que sigue abierto (comprado: lo pagado; pendiente: valor de
+   referencia). Lo entregado no se suma aparte: entra a bodega y se cuenta
+   cuando el técnico lo carga como usado. */
+function valorMaterialesOrden(item, referencia) {
+  const usado = costoConsumos(item);
+  const pedido = (item.necesidades || [])
+    .filter((n) => ["pendiente", "comprado"].includes(n.estado) && !n.noRequerido)
+    .reduce((a, n) => a + (n.estado === "comprado" && Number(n.valorCompra) > 0
+      ? Number(n.valorCompra)
+      : referencia(n).unit * (Number(n.cantidad) || 0)), 0);
+  return { usado, pedido, total: usado + pedido };
+}
+
+// Encabezado de tabla que ordena al hacer clic (▲/▼)
+function ThOrden({ col, label, orden, setOrden, className = "" }) {
+  return (
+    <th className={`px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left whitespace-nowrap ${className}`} style={cSlate}>
+      <button type="button" onClick={() => setOrden((o) => ({ col, asc: o.col === col ? !o.asc : true }))}
+        className="inline-flex items-center gap-0.5 uppercase" style={orden.col === col ? cChar : cSlate}>
+        {label}{orden.col === col ? (orden.asc ? " ▲" : " ▼") : ""}
+      </button>
+    </th>
+  );
+}
+const FILTRO_TH = "w-full border rounded px-1.5 py-1 text-[11px] font-normal normal-case tracking-normal bg-white";
+// Ordena filas según { col, asc } con una función de clave por columna
+const ordenarPor = (filas, claves, orden) => {
+  const k = claves[orden.col];
+  if (!k) return filas;
+  return filas.slice().sort((a, b) => {
+    const va = k(a); const vb = k(b);
+    const r = typeof va === "number" && typeof vb === "number" ? va - vb : String(va).localeCompare(String(vb), "es");
+    return orden.asc ? r : -r;
+  });
+};
+// Códigos de orden con su botón de detalle (una línea por orden)
+function OrdenesLigadas({ filas }) {
+  const vistas = new Map();
+  filas.forEach((r) => {
+    const v = vistas.get(r.orden.id) || { r, cant: 0, n: 0 };
+    v.cant += Number(r.n.cantidad) || 0; v.n += 1;
+    vistas.set(r.orden.id, v);
+  });
+  const varias = vistas.size > 1;
+  return (
+    <span className="flex flex-col gap-0.5">
+      {[...vistas.values()].map(({ r, cant }) => (
+        <span key={r.orden.id} className="inline-flex items-center gap-1.5 whitespace-nowrap">
+          <span className="font-bold" style={cOrange}>{r.orden.codigo || "—"}</span>
+          {varias && <span className="text-[10px]" style={cSlate}>({cant})</span>}
+          <BotonDetalle item={{ ...r.orden, tipo: r.tipo, tarea: r.orden.tarea || r.orden.descripcion || tituloServicio(r.orden), fechaProgramada: r.orden.fechaProgramada || r.orden.fecha }} size={12} />
+        </span>
+      ))}
+    </span>
+  );
+}
+
 /* Datos al marcar un pedido. Comprado: cantidad y valor de la compra.
    Entregado: a qué artículo de la bodega de la sede ingresa (uno parecido
    que ya exista o uno nuevo con el nombre corregido), cantidad y valor. */
@@ -10181,12 +10288,14 @@ function FormNecesidad({ r, modo, stockSede, sede, valorSugerido, onConfirm, onC
 /* Bodega → Pendientes de compra: lo que los técnicos pidieron al registrar
    "Requiere material". El supervisor lo marca Comprado → Entregado (o lo
    cancela); cada cambio queda en el registro de la orden y le llega al
-   técnico asignado como notificación. */
+   técnico asignado como notificación. Un mismo material pedido en varias
+   órdenes de la misma sede se muestra en una sola fila, con sus órdenes. */
 function PendientesCompra({ data, persist, sedes, editable, user }) {
   const sedeIds = sedes.map((s) => s.id);
   const [fEstado, setFEstado] = useState("abiertos");
   const [fSede, setFSede] = useState("todas");
   const [q, setQ] = useState("");
+  const [fOrden, setFOrden] = useState("");
   const todas = necesidadesDe(data, sedeIds);
   const mes = fmtDate(new Date()).slice(0, 7);
   const delMes = todas.filter((r) => (r.n.fecha || "").startsWith(mes));
@@ -10197,131 +10306,159 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
   };
   const valorPend = todas.filter((r) => r.n.estado === "pendiente").reduce((a, r) => a + costoDe(r), 0);
 
-  const visibles = todas
-    .filter((r) => fSede === "todas" || r.orden.sedeId === fSede)
-    .filter((r) => fEstado === "todos" || (fEstado === "abiertos" ? ["pendiente", "comprado"].includes(r.n.estado) : r.n.estado === fEstado))
-    .filter((r) => coincideArticulo(`${r.n.nombre} ${r.orden.codigo || ""}`, q))
-    .sort((a, b) => `${b.n.fecha} ${b.n.hora || ""}`.localeCompare(`${a.n.fecha} ${a.n.hora || ""}`));
-
-  const [form, setForm] = useState(null);   // { r, modo: "comprado" | "entregado" }
+  const [form, setForm] = useState(null);   // { g, modo: "comprado" | "entregado" }
   const [orden, setOrden] = useState({ col: "estado", asc: true });
+  const referencia = useMemo(() => referenciasDe(data), [data]);
 
-  /* Valor de referencia por unidad: lo pagado antes por el mismo artículo
-     (promedio de compras entregadas o compradas), si no hay, el costo del
-     kardex (promedio entre sedes); si es nuevo, el que anote el supervisor. */
-  const historial = useMemo(() => {
-    const m = new Map();
-    necesidadesDe(data, null).forEach(({ n }) => {
-      const cant = Number(n.cantidadComprada ?? n.cantidad) || 0;
-      if (!(Number(n.valorCompra) > 0) || !cant || !["comprado", "entregado"].includes(n.estado)) return;
-      const k = claveArticulo(n.nombreBodega || n.nombre);
-      const g = m.get(k) || { suma: 0, n: 0 };
-      g.suma += Number(n.valorCompra) / cant; g.n += 1;
-      m.set(k, g);
+  /* Agrupa lo abierto (pendiente / comprado) por artículo, unidad, sede y
+     estado; lo ya entregado o cancelado queda una fila por pedido. */
+  const ORDEN_NEC = ["pendiente", "comprado", "entregado", "cancelado"];
+  const mapa = new Map();
+  todas.forEach((r) => {
+    const abierto = ["pendiente", "comprado"].includes(r.n.estado) && !r.n.noRequerido;
+    const k = abierto
+      ? `${claveArticulo(r.n.nombre)}|${String(r.n.unidad || "u").toLowerCase()}|${r.orden.sedeId}|${r.n.estado}`
+      : `id|${r.n.id}`;
+    const g = mapa.get(k) || { key: k, filas: [], abierto };
+    g.filas.push(r);
+    mapa.set(k, g);
+  });
+  const grupos = [...mapa.values()].map((g) => {
+    const n0 = g.filas[0].n;
+    const fechas = g.filas.map((r) => `${r.n.fecha} ${r.n.hora || ""}`).sort();
+    const pedidores = [...new Set(g.filas.map((r) => r.n.usuarioId))];
+    const cantidad = g.filas.reduce((a, r) => a + (Number(r.n.cantidad) || 0), 0);
+    const compra = g.filas.reduce((a, r) => a + (Number(r.n.valorCompra) || 0), 0);
+    const ref = referencia(n0);
+    return {
+      ...g, n: n0, estado: n0.estado, sedeId: g.filas[0].orden.sedeId, cantidad, compra, ref,
+      unidad: n0.unidad || "u", fecha: fechas[0].trim(), fechaUltima: fechas[fechas.length - 1].trim(), pedidores,
+      valorRef: ref.unit * cantidad,
+      codigos: g.filas.map((r) => r.orden.codigo || "").join(" "),
+    };
+  });
+
+  const t = fOrden.trim().toLowerCase();
+  const visibles = grupos
+    .filter((g) => fSede === "todas" || g.sedeId === fSede)
+    .filter((g) => fEstado === "todos" || (fEstado === "abiertos" ? ["pendiente", "comprado"].includes(g.estado) : g.estado === fEstado))
+    .filter((g) => coincideArticulo(g.n.nombre, q))
+    .filter((g) => !t || g.codigos.toLowerCase().includes(t));
+  const filas = ordenarPor(visibles, {
+    material: (g) => g.n.nombre.toLowerCase(),
+    cantidad: (g) => g.cantidad,
+    orden: (g) => g.codigos,
+    sede: (g) => sedeNombre(data.sedes, g.sedeId),
+    fecha: (g) => g.fecha,
+    valor: (g) => g.valorRef,
+    estado: (g) => `${ORDEN_NEC.indexOf(g.estado)}${g.fecha}`,
+  }, orden);
+
+  const guardarRef = (g, v) => {
+    const ids = new Set(g.filas.map((r) => r.n.id));
+    const valor = Number(String(v).replace(",", ".")) || 0;
+    persist((d) => {
+      const out = { ...d };
+      new Set(g.filas.map((r) => r.col)).forEach((col) => {
+        out[col] = (d[col] || []).map((o) => (!(o.necesidades || []).some((n) => ids.has(n.id)) ? o : {
+          ...o, necesidades: o.necesidades.map((n) => (ids.has(n.id) ? { ...n, valorReferencia: valor } : n)),
+        }));
+      });
+      return out;
     });
-    return m;
-  }, [data]);
-  const kardexCosto = useMemo(() => {
-    const m = new Map();
-    (data.stock || []).forEach((a) => {
-      if (!(Number(a.costoUnitario) > 0)) return;
-      const k = claveArticulo(a.nombre);
-      const g = m.get(k) || { suma: 0, n: 0 };
-      g.suma += Number(a.costoUnitario); g.n += 1;
-      m.set(k, g);
-    });
-    return m;
-  }, [data]);
-  const referencia = (n) => {
-    const k = claveArticulo(n.nombre);
-    const h = historial.get(k);
-    if (h) return { unit: h.suma / h.n, fuente: `Prom. histórico (${h.n})` };
-    const kx = kardexCosto.get(k);
-    if (kx) return { unit: kx.suma / kx.n, fuente: "Costo kardex" };
-    if (Number(n.valorReferencia) > 0) return { unit: Number(n.valorReferencia), fuente: "Referencia", manual: true };
-    return { unit: 0, fuente: "", manual: true };
   };
-  const guardarRef = (r, v) => persist((d) => ({ ...d, [r.col]: (d[r.col] || []).map((o) => (o.id !== r.orden.id ? o : {
-    ...o, necesidades: (o.necesidades || []).map((n) => (n.id === r.n.id ? { ...n, valorReferencia: Number(String(v).replace(",", ".")) || 0 } : n)),
-  })) }));
 
-  /* Cambia el estado del pedido y lo anota en la orden. La orden no cambia
-     de estado: solo queda informada. Al entregar, el material entra a la
-     bodega de la sede (a un artículo existente o como uno nuevo) y el pedido
-     queda enlazado a él, para que el técnico lo cargue al finalizar. */
-  const cambiar = (r, estado, extra = {}, ingreso = null) => {
+  /* Cambia el estado de todos los pedidos de la fila y lo anota en cada
+     orden. La orden no cambia de estado: solo queda informada. La cantidad y
+     el valor de la compra se reparten entre los pedidos según lo que pidió
+     cada uno. Al entregar, el material entra una sola vez a la bodega de la
+     sede (a un artículo existente o como uno nuevo) y los pedidos quedan
+     enlazados a él, para que el técnico lo cargue al finalizar. */
+  const cambiar = (g, estado, extra = {}, ingreso = null) => {
     const ahora = new Date();
     const stockId = ingreso ? (ingreso.stockId || uid("stk")) : null;
-    const detalle = estado === "comprado" && extra.valorCompra ? ` · ${money(extra.valorCompra)}`
-      : ingreso ? ` · ingresó a bodega como “${ingreso.nombre}”` : "";
-    const linea = lineaRegistro(user?.nombre, `${ESTADOS_NECESIDAD[estado].label}: ${textoNecesidad({ ...r.n, ...extra })}${detalle}`, "compra");
-    persist((d) => ({
-      ...d,
-      [r.col]: (d[r.col] || []).map((o) => (o.id !== r.orden.id ? o : {
-        ...o,
-        necesidades: (o.necesidades || []).map((n) => (n.id !== r.n.id ? n : {
-          ...n, ...extra, estado, fechaEstado: fmtDate(ahora), horaEstado: fmtHora(ahora), actualizadoPor: user?.id || "",
-          ...(ingreso ? { stockId, nombreBodega: ingreso.nombre, ingresoNuevo: !ingreso.stockId } : {}),
-        })),
-        observaciones: conRegistro(o.observaciones, [linea]),
-        // Llegó (o se canceló) lo último que faltaba: la etiqueta avisa que ya se puede seguir
-        ...(o.estado === "espera" && o.motivoEspera === "material" && ["entregado", "cancelado"].includes(estado)
-          && !(o.necesidades || []).some((n) => n.id !== r.n.id && ["pendiente", "comprado"].includes(n.estado))
-          ? { motivoEspera: "material listo" } : {}),
-      })),
-      ...(ingreso ? { stock: ingreso.stockId
-        ? (d.stock || []).map((a) => {
-          if (a.id !== stockId) return a;
-          const cant = (Number(a.cantidad) || 0) + ingreso.cantidad;
-          // Costo promedio ponderado con lo que ya había
-          const costo = ingreso.valor > 0
-            ? ((Number(a.cantidad) || 0) * (Number(a.costoUnitario) || 0) + ingreso.valor) / cant
-            : Number(a.costoUnitario) || 0;
-          return { ...a, cantidad: cant, costoUnitario: Math.round(costo * 100) / 100 };
-        })
-        : asignarSkus([...(d.stock || []), {
-          id: stockId, sedeId: r.orden.sedeId, nombre: ingreso.nombre, unidad: ingreso.unidad || "u",
-          cantidad: ingreso.cantidad, costoUnitario: ingreso.valor > 0 ? Math.round((ingreso.valor / ingreso.cantidad) * 100) / 100 : 0, minimo: 0,
-          creadoDesde: { codigo: r.orden.codigo || "", fecha: fmtDate(ahora), usuarioId: user?.id || "" },
-        }]) } : {}),
+    const ingresoId = ingreso ? uid("ing") : null;
+    const total = g.filas.reduce((a, r) => a + (Number(r.n.cantidad) || 0), 0) || 1;
+    const red = (x) => Math.round(x * 100) / 100;
+    const reparto = new Map(g.filas.map((r) => {
+      const peso = g.filas.length === 1 ? 1 : (Number(r.n.cantidad) || 0) / total;
+      const e = {};
+      if (extra.cantidadComprada != null) e.cantidadComprada = g.filas.length === 1 ? extra.cantidadComprada : red(extra.cantidadComprada * peso);
+      if (extra.valorCompra != null) e.valorCompra = g.filas.length === 1 ? extra.valorCompra : red(extra.valorCompra * peso);
+      return [r.n.id, e];
     }));
+    const ids = new Set(reparto.keys());
+    const otras = g.filas.length > 1 ? ` (compra conjunta de ${g.filas.length} pedidos: ${[...new Set(g.filas.map((r) => r.orden.codigo))].join(", ")})` : "";
+    const linea = (n) => {
+      const e = reparto.get(n.id);
+      const detalle = estado === "comprado" && e.valorCompra ? ` · ${money(e.valorCompra)}`
+        : ingreso ? ` · ingresó a bodega como “${ingreso.nombre}”` : "";
+      return lineaRegistro(user?.nombre, `${ESTADOS_NECESIDAD[estado].label}: ${textoNecesidad({ ...n, ...e })}${detalle}${otras}`, "compra");
+    };
+    persist((d) => {
+      const out = { ...d };
+      new Set(g.filas.map((r) => r.col)).forEach((col) => {
+        out[col] = (d[col] || []).map((o) => {
+          const mias = (o.necesidades || []).filter((n) => ids.has(n.id));
+          if (!mias.length) return o;
+          return {
+            ...o,
+            necesidades: o.necesidades.map((n) => (!ids.has(n.id) ? n : {
+              ...n, ...reparto.get(n.id), estado, fechaEstado: fmtDate(ahora), horaEstado: fmtHora(ahora), actualizadoPor: user?.id || "",
+              ...(ingreso ? { stockId, nombreBodega: ingreso.nombre, ingresoNuevo: !ingreso.stockId, ingresoId } : {}),
+            })),
+            observaciones: conRegistro(o.observaciones, mias.map(linea)),
+            // Llegó (o se canceló) lo último que faltaba: la etiqueta avisa que ya se puede seguir
+            ...(o.estado === "espera" && o.motivoEspera === "material" && ["entregado", "cancelado"].includes(estado)
+              && !o.necesidades.some((n) => !ids.has(n.id) && ["pendiente", "comprado"].includes(n.estado))
+              ? { motivoEspera: "material listo" } : {}),
+          };
+        });
+      });
+      if (ingreso) {
+        out.stock = ingreso.stockId
+          ? (d.stock || []).map((a) => {
+            if (a.id !== stockId) return a;
+            const cant = (Number(a.cantidad) || 0) + ingreso.cantidad;
+            // Costo promedio ponderado con lo que ya había
+            const costo = ingreso.valor > 0
+              ? ((Number(a.cantidad) || 0) * (Number(a.costoUnitario) || 0) + ingreso.valor) / cant
+              : Number(a.costoUnitario) || 0;
+            return { ...a, cantidad: cant, costoUnitario: red(costo) };
+          })
+          : asignarSkus([...(d.stock || []), {
+            id: stockId, sedeId: g.sedeId, nombre: ingreso.nombre, unidad: ingreso.unidad || "u",
+            cantidad: ingreso.cantidad, costoUnitario: ingreso.valor > 0 ? red(ingreso.valor / ingreso.cantidad) : 0, minimo: 0,
+            creadoDesde: { codigo: [...new Set(g.filas.map((r) => r.orden.codigo || ""))].filter(Boolean).join(", "), fecha: fmtDate(ahora), usuarioId: user?.id || "" },
+          }]);
+      }
+      return out;
+    });
     setForm(null);
   };
 
-  const ORDEN_NEC = ["pendiente", "comprado", "entregado", "cancelado"];
-  const filas = visibles.slice().sort((a, b) => {
-    const k = {
-      material: (r) => r.n.nombre.toLowerCase(),
-      orden: (r) => r.orden.codigo || "",
-      sede: (r) => sedeNombre(data.sedes, r.orden.sedeId),
-      fecha: (r) => `${r.n.fecha} ${r.n.hora || ""}`,
-      valor: (r) => referencia(r.n).unit * (Number(r.n.cantidad) || 0),
-      estado: (r) => `${ORDEN_NEC.indexOf(r.n.estado)}${r.n.fecha}`,
-    }[orden.col];
-    const va = k(a); const vb = k(b);
-    const res = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "es");
-    return orden.asc ? res : -res;
-  });
-  const totalRef = filas.filter((r) => ["pendiente", "comprado"].includes(r.n.estado))
-    .reduce((a, r) => a + referencia(r.n).unit * (Number(r.n.cantidad) || 0), 0);
-  const th = "px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left whitespace-nowrap";
-  const filtroCls = "w-full border rounded px-1.5 py-1 text-[11px] font-normal normal-case tracking-normal bg-white";
-  const encabezado = (col, label, extra = "") => (
-    <th className={`${th} ${extra}`} style={cSlate}>
-      <button type="button" onClick={() => setOrden((o) => ({ col, asc: o.col === col ? !o.asc : true }))}
-        className="inline-flex items-center gap-0.5 uppercase" style={orden.col === col ? cChar : cSlate}>
-        {label}{orden.col === col ? (orden.asc ? " ▲" : " ▼") : ""}
-      </button>
-    </th>
-  );
-  const btn = "text-[10px] font-semibold px-1.5 py-1 rounded border bg-white whitespace-nowrap";
+  const totalRef = filas.filter((g) => ["pendiente", "comprado"].includes(g.estado))
+    .reduce((a, g) => a + (g.estado === "comprado" && g.compra > 0 ? g.compra : g.valorRef), 0);
+  const btn = "text-[10px] font-semibold px-1.5 py-0.5 rounded border bg-white whitespace-nowrap";
   const vacio = <th className="px-2 pb-1.5" />;
+  const td = "px-2 py-1 align-top";
+  const th = (col, label, className) => <ThOrden col={col} label={label} orden={orden} setOrden={setOrden} className={className} />;
+  const nCols = editable ? 9 : 7;
+  // Datos del pedido que se muestran al comprar/entregar una fila
+  const formR = (g) => ({
+    n: {
+      nombre: g.n.nombre, unidad: g.unidad, cantidad: g.cantidad,
+      stockId: g.filas.find((r) => r.n.stockId)?.n.stockId,
+      ...(g.filas.every((r) => r.n.cantidadComprada != null) ? { cantidadComprada: g.filas.reduce((a, r) => a + Number(r.n.cantidadComprada), 0) } : {}),
+      ...(g.compra > 0 ? { valorCompra: g.compra } : {}),
+    },
+  });
 
   return (
     <div className="mt-4">
       <p className="text-xs mb-3" style={cSlate}>
         {editable
-          ? "Material que pidieron los técnicos al registrar “Requiere material”. Márcalo como comprado y luego entregado: queda en el registro de la orden y se avisa al técnico."
+          ? "Material que pidieron los técnicos al registrar “Requiere material”. Si el mismo material se pidió en varias órdenes de una sede, sale en una sola fila con todas sus órdenes. Márcalo como comprado y luego entregado: queda en el registro de cada orden y se avisa al técnico."
           : "Material pedido en las órdenes de tus sedes y en qué va la compra."}
       </p>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
@@ -10335,23 +10472,29 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
       </div>
 
       <div className="overflow-x-auto border rounded-md bg-white" style={bLine}>
-        <table className="w-full text-xs text-left" style={{ minWidth: editable ? 900 : 700 }}>
+        <table className="w-full text-xs text-left" style={{ minWidth: editable ? 980 : 720 }}>
           <thead>
             <tr style={{ background: COLORS.cream }}>
-              {encabezado("material", "Material")}
-              {encabezado("orden", "Orden")}
-              {encabezado("sede", "Sede")}
-              {encabezado("fecha", "Pedido")}
-              {editable && encabezado("valor", "Valor ref.", "text-right")}
-              {encabezado("estado", "Estado")}
-              {editable && <th className={th} style={cSlate}>Acciones</th>}
+              {th("material", "Material")}
+              {th("cantidad", "Cant.", "text-right")}
+              <th className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left" style={cSlate}>Unidad</th>
+              {th("orden", "Orden")}
+              {th("sede", "Sede")}
+              {th("fecha", "Pedido")}
+              {editable && th("valor", "Valor ref.", "text-right")}
+              {th("estado", "Estado")}
+              {editable && <th className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left" style={cSlate}>Acciones</th>}
             </tr>
             <tr style={{ background: COLORS.cream }}>
-              <th className="px-2 pb-1.5" colSpan={2}>
-                <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar material u orden…" className={filtroCls} style={inputStyle} />
+              <th className="px-2 pb-1.5">
+                <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar material…" className={FILTRO_TH} style={inputStyle} />
+              </th>
+              {vacio}{vacio}
+              <th className="px-2 pb-1.5">
+                <input value={fOrden} onChange={(e) => setFOrden(e.target.value)} placeholder="Código…" className={FILTRO_TH} style={inputStyle} />
               </th>
               <th className="px-2 pb-1.5">
-                <select value={fSede} onChange={(e) => setFSede(e.target.value)} className={filtroCls} style={inputStyle}>
+                <select value={fSede} onChange={(e) => setFSede(e.target.value)} className={FILTRO_TH} style={inputStyle}>
                   <option value="todas">Todas</option>
                   {sedes.map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
                 </select>
@@ -10359,7 +10502,7 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
               {vacio}
               {editable && vacio}
               <th className="px-2 pb-1.5">
-                <select value={fEstado} onChange={(e) => setFEstado(e.target.value)} className={filtroCls} style={inputStyle}>
+                <select value={fEstado} onChange={(e) => setFEstado(e.target.value)} className={FILTRO_TH} style={inputStyle}>
                   <option value="abiertos">Por atender</option>
                   <option value="todos">Todos</option>
                   {ORDEN_NEC.map((e) => <option key={e} value={e}>{ESTADOS_NECESIDAD[e].label}</option>)}
@@ -10370,66 +10513,61 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
           </thead>
           <tbody>
             {filas.length === 0 && (
-              <tr><td colSpan={editable ? 7 : 5} className="px-2 py-4 text-center" style={cSlate}>
+              <tr><td colSpan={nCols} className="px-2 py-4 text-center" style={cSlate}>
                 {todas.length ? "Ningún pedido coincide con el filtro." : "No hay material pedido en las órdenes."}
               </td></tr>
             )}
-            {filas.map((r) => {
-              const e = ESTADOS_NECESIDAD[r.n.estado] || ESTADOS_NECESIDAD.pendiente;
-              const ref = referencia(r.n);
-              const cant = Number(r.n.cantidad) || 0;
-              const abierto = ["pendiente", "comprado"].includes(r.n.estado);
+            {filas.map((g) => {
+              const e = ESTADOS_NECESIDAD[g.estado] || ESTADOS_NECESIDAD.pendiente;
+              const { ref } = g;
+              const kardex = g.filas.some((r) => r.n.stockId || r.n.kardex);
               return (
-                <tr key={r.n.id} style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className="px-2 py-1.5" style={{ maxWidth: 240 }}>
-                    <span className="font-semibold break-words" style={cChar}>{r.n.nombre}</span>
-                    <span style={cSlate}> × {r.n.cantidad} {r.n.unidad || "u"}</span>
-                    <span className="block text-[9px]" style={{ color: r.n.stockId || r.n.kardex ? COLORS.slate : COLORS.orange }}>
-                      {r.n.stockId || r.n.kardex ? "Kardex" : "Artículo nuevo"}{r.n.nombreBodega ? ` · en bodega como “${r.n.nombreBodega}”` : ""}
+                <tr key={g.key} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  <td className={td} style={{ maxWidth: 240 }}>
+                    <span className="font-semibold break-words" style={cChar}>{g.n.nombre}</span>
+                    <span className="block text-[9px]" style={{ color: kardex ? COLORS.slate : COLORS.orange }}>
+                      {kardex ? "Kardex" : "Artículo nuevo"}{g.n.nombreBodega ? ` · en bodega como “${g.n.nombreBodega}”` : ""}
                     </span>
                   </td>
-                  <td className="px-2 py-1.5 whitespace-nowrap">
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="font-bold" style={cOrange}>{r.orden.codigo}</span>
-                      <BotonDetalle item={{ ...r.orden, tipo: r.tipo, tarea: r.orden.tarea || r.orden.descripcion || tituloServicio(r.orden), fechaProgramada: r.orden.fechaProgramada || r.orden.fecha }} size={12} />
-                    </span>
-                  </td>
-                  <td className="px-2 py-1.5 whitespace-nowrap" style={cChar}>{sedeNombre(data.sedes, r.orden.sedeId)}</td>
-                  <td className="px-2 py-1.5 whitespace-nowrap" style={cSlate}>
-                    {r.n.fecha}
-                    <span className="block text-[9px]">{usuarioNombre(data.usuarios, r.n.usuarioId).split(" ")[0]}</span>
+                  <td className={`${td} text-right font-bold whitespace-nowrap`} style={cChar}>{g.cantidad}</td>
+                  <td className={`${td} whitespace-nowrap`} style={cSlate}>{g.unidad}</td>
+                  <td className={td}><OrdenesLigadas filas={g.filas} /></td>
+                  <td className={`${td} whitespace-nowrap`} style={cChar}>{sedeNombre(data.sedes, g.sedeId)}</td>
+                  <td className={`${td} whitespace-nowrap`} style={cSlate}>
+                    {g.fecha.split(" ")[0]}{g.filas.length > 1 && g.fechaUltima.split(" ")[0] !== g.fecha.split(" ")[0] ? ` – ${g.fechaUltima.split(" ")[0]}` : ""}
+                    <span className="block text-[9px]">{g.pedidores.map((id) => usuarioNombre(data.usuarios, id).split(" ")[0]).join(", ")}</span>
                   </td>
                   {editable && (
-                    <td className="px-2 py-1.5 text-right whitespace-nowrap">
-                      {ref.manual && abierto ? (
+                    <td className={`${td} text-right whitespace-nowrap`}>
+                      {ref.manual && g.abierto ? (
                         <span className="inline-flex items-center gap-1 justify-end">
                           <span className="text-[10px]" style={cSlate}>$</span>
-                          <CampoVivo type="number" min="0" step="0.01" inputMode="decimal" value={r.n.valorReferencia ?? ""} placeholder="c/u"
-                            onCommit={(v) => guardarRef(r, v)}
-                            className="w-16 border rounded px-1.5 py-1 text-[11px] text-right bg-white" style={inputStyle} />
+                          <CampoVivo type="number" min="0" step="0.01" inputMode="decimal" value={g.n.valorReferencia ?? ""} placeholder="c/u"
+                            onCommit={(v) => guardarRef(g, v)}
+                            className="w-16 border rounded px-1.5 py-0.5 text-[11px] text-right bg-white" style={inputStyle} />
                         </span>
                       ) : ref.unit > 0 ? (
                         <span className="text-[11px]" style={cChar}>{money(ref.unit)} c/u</span>
                       ) : <span style={cSlate}>—</span>}
-                      {ref.unit > 0 && <span className="block text-[10px] font-bold" style={cOrange}>{money(ref.unit * cant)}</span>}
-                      <span className="block text-[9px]" style={cSlate}>{ref.fuente || (abierto ? "Anota un valor" : "")}</span>
+                      {ref.unit > 0 && <span className="block text-[10px] font-bold" style={cOrange}>{money(g.valorRef)}</span>}
+                      <span className="block text-[9px]" style={cSlate}>{ref.fuente || (g.abierto ? "Anota un valor" : "")}</span>
                     </td>
                   )}
-                  <td className="px-2 py-1.5">
+                  <td className={td}>
                     <Chip color={e.color}>{e.label}</Chip>
-                    {r.n.noRequerido && <span className="block text-[9px] mt-0.5" style={cSlate}>{r.n.estado === "cancelado" ? "Anulado por la orden" : "Anulado · pasa a bodega"}</span>}
-                    {editable && r.n.valorCompra > 0 && <span className="block text-[9px] mt-0.5" style={cSlate}>Compra {money(r.n.valorCompra)}</span>}
-                    {r.n.fechaEstado && r.n.estado !== "pendiente" && <span className="block text-[9px]" style={cSlate}>{r.n.fechaEstado}</span>}
+                    {g.n.noRequerido && <span className="block text-[9px] mt-0.5" style={cSlate}>{g.estado === "cancelado" ? "Anulado por la orden" : "Anulado · pasa a bodega"}</span>}
+                    {editable && g.compra > 0 && <span className="block text-[9px] mt-0.5" style={cSlate}>Compra {money(g.compra)}</span>}
+                    {g.n.fechaEstado && g.estado !== "pendiente" && <span className="block text-[9px]" style={cSlate}>{g.n.fechaEstado}</span>}
                   </td>
                   {editable && (
-                    <td className="px-2 py-1.5">
-                      {abierto && (
+                    <td className={td}>
+                      {g.abierto && (
                         <div className="flex gap-1">
-                          {r.n.estado === "pendiente" && (
-                            <button onClick={() => setForm({ r, modo: "comprado" })} className={btn} style={{ borderColor: "#3B6EA5", color: "#3B6EA5" }}>Comprado</button>
+                          {g.estado === "pendiente" && (
+                            <button onClick={() => setForm({ g, modo: "comprado" })} className={btn} style={{ borderColor: "#3B6EA5", color: "#3B6EA5" }}>Comprado</button>
                           )}
-                          <button onClick={() => setForm({ r, modo: "entregado" })} className={btn} style={{ borderColor: COLORS.verde, color: COLORS.verde }}>Entregado</button>
-                          <button onClick={() => cambiar(r, "cancelado")} className={btn} style={{ borderColor: COLORS.line, color: COLORS.slate }}>Cancelar</button>
+                          <button onClick={() => setForm({ g, modo: "entregado" })} className={btn} style={{ borderColor: COLORS.verde, color: COLORS.verde }}>Entregado</button>
+                          <button onClick={() => cambiar(g, "cancelado")} className={btn} style={{ borderColor: COLORS.line, color: COLORS.slate }}>Cancelar</button>
                         </div>
                       )}
                     </td>
@@ -10441,7 +10579,9 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
           {editable && filas.length > 0 && (
             <tfoot>
               <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.cream }}>
-                <td colSpan={4} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>{filas.length} pedido(s)</td>
+                <td colSpan={6} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>
+                  {filas.length} fila(s) · {filas.reduce((a, g) => a + g.filas.length, 0)} pedido(s)
+                </td>
                 <td className="px-2 py-1.5 text-right whitespace-nowrap">
                   <span className="font-bold" style={cOrange}>{money(totalRef)}</span>
                   <span className="block text-[9px]" style={cSlate}>por comprar o entregar</span>
@@ -10454,12 +10594,18 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
       </div>
 
       {editable && form && (
-        <Modal title={`${form.modo === "entregado" ? "Entregar" : "Comprar"} · ${form.r.n.nombre}`} onClose={() => setForm(null)}>
-          <FormNecesidad r={form.r} modo={form.modo} sede={sedeNombre(data.sedes, form.r.orden.sedeId)}
-            stockSede={(data.stock || []).filter((a) => a.sedeId === form.r.orden.sedeId)}
-            valorSugerido={referencia(form.r.n).unit * (Number(form.r.n.cantidad) || 0)}
+        <Modal title={`${form.modo === "entregado" ? "Entregar" : "Comprar"} · ${form.g.n.nombre}`} onClose={() => setForm(null)}>
+          {form.g.filas.length > 1 && (
+            <p className="text-[11px] mb-1" style={cSlate}>
+              Pedido en {new Set(form.g.filas.map((r) => r.orden.id)).size} órdenes ({[...new Set(form.g.filas.map((r) => r.orden.codigo))].join(", ")}).
+              La cantidad y el valor se reparten entre ellas según lo que pidió cada una.
+            </p>
+          )}
+          <FormNecesidad r={formR(form.g)} modo={form.modo} sede={sedeNombre(data.sedes, form.g.sedeId)}
+            stockSede={(data.stock || []).filter((a) => a.sedeId === form.g.sedeId)}
+            valorSugerido={form.g.valorRef}
             onCancel={() => setForm(null)}
-            onConfirm={(extra, ingreso) => cambiar(form.r, form.modo, extra, ingreso)} />
+            onConfirm={(extra, ingreso) => cambiar(form.g, form.modo, extra, ingreso)} />
         </Modal>
       )}
     </div>
@@ -10467,35 +10613,156 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
 }
 
 /* Bodega → Ingresos: lo que entró a bodega desde Pendientes de compra.
-   Dice si se creó un artículo nuevo o se sumó a uno existente. */
+   Una fila por ingreso (una compra conjunta de varias órdenes es un solo
+   ingreso). Dice si se creó un artículo nuevo o se sumó a uno existente. */
 function IngresosBodega({ data, sedes, editable }) {
-  const filas = necesidadesDe(data, sedes.map((s) => s.id))
+  const [q, setQ] = useState("");
+  const [fSku, setFSku] = useState("");
+  const [fSede, setFSede] = useState("todas");
+  const [fTipo, setFTipo] = useState("todos");
+  const [fMes, setFMes] = useState("todos");
+  const [fOrden, setFOrden] = useState("");
+  const [orden, setOrden] = useState({ col: "fecha", asc: false });
+
+  const mapa = new Map();
+  necesidadesDe(data, sedes.map((s) => s.id))
     .filter((r) => r.n.estado === "entregado" && r.n.nombreBodega)
-    .sort((a, b) => `${b.n.fechaEstado} ${b.n.horaEstado || ""}`.localeCompare(`${a.n.fechaEstado} ${a.n.horaEstado || ""}`));
+    .forEach((r) => {
+      const k = r.n.ingresoId || r.n.id;
+      const g = mapa.get(k) || { key: k, filas: [] };
+      g.filas.push(r);
+      mapa.set(k, g);
+    });
+  const ingresos = [...mapa.values()].map((g) => {
+    const n = g.filas[0].n;
+    const art = n.stockId && (data.stock || []).find((a) => a.id === n.stockId);
+    return {
+      ...g, n, sedeId: g.filas[0].orden.sedeId,
+      fecha: `${n.fechaEstado || ""} ${n.horaEstado || ""}`.trim(),
+      sku: art?.sku || "", articulo: n.nombreBodega, unidad: art?.unidad || n.unidad || "u",
+      cantidad: g.filas.reduce((a, r) => a + (Number(r.n.cantidadComprada ?? r.n.cantidad) || 0), 0),
+      valor: g.filas.reduce((a, r) => a + (Number(r.n.valorCompra) || 0), 0),
+      pedidoComo: [...new Set(g.filas.map((r) => r.n.nombre))].filter((x) => claveArticulo(x) !== claveArticulo(n.nombreBodega)),
+      pedidores: [...new Set(g.filas.map((r) => r.n.usuarioId))],
+      codigos: g.filas.map((r) => r.orden.codigo || "").join(" "),
+      tipo: n.ingresoNuevo ? "nuevo" : "sumado",
+    };
+  });
+  const meses = [...new Set(ingresos.map((x) => x.fecha.slice(0, 7)).filter(Boolean))].sort().reverse();
+  const tO = fOrden.trim().toLowerCase();
+  const tS = fSku.trim().toLowerCase();
+  const filas = ordenarPor(ingresos
+    .filter((x) => fSede === "todas" || x.sedeId === fSede)
+    .filter((x) => fTipo === "todos" || x.tipo === fTipo)
+    .filter((x) => fMes === "todos" || x.fecha.startsWith(fMes))
+    .filter((x) => !tS || x.sku.toLowerCase().includes(tS))
+    .filter((x) => !tO || x.codigos.toLowerCase().includes(tO))
+    .filter((x) => coincideArticulo(`${x.articulo} ${x.pedidoComo.join(" ")}`, q)), {
+    fecha: (x) => x.fecha,
+    sku: (x) => x.sku || "~",
+    articulo: (x) => x.articulo.toLowerCase(),
+    cantidad: (x) => x.cantidad,
+    valor: (x) => x.valor,
+    sede: (x) => sedeNombre(data.sedes, x.sedeId),
+    orden: (x) => x.codigos,
+    tipo: (x) => x.tipo,
+  }, orden);
+
+  const td = "px-2 py-1 align-top";
+  const th = (col, label, className) => <ThOrden col={col} label={label} orden={orden} setOrden={setOrden} className={className} />;
+  const thPlano = (label) => <th className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left whitespace-nowrap" style={cSlate}>{label}</th>;
+  const vacio = <th className="px-2 pb-1.5" />;
+  const nCols = editable ? 11 : 10;
+
   return (
     <div className="mt-4">
       <p className="text-xs mb-3" style={cSlate}>Material que ingresó a bodega al marcar “Entregado” un pedido de una orden.</p>
-      {filas.length === 0 ? <Empty>Todavía no hay ingresos por compra.</Empty> : (
-        <div className="space-y-2">
-          {filas.map((r) => (
-            <div key={r.n.id} className="border rounded-md p-2.5 bg-white text-left" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${COLORS.verde}` }}>
-              <div className="flex items-start justify-between gap-2">
-                <p className="text-sm font-semibold break-words min-w-0" style={cChar}>
-                  {r.n.nombreBodega} <span className="font-normal" style={cSlate}>+{r.n.cantidadComprada ?? r.n.cantidad} {r.n.unidad || "u"}</span>
-                </p>
-                <Chip color={r.n.ingresoNuevo ? "#3B6EA5" : COLORS.verde}>{r.n.ingresoNuevo ? "Artículo nuevo" : "Sumado a existente"}</Chip>
-              </div>
-              <p className="text-[10px] mt-0.5" style={cSlate}>
-                {sedeNombre(data.sedes, r.orden.sedeId)} · {r.n.fechaEstado}{r.n.horaEstado ? ` ${r.n.horaEstado}` : ""} · {usuarioNombre(data.usuarios, r.n.actualizadoPor)}
-                {editable && r.n.valorCompra > 0 ? ` · ${money(r.n.valorCompra)}` : ""}
-              </p>
-              <p className="text-[10px]" style={cSlate}>
-                Pedido en <b style={cOrange}>{r.orden.codigo}</b> como “{r.n.nombre}” por {usuarioNombre(data.usuarios, r.n.usuarioId)}
-              </p>
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="overflow-x-auto border rounded-md bg-white" style={bLine}>
+        <table className="w-full text-xs text-left" style={{ minWidth: editable ? 1060 : 960 }}>
+          <thead>
+            <tr style={{ background: COLORS.cream }}>
+              {th("fecha", "Fecha")}
+              {th("sku", "SKU")}
+              {th("articulo", "Artículo")}
+              {th("cantidad", "Cant.", "text-right")}
+              {thPlano("Unidad")}
+              {editable && th("valor", "Valor", "text-right")}
+              {th("sede", "Sede")}
+              {th("orden", "Orden")}
+              {thPlano("Pedido por")}
+              {thPlano("Entregado por")}
+              {th("tipo", "Tipo")}
+            </tr>
+            <tr style={{ background: COLORS.cream }}>
+              <th className="px-2 pb-1.5">
+                <select value={fMes} onChange={(e) => setFMes(e.target.value)} className={FILTRO_TH} style={inputStyle}>
+                  <option value="todos">Todas</option>
+                  {meses.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </th>
+              <th className="px-2 pb-1.5">
+                <input value={fSku} onChange={(e) => setFSku(e.target.value)} placeholder="SKU…" className={FILTRO_TH} style={{ ...inputStyle, minWidth: 70 }} />
+              </th>
+              <th className="px-2 pb-1.5">
+                <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar artículo…" className={FILTRO_TH} style={inputStyle} />
+              </th>
+              {vacio}{vacio}
+              {editable && vacio}
+              <th className="px-2 pb-1.5">
+                <select value={fSede} onChange={(e) => setFSede(e.target.value)} className={FILTRO_TH} style={inputStyle}>
+                  <option value="todas">Todas</option>
+                  {sedes.map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                </select>
+              </th>
+              <th className="px-2 pb-1.5">
+                <input value={fOrden} onChange={(e) => setFOrden(e.target.value)} placeholder="Código…" className={FILTRO_TH} style={{ ...inputStyle, minWidth: 70 }} />
+              </th>
+              {vacio}{vacio}
+              <th className="px-2 pb-1.5">
+                <select value={fTipo} onChange={(e) => setFTipo(e.target.value)} className={FILTRO_TH} style={inputStyle}>
+                  <option value="todos">Todos</option>
+                  <option value="nuevo">Artículo nuevo</option>
+                  <option value="sumado">Sumado a existente</option>
+                </select>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {filas.length === 0 && (
+              <tr><td colSpan={nCols} className="px-2 py-4 text-center" style={cSlate}>
+                {ingresos.length ? "Ningún ingreso coincide con el filtro." : "Todavía no hay ingresos por compra."}
+              </td></tr>
+            )}
+            {filas.map((x) => (
+              <tr key={x.key} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                <td className={`${td} whitespace-nowrap`} style={cSlate}>{x.fecha}</td>
+                <td className={`${td} whitespace-nowrap font-mono text-[10px]`} style={cSlate}>{x.sku || "—"}</td>
+                <td className={td} style={{ maxWidth: 240 }}>
+                  <span className="font-semibold break-words" style={cChar}>{x.articulo}</span>
+                  {x.pedidoComo.length > 0 && <span className="block text-[9px]" style={cSlate}>Pedido como “{x.pedidoComo.join("”, “")}”</span>}
+                </td>
+                <td className={`${td} text-right font-bold whitespace-nowrap`} style={cChar}>+{x.cantidad}</td>
+                <td className={`${td} whitespace-nowrap`} style={cSlate}>{x.unidad}</td>
+                {editable && <td className={`${td} text-right whitespace-nowrap font-semibold`} style={x.valor > 0 ? cOrange : cSlate}>{x.valor > 0 ? money(x.valor) : "—"}</td>}
+                <td className={`${td} whitespace-nowrap`} style={cChar}>{sedeNombre(data.sedes, x.sedeId)}</td>
+                <td className={td}><OrdenesLigadas filas={x.filas} /></td>
+                <td className={`${td} whitespace-nowrap`} style={cSlate}>{x.pedidores.map((id) => usuarioNombre(data.usuarios, id)).join(", ")}</td>
+                <td className={`${td} whitespace-nowrap`} style={cSlate}>{usuarioNombre(data.usuarios, x.n.actualizadoPor)}</td>
+                <td className={td}><Chip color={x.tipo === "nuevo" ? "#3B6EA5" : COLORS.verde}>{x.tipo === "nuevo" ? "Nuevo" : "Sumado"}</Chip></td>
+              </tr>
+            ))}
+          </tbody>
+          {filas.length > 0 && (
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.cream }}>
+                <td colSpan={5} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>{filas.length} ingreso(s)</td>
+                {editable && <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap" style={cOrange}>{money(filas.reduce((a, x) => a + x.valor, 0))}</td>}
+                <td colSpan={5} />
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
     </div>
   );
 }
@@ -10531,6 +10798,8 @@ function InventarioBodega({ data, persist, sedes, editable }) {
   const [nuevo, setNuevo] = useState(null);
   const [q, setQ] = useState("");
   const [fEstado, setFEstado] = useState("todos");
+  const [fSku, setFSku] = useState("");
+  const [orden, setOrden] = useState({ col: "nombre", asc: true });
 
   // Si la sede elegida deja de estar disponible, se vuelve a ver todas
   const sedeIds = sedes.map((s) => s.id);
@@ -10575,12 +10844,22 @@ function InventarioBodega({ data, persist, sedes, editable }) {
   const skuRepetido = new Set(articulos.map((a) => a.sku).filter((x, i, arr) => x && arr.indexOf(x) !== i));
 
   const enAlcance = articulos.filter((a) => a.enColumnas.length > 0);
-  const visibles = enAlcance
-    .filter((a) => coincideArticulo(`${a.sku} ${a.nombre}`, q))
+  const tSku = fSku.trim().toLowerCase();
+  const ORDEN_EST = ["agotado", "bajo", "disponible"];
+  const visibles = ordenarPor(enAlcance
+    .filter((a) => coincideArticulo(a.nombre, q))
+    .filter((a) => !tSku || a.sku.toLowerCase().includes(tSku))
     .filter((a) => fEstado === "todos"
       || (fEstado === "disponible" ? a.estado !== "agotado" : a.estado === fEstado))
-    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
-  const hayFiltro = q.trim() !== "" || fEstado !== "todos" || fSede !== "todas";
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es")), {
+    sku: (a) => a.sku || "~",
+    nombre: (a) => a.nombre.toLowerCase(),
+    costo: (a) => a.costoUnitario,
+    cantidad: (a) => a.cantidad,
+    valor: (a) => a.valor,
+    estado: (a) => `${ORDEN_EST.indexOf(a.estado)}${a.nombre.toLowerCase()}`,
+  }, orden);
+  const hayFiltro = q.trim() !== "" || tSku !== "" || fEstado !== "todos" || fSede !== "todas";
 
   const setRegistros = (ids, patch) => persist((data) => ({ ...data, stock: data.stock.map((x) => (ids.includes(x.id) ? { ...x, ...patch } : x)) }));
   const ids = (a) => a.registros.map((x) => x.id);
@@ -10600,9 +10879,11 @@ function InventarioBodega({ data, persist, sedes, editable }) {
     persist((data) => ({ ...data, stock: data.stock.filter((y) => !quitar.includes(y.id)) }));
   };
 
-  const th = "text-left text-[10px] font-semibold uppercase tracking-wide px-2.5 py-2 whitespace-nowrap";
-  const td = "px-2.5 py-2 text-xs align-middle";
-  const cellInput = "w-full border rounded px-1.5 py-1 text-xs outline-none bg-white";
+  const th = (col, label, className) => <ThOrden col={col} label={label} orden={orden} setOrden={setOrden} className={className} />;
+  const thPlano = "px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left whitespace-nowrap";
+  const vacioTh = <th className="px-2 pb-1.5" />;
+  const td = "px-2 py-1 text-xs align-middle";
+  const cellInput = "w-full border rounded px-1.5 py-0.5 text-xs outline-none bg-white";
 
   const META_ESTADO = {
     agotado: { color: COLORS.rojo, label: "Agotado" },
@@ -10620,11 +10901,11 @@ function InventarioBodega({ data, persist, sedes, editable }) {
     <span className="break-words font-semibold" style={cChar}>{a.nombre}</span>
   );
   const campoSku = (a) => (
-    <span className="flex items-center gap-1 mb-0.5">
+    <span className="flex flex-col items-start gap-0.5">
       {editable ? (
         <CampoVivo value={a.sku} onCommit={(v) => v.trim() && setRegistros(ids(a), { sku: v.trim().toUpperCase() })}
-          className="border rounded px-1 py-0.5 text-[10px] font-mono w-20 bg-white" style={{ borderColor: COLORS.line, ...cSlate }} />
-      ) : <span className="text-[10px] font-mono" style={cSlate}>{a.sku || "—"}</span>}
+          className="border rounded px-1 py-0.5 text-[11px] font-mono w-20 bg-white" style={{ borderColor: COLORS.line, ...cSlate }} />
+      ) : <span className="text-[11px] font-mono whitespace-nowrap" style={cSlate}>{a.sku || "—"}</span>}
       {skuRepetido.has(a.sku) && <Chip color={COLORS.rojo}>SKU repetido</Chip>}
     </span>
   );
@@ -10682,113 +10963,76 @@ function InventarioBodega({ data, persist, sedes, editable }) {
         </div>
       )}
 
-      {/* Buscador, estado y sede */}
-      <div className="flex gap-2 mb-2 flex-wrap">
-        <div className="flex-1 min-w-48 flex items-center gap-1.5 border rounded-md px-2.5 bg-white" style={inputStyle}>
-          <Search size={14} color={COLORS.slate} className="shrink-0" />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar artículo…" enterKeyHint="search"
-            className="flex-1 min-w-0 py-2 text-sm outline-none bg-transparent" style={cChar} />
-          {q && (
-            <button onClick={() => setQ("")} className="shrink-0 p-0.5" title="Limpiar búsqueda">
-              <X size={14} color={COLORS.slate} />
-            </button>
-          )}
-        </div>
-        <select value={fEstado} onChange={(e) => setFEstado(e.target.value)}
-          className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
-          {FILTROS_BODEGA.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
-        </select>
-        {sedes.length > 1 && (
-          <select value={fSede} onChange={(e) => setFSede(e.target.value)}
-            className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
-            <option value="todas">Todas las sedes</option>
-            {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
-          </select>
-        )}
+      {/* Tabla compacta: filtros en los encabezados; una columna de cantidad por sede */}
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
+        <p className="text-[11px] flex-1 min-w-40 text-left" style={cSlate}>
+          {hayFiltro ? <>Mostrando {visibles.length} de {articulos.length} artículo(s).{" "}
+            <button onClick={() => { setQ(""); setFSku(""); setFEstado("todos"); setFSede("todas"); }} className="font-semibold" style={cOrange}>Quitar filtros</button></>
+            : `${articulos.length} artículo(s)`}
+        </p>
         {editable && (
           <button onClick={() => setNuevo({ nombre: "", unidad: "u", cantidad: 0, costoUnitario: 0, minimo: 0, sedeId: fSede === "todas" ? sedes[0]?.id || "" : fSede })}
-            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-md text-white shrink-0" style={{ background: COLORS.orange }}>
+            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-md text-white shrink-0" style={{ background: COLORS.orange }}>
             <Plus size={13} /> Agregar artículo
           </button>
         )}
       </div>
-      {hayFiltro && (
-        <p className="text-[11px] mb-2" style={cSlate}>
-          Mostrando {visibles.length} de {articulos.length} artículo(s).{" "}
-          <button onClick={() => { setQ(""); setFEstado("todos"); setFSede("todas"); }} className="font-semibold" style={cOrange}>Quitar filtros</button>
-        </p>
-      )}
-
-      {/* Celular: una tarjeta por artículo, con la cantidad de cada sede */}
-      <div className="md:hidden space-y-2">
-        {visibles.map((a) => {
-          const est = META_ESTADO[a.estado];
-          return (
-            <div key={a.key} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${est.color}` }}>
-              <div className="flex items-start gap-2">
-                <div className="flex-1 min-w-0 text-sm">{campoSku(a)}{campoNombre(a)}{chipOrigen(a)}</div>
-                {editable && <DeleteBtn onConfirm={() => borrar(a)} />}
-              </div>
-              <div className="flex items-center justify-between gap-2 mt-1.5">
-                <Chip color={est.color}>{est.label}</Chip>
-                {editable && <span className="text-xs font-bold" style={cOrange}>{money(a.valor)}</span>}
-              </div>
-              <div className="grid grid-cols-2 gap-2 mt-2">
-                <div className="min-w-0">
-                  <p className="text-[9px] font-semibold uppercase tracking-wide mb-0.5" style={cSlate}>Unidad</p>
-                  <div className="text-xs" style={cChar}>{campoUnidad(a, "100%")}</div>
-                </div>
-                {editable && (
-                  <div className="min-w-0">
-                    <p className="text-[9px] font-semibold uppercase tracking-wide mb-0.5" style={cSlate}>Costo u.</p>
-                    <div className="text-xs" style={cChar}>{campoCosto(a, "100%")}</div>
-                  </div>
-                )}
-              </div>
-              <div className="grid grid-cols-3 gap-2 mt-2">
-                {columnas.map((s) => (
-                  <div key={s.id} className="min-w-0">
-                    <p className="text-[9px] font-semibold uppercase tracking-wide mb-0.5 truncate" style={cSlate} title={s.nombre}>{s.nombre}</p>
-                    <div className="text-xs">{campoCantidad(a, s, "100%")}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })}
-        {visibles.length === 0 && <Empty>{vacio}</Empty>}
-      </div>
-
-      {/* Computador / tablet: tabla con una columna de cantidad por sede */}
-      <div className="hidden md:block border rounded-md overflow-x-auto" style={cardStyle}>
-        <table className="w-full border-collapse" style={{ minWidth: 420 + columnas.length * 90 + (editable ? 260 : 0) }}>
+      <div className="border rounded-md overflow-x-auto bg-white" style={bLine}>
+        <table className="w-full border-collapse text-xs text-left" style={{ minWidth: 470 + columnas.length * 78 + (editable ? 200 : 0) }}>
           <thead>
-            <tr style={{ background: COLORS.charcoal }}>
-              <th className={th} style={{ color: "white", width: "30%" }}>SKU · Artículo</th>
-              <th className={th} style={{ color: "white" }}>Unidad</th>
-              {editable && <th className={th} style={{ color: "white" }}>Costo unit.</th>}
+            <tr style={{ background: COLORS.cream }}>
+              {th("sku", "SKU")}
+              {th("nombre", "Artículo")}
+              <th className={thPlano} style={cSlate}>Unidad</th>
+              {editable && th("costo", "Costo u.", "text-right")}
               {columnas.map((s) => (
-                <th key={s.id} className={`${th} text-center`} style={{ color: "white", whiteSpace: "normal", minWidth: 76 }}>{s.nombre}</th>
+                <th key={s.id} className={`${thPlano} text-center`} style={{ ...cSlate, whiteSpace: "normal", minWidth: 70 }}>{s.nombre}</th>
               ))}
-              {columnas.length > 1 && <th className={`${th} text-center`} style={{ color: "white" }}>Total</th>}
-              {editable && <th className={th} style={{ color: "white" }}>Valor</th>}
-              <th className={th} style={{ color: "white" }}>Estado</th>
-              {editable && <th className={th} style={{ color: "white" }}></th>}
+              {columnas.length > 1 && th("cantidad", "Total", "text-center")}
+              {editable && th("valor", "Valor", "text-right")}
+              {th("estado", "Estado")}
+              {editable && <th className={thPlano} />}
+            </tr>
+            <tr style={{ background: COLORS.cream }}>
+              <th className="px-2 pb-1.5">
+                <input value={fSku} onChange={(e) => setFSku(e.target.value)} placeholder="SKU…" className={FILTRO_TH} style={{ ...inputStyle, minWidth: 74 }} />
+              </th>
+              <th className="px-2 pb-1.5">
+                <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar artículo…" className={FILTRO_TH} style={inputStyle} />
+              </th>
+              {vacioTh}
+              {editable && vacioTh}
+              <th className="px-2 pb-1.5" colSpan={columnas.length + (columnas.length > 1 ? 1 : 0)}>
+                {sedes.length > 1 && (
+                  <select value={fSede} onChange={(e) => setFSede(e.target.value)} className={FILTRO_TH} style={inputStyle}>
+                    <option value="todas">Todas las sedes</option>
+                    {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+                  </select>
+                )}
+              </th>
+              {editable && vacioTh}
+              <th className="px-2 pb-1.5">
+                <select value={fEstado} onChange={(e) => setFEstado(e.target.value)} className={FILTRO_TH} style={inputStyle}>
+                  {FILTROS_BODEGA.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                </select>
+              </th>
+              {editable && vacioTh}
             </tr>
           </thead>
           <tbody>
-            {visibles.map((a, i) => {
+            {visibles.map((a) => {
               const est = META_ESTADO[a.estado];
               return (
-                <tr key={a.key} style={{ background: i % 2 ? COLORS.paper : "white", borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className={td} style={{ minWidth: 200 }}>{campoSku(a)}{campoNombre(a)}{chipOrigen(a)}</td>
-                  <td className={td}>{campoUnidad(a, 64)}</td>
-                  {editable && <td className={td}>{campoCosto(a, 74)}</td>}
+                <tr key={a.key} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  <td className={td}>{campoSku(a)}</td>
+                  <td className={td} style={{ minWidth: 190 }}>{campoNombre(a)}{chipOrigen(a)}</td>
+                  <td className={td}>{campoUnidad(a, 56)}</td>
+                  {editable && <td className={td}>{campoCosto(a, 70)}</td>}
                   {columnas.map((s) => (
-                    <td key={s.id} className={`${td} text-center`}>{campoCantidad(a, s, 64)}</td>
+                    <td key={s.id} className={`${td} text-center`}>{campoCantidad(a, s, 58)}</td>
                   ))}
                   {columnas.length > 1 && <td className={`${td} text-center font-bold`} style={cChar}>{a.cantidad}</td>}
-                  {editable && <td className={td} style={{ ...cOrange, fontWeight: 700 }}>{money(a.valor)}</td>}
+                  {editable && <td className={`${td} text-right whitespace-nowrap`} style={{ ...cOrange, fontWeight: 700 }}>{money(a.valor)}</td>}
                   <td className={td}><Chip color={est.color}>{est.label}</Chip></td>
                   {editable && <td className={td}><DeleteBtn onConfirm={() => borrar(a)} /></td>}
                 </tr>
@@ -10798,6 +11042,16 @@ function InventarioBodega({ data, persist, sedes, editable }) {
               <tr><td colSpan={nCols + (columnas.length > 1 ? 1 : 0)} className="px-3 py-5 text-sm text-center" style={cSlate}>{vacio}</td></tr>
             )}
           </tbody>
+          {editable && visibles.length > 0 && (
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.cream }}>
+                <td colSpan={4} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>{visibles.length} artículo(s)</td>
+                <td colSpan={columnas.length + (columnas.length > 1 ? 1 : 0)} />
+                <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap" style={cOrange}>{money(visibles.reduce((s, a) => s + a.valor, 0))}</td>
+                <td colSpan={2} />
+              </tr>
+            </tfoot>
+          )}
         </table>
       </div>
       {editable && (
