@@ -1586,7 +1586,7 @@ function tituloServicio(s) {
 
 /* Descripción heredada de la solicitud que originó el servicio. */
 function novedadServicio(s) {
-  return s.desdeSolicitud ? (s.descripcion || "") : "";
+  return s.desdeSolicitud || s.origenId ? (s.descripcion || "") : "";
 }
 
 function useAcciones(data, persist, usuario) {
@@ -1768,8 +1768,53 @@ function useAcciones(data, persist, usuario) {
         const base = { ...r, [col]: conEnlace };
         return { ...base, solicitudes: [nueva, ...(base.solicitudes || [])], solCounter: n + 1 };
       };
+      /* Requiere servicio: se crea una orden de servicio nueva (SRV) enlazada
+         al correctivo, que se queda en espera o cerrado como paliativo. */
+      const conServicio = (r) => {
+        if (!opciones.servicio) return r;
+        const n = r.srvCounter || 1;
+        const codigo = `SRV-${String(n).padStart(4, "0")}`;
+        const ahora = new Date();
+        const { detalle } = opciones.servicio;
+        const nuevo = {
+          id: uid("srv"), codigo,
+          sedeId: item.sedeId, faseId: item.faseId || "", activoId: item.activoId || "",
+          descripcion: item.descripcion || item.tarea || "", criticidad: item.criticidad || "",
+          solicitanteId: item.solicitanteId || "", tecnicoId: item.tecnicoId || "",
+          trabajo: "", detalle,
+          fechaReporte: fmtDate(ahora), horaReporte: fmtHora(ahora), createdAt: fmtDate(ahora),
+          fecha: "", fechaCompletada: "", horaCompletada: "",
+          tipoProveedor: "", proveedor: "", presupuesto: 0, presupuestoAprobado: null,
+          motivoRechazo: "", resolucion: "", estado: "por_definir",
+          observaciones: lineaRegistro(autor, `Creado desde ${item.codigo}: ${detalle}`, "servicio"),
+          foto: "", fotos: [], consumos: [], reprogramaciones: [], log: [],
+          origenId: item.id, origenCodigo: item.codigo || "",
+        };
+        const conEnlace = (r.solicitudes || []).map((x) => (x.id === item.id ? { ...x, servicioId: nuevo.id, servicioCodigo: codigo } : x));
+        return { ...r, solicitudes: conEnlace, servicios: [nuevo, ...(r.servicios || [])], srvCounter: n + 1 };
+      };
+      /* Servicio finalizado: el correctivo que lo esperaba se cierra solo. */
+      const cierraOrigen = (r) => {
+        if (item.tipo !== "servicio" || patch.estado !== "completada" || item.estado === "completada") return r;
+        const srv = (r.servicios || []).find((x) => x.id === item.id);
+        if (!srv?.origenId) return r;
+        const ahora = new Date();
+        return { ...r, solicitudes: (r.solicitudes || []).map((x) => {
+          if (x.id !== srv.origenId) return x;
+          if (x.estado === "completada") {
+            return { ...x, observaciones: conRegistro(x.observaciones, [lineaRegistro(autor, `Solución definitiva ejecutada con el servicio ${srv.codigo}`, "servicio")]) };
+          }
+          const sello = selloCierre(x, usuario?.id);
+          return {
+            ...x, ...sello, estado: "completada", motivoEspera: "",
+            resolucion: `Resuelto con el servicio ${srv.codigo}${srv.resolucion ? `: ${srv.resolucion}` : ""}`,
+            observaciones: conRegistro(x.observaciones, [lineaRegistro(autor, `Resuelto con el servicio ${srv.codigo} (cierre automático)`, "finalizada")]),
+            log: [...(x.log || []), { id: uid("log"), titulo: "Estado", detalle: `${ESTADOS[x.estado]?.label || x.estado} → Completada (servicio ${srv.codigo})`, usuarioId: usuario?.id || "", sello: `${fmtDate(ahora)} · ${fmtHora(ahora)}` }],
+          };
+        }) };
+      };
       const persistir = (fn) => persist((d) => {
-        const r = derivar(fn(d));
+        const r = cierraOrigen(conServicio(derivar(fn(d))));
         if (!consumos.length) return r;
         const resta = {};
         consumos.forEach((c) => { resta[c.stockId] = (resta[c.stockId] || 0) + c.cantidad; });
@@ -5205,6 +5250,9 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
   const [usados, setUsados] = useState([]);
   // Cierre definitivo o paliativo (funciona, pero falta la solución de fondo)
   const [paliativa, setPaliativa] = useState(false);
+  // Requiere servicio: lo realizado en la visita y cómo queda la orden
+  const [obsServ, setObsServ] = useState("");
+  const [modoServ, setModoServ] = useState("espera");
   // Pedidos que el técnico marca "Ya no se necesita" para poder finalizar
   const [noReq, setNoReq] = useState([]);
   const [falta, setFalta] = useState("");
@@ -5270,6 +5318,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
     : tipo === "avance" ? !!texto.trim() || consumosSel.length > 0
     // Reprogramar: qué se hizo / qué falta y la fecha en que se sigue
     : tipo === "continua" ? !!texto.trim() && !!nuevaFecha && nuevaFecha >= hoyStr
+    : tipo === "servicio" ? !!texto.trim() && !!obsServ.trim()
     : !!texto.trim());
   // Pedidos de la orden que se cargan ahora: quedan entregados y consumidos
   const opcionesConsumo = () => {
@@ -5284,7 +5333,8 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
 
   const limpiar = (msg) => {
     setTipo(""); setTexto(""); setMateriales([]); setMotivo(MOTIVOS_ESPERA[0]);
-    setNuevaFecha(""); setConfirmar(false); setUsados([]); setPaliativa(false); setFalta(""); setNoReq([]); setHecho(msg);
+    setNuevaFecha(""); setConfirmar(false); setUsados([]); setPaliativa(false); setFalta(""); setNoReq([]);
+    setObsServ(""); setModoServ("espera"); setHecho(msg);
     setTimeout(() => setHecho(""), 2500);
   };
 
@@ -5296,7 +5346,19 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
     const t = texto.trim();
     try {
       if (tipo === "servicio") {
-        await acciones.pasarAServicio(item, t);
+        /* Se crea la orden de servicio con el detalle requerido. El correctivo
+           queda En espera · servicio, o cerrado como paliativo hasta el servicio. */
+        const obs = obsServ.trim();
+        const paliativo = modoServ === "paliativa";
+        const patch = paliativo
+          ? { estado: "completada", ...selloCierre(item, usuarioId), cierre: "paliativo", motivoEspera: "",
+            pendienteDefinitivo: t, resolucion: `Reparación paliativa: ${obs}. Pendiente con servicio: ${t}` }
+          : { estado: "espera", motivoEspera: "servicio" };
+        await acciones.updateActividad(item, patch, {
+          comentario: { texto: `${obs} · Servicio requerido: ${t}`, etiqueta: paliativo ? "paliativa" : "servicio" },
+          servicio: { detalle: t },
+        });
+        if (paliativo) { limpiar(""); onFinalizada?.(); } else limpiar("Orden de servicio creada: queda en espera del servicio");
         return;
       }
       if (tipo === "correccion") {
@@ -5313,7 +5375,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
            ingresarlo a bodega, pero deja de frenar la orden. */
         const dejados = sinEntregar.filter((n) => noReq.includes(n.id));
         const notaMat = dejados.length
-          ? ` · Material que ya no se necesita: ${dejados.map((n) => `${textoNecesidad(n)}${n.estado === "comprado" ? " (ya comprado, queda para bodega)" : " (pedido cancelado)"}`).join("; ")}`
+          ? ` · Pedidos anulados: ${dejados.map((n) => `${textoNecesidad(n)}${n.estado === "comprado" ? " (ya comprado, pasa a bodega)" : ""}`).join("; ")}`
           : "";
         const conc = opcionesConsumo();
         const mapCons = conc.mapNecesidades || ((n) => n);
@@ -5402,7 +5464,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
     avance: "Qué se hizo hoy, qué se encontró, qué falta…",
     continua: "Qué se alcanzó a hacer hoy y qué falta para terminar…",
     material: "Para qué se necesita (opcional)…",
-    servicio: "Qué hay que hacer y por qué requiere un servicio: alcance, obra, proveedor externo…",
+    servicio: "Detalle del servicio requerido, cantidades aproximadas, etc.",
     espera: "Detalle del motivo…",
     finalizada: esPrev ? "Observación de cierre: cómo quedó el equipo, novedades…" : "Qué se hizo para resolverlo…",
     correccion: "Qué se corrige y por qué…",
@@ -5429,10 +5491,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
         </select>
       )}
       {tipo === "servicio" && (
-        <p className="text-[11px]" style={cSlate}>
-          La orden deja de ser correctivo (sale de los indicadores) y pasa a Servicios con el mismo número.
-          El supervisor completa proveedor y presupuesto y lo envía a aprobación del cliente.
-        </p>
+        <p className="text-[11px] font-semibold" style={cChar}>Detalle específicamente el servicio requerido</p>
       )}
       {conUsados && conStock.length > 0 && (
         <div className="rounded-md p-2 space-y-1.5 bg-white border" style={bLine}>
@@ -5497,7 +5556,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
         <div className="rounded-md p-2 text-[11px] space-y-1.5" style={{ background: `${COLORS.rojo}0D` }}>
           <p className="font-semibold" style={{ color: COLORS.rojo }}>Hay material pedido que aún no se entrega.</p>
           <p style={cSlate}>
-            Para finalizar, espera a que llegue o marca lo que ya no se necesita (por ejemplo, si encontraste otra solución).
+            Para finalizar, espera a que llegue o anula los pedidos que ya no hacen falta (por ejemplo, si encontraste otra solución).
           </p>
           {sinEntregar.map((n) => {
             const on = noReq.includes(n.id);
@@ -5509,14 +5568,14 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
                   </span>
                   {on && (
                     <span className="block text-[10px]" style={cSlate}>
-                      {n.estado === "comprado" ? "Ya comprado: el supervisor lo ingresa a bodega." : "Se cancela el pedido."}
+                      {n.estado === "comprado" ? "Ya comprado: el supervisor lo ingresa a bodega." : "El pedido queda anulado."}
                     </span>
                   )}
                 </span>
                 <button type="button" onClick={() => setNoReq(on ? noReq.filter((x) => x !== n.id) : [...noReq, n.id])}
                   className="shrink-0 text-[10px] font-semibold px-2 py-1 rounded-md border"
                   style={on ? { background: COLORS.slate, borderColor: COLORS.slate, color: "white" } : { borderColor: COLORS.line, color: COLORS.charcoal }}>
-                  {on ? "Ya no se necesita ✓" : "Ya no se necesita"}
+                  {on ? "Anulado ✓" : "Anular pedido"}
                 </button>
               </div>
             );
@@ -5531,6 +5590,29 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
       {tipo && (
         <textarea value={texto} onChange={(e) => setTexto(e.target.value)} rows={2} placeholder={placeholder}
           className={`${inputCls} resize-none bg-white`} style={inputStyle} />
+      )}
+      {tipo === "servicio" && (
+        <>
+          <Field label="Observación de lo realizado" hint="Queda en la bitácora de esta orden; no va en el detalle del servicio.">
+            <textarea value={obsServ} onChange={(e) => setObsServ(e.target.value)} rows={2}
+              placeholder="Qué se revisó o se hizo en la visita…"
+              className={`${inputCls} resize-none bg-white`} style={inputStyle} />
+          </Field>
+          <div className="grid grid-cols-2 gap-1 p-1 rounded-md bg-white border" style={bLine}>
+            {[["espera", "Queda en espera del servicio", "#7B5EA7"], ["paliativa", "Paliativa hasta el servicio", COLORS.ambar]].map(([v, l, c]) => (
+              <button key={v} type="button" onClick={() => setModoServ(v)}
+                className="py-1.5 px-1 rounded text-[11px] font-semibold leading-tight"
+                style={modoServ === v ? { background: c, color: "white" } : { color: COLORS.slate }}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px]" style={cSlate}>
+            {modoServ === "espera"
+              ? "Esta orden queda En espera · servicio y se cierra sola cuando el servicio se finalice."
+              : "Esta orden se cierra como reparación paliativa; la solución definitiva queda en el servicio."}
+          </p>
+        </>
       )}
       {tipo === "finalizada" && paliativa && (
         <Field label="¿Qué falta para la solución definitiva?" hint="Será el título de la orden correctiva nueva.">
@@ -5573,7 +5655,7 @@ function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
             className="w-full py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40"
             style={{ background: tipo === "finalizada" && paliativa ? COLORS.ambar : ETIQUETAS_REGISTRO[tipo].color }}>
             {tipo === "finalizada" ? (paliativa ? "Cerrar como paliativa" : "Finalizar orden")
-              : tipo === "servicio" ? "Pasar a servicio" : tipo === "continua" ? "Reprogramar" : "Registrar"}
+              : tipo === "servicio" ? "Crear orden de servicio" : tipo === "continua" ? "Reprogramar" : "Registrar"}
           </button>
         )
       )}
@@ -5798,6 +5880,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               {item.criticidad && <Chip color={CRITICIDAD[item.criticidad].color}>{CRITICIDAD[item.criticidad].label}</Chip>}
               {item.cierre === "paliativo" && <Chip color={COLORS.ambar}>Paliativa{item.derivadaCodigo ? ` → ${item.derivadaCodigo}` : ""}</Chip>}
               {item.origenCodigo && <Chip color={COLORS.ambar}>Definitiva de {item.origenCodigo}</Chip>}
+              {item.servicioCodigo && <Chip color="#7B5EA7">Servicio {item.servicioCodigo}</Chip>}
             </div>
             <p className="font-semibold text-sm mt-0.5 truncate" style={cChar}>{item.tarea}</p>
             <p className="text-xs truncate" style={cSlate}>{ubicacionTexto(data.sedes, item)}</p>
@@ -8337,6 +8420,40 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
   const rechazados = servicios.filter((s) => s.estado === "rechazada");
 
   const [gestionar, setGestionar] = useState(null);   // id del servicio en curso desplegado
+  // Selección para la proforma (servicios por definir ya completos o en aprobación)
+  const [sel, setSel] = useState([]);
+  const [progPdf, setProgPdf] = useState("");
+  const completo = (s) => !!(s.trabajo || "").trim() && Number(s.presupuesto) > 0;
+  const enTramite = [...porDefinir, ...porAprobar];
+  const seleccionados = enTramite.filter((s) => sel.includes(s.id));
+  const totalSel = seleccionados.reduce((a, s) => a + (Number(s.presupuesto) || 0), 0);
+  const alternar = (id) => setSel((x) => (x.includes(id) ? x.filter((y) => y !== id) : [...x, id]));
+  /* Proforma: PDF con el detalle de cada servicio y la suma total. Los que
+     estaban por definir pasan juntos a aprobación del cliente. */
+  const generarProforma = async () => {
+    if (!seleccionados.length) return;
+    setProgPdf("Preparando…");
+    try {
+      const blob = await generarPDF(construirProformaHTML(seleccionados, data), { onProgreso: setProgPdf });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `proforma-servicios-${fmtDate(new Date())}.pdf`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      const enviar = seleccionados.filter((s) => s.estado === "por_definir").map((s) => s.id);
+      if (enviar.length) {
+        const ahora = `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
+        persist((d) => ({ ...d, servicios: (d.servicios || []).map((x) => (enviar.includes(x.id) ? {
+          ...x, estado: "por_aprobar",
+          observaciones: conRegistro(x.observaciones, [lineaRegistro(user?.nombre, `Enviado a aprobación en proforma (${seleccionados.map((y) => y.codigo).join(", ")})`)]),
+          log: [...(x.log || []), { id: uid("log"), titulo: "Estado", detalle: "Por definir → En aprobación (proforma)", usuarioId: user?.id || "", sello: ahora }],
+        } : x)) }));
+      }
+      setSel([]);
+    } catch (e) {
+      console.error("[proforma]", e);
+    } finally { setProgPdf(""); }
+  };
 
   /* Fila compacta: código, estado, título y monto en una línea; ubicación,
      proveedor y fecha en la segunda. El detalle completo se abre con (i). */
@@ -8412,28 +8529,99 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
       <p className="text-xs" style={cSlate}>
         {esCliente
           ? "Servicios externos por etapa. En \"En aprobación\" decides si se autorizan; el resto es para consulta."
-          : "Los servicios nacen de una solicitud (\"Pasar a servicio\" en la actividad). Complétalos y envíalos a aprobación; una vez aprobados, asigna el proveedor y la fecha."}
+          : "Los servicios nacen de un correctivo (\"Requiere servicio\" en la bitácora). Complétalos, agrúpalos en una proforma para enviarlos a aprobación y, una vez aprobados, asigna el proveedor y la fecha."}
       </p>
 
       <FiltroSedeBusqueda sedes={data.sedes} fSede={fSede} setFSede={setFSede} q={q} setQ={setQ}
         placeholder="Buscar por código, trabajo, proveedor o ubicación…" />
 
-      <SeccionPlegable titulo={esCliente ? "Por definir (supervisor)" : "Por definir · completar y enviar a aprobación"} count={porDefinir.length}
-        color={ESTADOS.por_definir.color} defaultOpen={!esCliente && porDefinir.length > 0}>
-        {porDefinir.map((s) => tarjeta(s, !esCliente && (
-          <>
-            {botonAccion("Completar y enviar a aprobación", ESTADOS.por_definir.color, () => setModal({ srv: s, enviar: true }))}
-            <BotonDevolverSolicitud srv={s} acciones={acciones} />
-          </>
-        )))}
-        {porDefinir.length === 0 && <Empty>Nada por definir.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo={esCliente ? "En aprobación · tu decisión" : "En espera de aprobación del cliente"} count={porAprobar.length}
-        color={ESTADOS.por_aprobar.color} defaultOpen={esCliente}>
-        {porAprobar.map(enAprobacion)}
-        {porAprobar.length === 0 && <Empty>Sin servicios esperando aprobación.</Empty>}
-      </SeccionPlegable>
+      {esCliente ? (
+        <>
+          <SeccionPlegable titulo="Por definir (supervisor)" count={porDefinir.length} color={ESTADOS.por_definir.color}>
+            {porDefinir.map((s) => tarjeta(s))}
+            {porDefinir.length === 0 && <Empty>Nada por definir.</Empty>}
+          </SeccionPlegable>
+          <SeccionPlegable titulo="En aprobación · tu decisión" count={porAprobar.length} color={ESTADOS.por_aprobar.color} defaultOpen>
+            {porAprobar.map(enAprobacion)}
+            {porAprobar.length === 0 && <Empty>Sin servicios esperando aprobación.</Empty>}
+          </SeccionPlegable>
+        </>
+      ) : (
+        <SeccionPlegable titulo="Por definir y en aprobación · proformas" count={enTramite.length}
+          color={ESTADOS.por_definir.color} defaultOpen={enTramite.length > 0}
+          nota="Completa cada servicio, selecciona los que van juntos y genera la proforma: se descarga el PDF con el total y los que estaban por definir pasan a aprobación del cliente.">
+          {enTramite.length === 0 ? <Empty>Nada por definir ni en aprobación.</Empty> : (
+            <div className="space-y-2">
+              <div className="overflow-x-auto border rounded-md bg-white" style={bLine}>
+                <table className="w-full text-xs text-left" style={{ minWidth: 640 }}>
+                  <thead>
+                    <tr style={{ background: COLORS.cream }}>
+                      {["", "Código", "Sede", "Trabajo", "Tipo de proveedor", "Presupuesto", "Estado", ""].map((h, i) => (
+                        <th key={i} className={`px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide ${h === "Presupuesto" ? "text-right" : "text-left"}`} style={cSlate}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {enTramite.map((s) => {
+                      const ok = completo(s);
+                      return (
+                        <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.line}`, background: sel.includes(s.id) ? `${COLORS.orange}0D` : "white" }}>
+                          <td className="px-2 py-1.5">
+                            <input type="checkbox" checked={sel.includes(s.id)} disabled={!ok} onChange={() => alternar(s.id)}
+                              title={ok ? "Incluir en la proforma" : "Completa trabajo y presupuesto para poder incluirlo"} />
+                          </td>
+                          <td className="px-2 py-1.5 font-bold whitespace-nowrap" style={cChar}>
+                            {s.codigo}
+                            {s.origenCodigo && <span className="block text-[9px] font-semibold" style={cSlate}>de {s.origenCodigo}</span>}
+                          </td>
+                          <td className="px-2 py-1.5 whitespace-nowrap" style={cChar}>{sedeNombre(data.sedes, s.sedeId)}</td>
+                          <td className="px-2 py-1.5" style={cChar}>
+                            {s.trabajo || <span style={{ color: COLORS.orange }}>Sin definir</span>}
+                            {s.detalle && <span className="block text-[10px] line-clamp-2" style={cSlate}>{s.detalle}</span>}
+                          </td>
+                          <td className="px-2 py-1.5" style={cSlate}>{s.tipoProveedor || "—"}</td>
+                          <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap" style={cOrange}>{Number(s.presupuesto) > 0 ? money(s.presupuesto) : "—"}</td>
+                          <td className="px-2 py-1.5"><EstadoChip estado={s.estado} /></td>
+                          <td className="px-2 py-1.5 whitespace-nowrap">
+                            <div className="flex items-center gap-2 justify-end">
+                              {s.estado === "por_definir" && (
+                                <button onClick={() => setModal({ srv: s, enviar: true })} className="text-[11px] font-semibold" style={cOrange}>
+                                  {ok ? "Modificar" : "Completar"}
+                                </button>
+                              )}
+                              <BotonDetalle item={{ ...s, tipo: "servicio", tarea: tituloServicio(s), fechaProgramada: s.fecha }} size={13} />
+                              <button onClick={() => setModal({ srv: s })} title="Editar la ficha del servicio"><Pencil size={12} color={COLORS.slate} /></button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex items-center justify-between gap-2 flex-wrap rounded-md p-2" style={{ background: COLORS.cream }}>
+                <span className="text-xs" style={cChar}>
+                  {seleccionados.length ? <>{seleccionados.length} seleccionado(s) · Total <b style={cOrange}>{money(totalSel)}</b></> : "Selecciona servicios completos para la proforma."}
+                </span>
+                <button disabled={!seleccionados.length || !!progPdf} onClick={generarProforma}
+                  className="text-xs font-semibold px-3 py-2 rounded-md text-white disabled:opacity-40" style={{ background: COLORS.orange }}>
+                  {progPdf || (seleccionados.some((s) => s.estado === "por_definir") ? "Generar proforma y enviar a aprobación" : "Generar proforma (PDF)")}
+                </button>
+              </div>
+              {porDefinir.some((s) => servicioDevolvible(s)) && (
+                <div className="space-y-1">
+                  {porDefinir.filter((s) => servicioDevolvible(s)).map((s) => (
+                    <div key={s.id} className="flex items-center gap-2 text-[11px]" style={cSlate}>
+                      <span className="font-bold" style={cChar}>{s.codigo}</span>
+                      <div className="flex-1"><BotonDevolverSolicitud srv={s} acciones={acciones} /></div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </SeccionPlegable>
+      )}
 
       <SeccionPlegable titulo="Aprobados · por definir proveedor y fecha" count={aprobados.length} color={ESTADOS.aprobada.color}>
         {aprobados.map((s) => tarjeta(s, !esCliente &&
@@ -8470,8 +8658,8 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
         <Modal title={`${modal.enviar ? "Definir" : "Editar"} ${modal.srv.codigo}`} onClose={() => setModal(null)} wide>
           {modal.enviar ? (
             <FormDefinirServicio srv={modal.srv} onClose={() => setModal(null)}
-              textoBoton="Enviar a aprobación del cliente"
-              onSave={(f) => set(modal.srv.id, { ...f, estado: "por_aprobar" })} />
+              textoBoton="Guardar"
+              onSave={(f) => set(modal.srv.id, f)} />
           ) : (
             <FormEditarServicio srv={modal.srv} data={data} onClose={() => setModal(null)}
               onSave={(patch, opciones) => acciones.updateActividad({ ...modal.srv, tipo: "servicio" }, patch, opciones)} />
@@ -9535,6 +9723,66 @@ ${fotosSrv.length ? `<h3>Registro fotográfico (${fotosSrv.length})</h3>${cuadri
 </body></html>`;
 }
 
+/* Proforma: resumen con el total y, después, el detalle de cada servicio. */
+function construirProformaHTML(servicios, data) {
+  const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
+  const total = servicios.reduce((a, s) => a + (Number(s.presupuesto) || 0), 0);
+  const filas = servicios.map((s, i) => `<tr><td class="c">${i + 1}</td><td><b>${esc(s.codigo)}</b>${s.origenCodigo ? `<br><span class="mut">de ${esc(s.origenCodigo)}</span>` : ""}</td>
+    <td>${esc(sedeNombre(data.sedes, s.sedeId))}<br><span class="mut">${esc(ubicacionTexto(data.sedes, s))}</span></td>
+    <td><b>${esc(tituloServicio(s))}</b>${s.tipoProveedor ? `<br><span class="mut">${esc(s.tipoProveedor)}</span>` : ""}</td>
+    <td class="v">${esc(money(s.presupuesto || 0))}</td></tr>`).join("");
+  const cabecera = (t, sub) => `<div class="hdr"><div><h1>${esc(t)}</h1><p class="sub">${esc(sub)}</p></div>
+    <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div></div>`;
+  const detalle = servicios.map((s) => {
+    const novedad = novedadServicio(s);
+    const fotos = listaFotos({ ...s, tipo: "servicio" });
+    return `<div class="pagina">${cabecera("Detalle del servicio", `${s.codigo} · ${sedeNombre(data.sedes, s.sedeId)}`)}
+      <h2>${esc(tituloServicio(s))}</h2>
+      <div class="datos"><div><span>Ubicación</span><b>${esc(ubicacionTexto(data.sedes, s))}</b></div>
+        <div><span>Tipo de proveedor</span><b>${esc(s.tipoProveedor || "—")}</b></div>
+        <div><span>Origen</span><b>${esc(s.origenCodigo || "—")}</b></div>
+        <div><span>Presupuesto estimado</span><b>${esc(money(s.presupuesto || 0))}</b></div></div>
+      ${novedad ? `<h3>Novedad reportada</h3><p class="txt">${esc(novedad)}</p>` : ""}
+      ${s.detalle ? `<h3>Detalle del servicio requerido</h3><p class="txt">${esc(s.detalle)}</p>` : ""}
+      ${fotos.length ? `<h3>Registro fotográfico (${fotos.length})</h3>${cuadriculaFotos(fotos)}` : ""}
+    </div>`;
+  }).join("");
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><title>Proforma de servicios</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:9pt;line-height:1.4}
+.pagina{padding:6px}
+.hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #35383C;padding-bottom:8px;margin-bottom:12px}
+.hdr h1{font-size:15pt;text-transform:uppercase;letter-spacing:.02em}
+.hdr .sub{font-size:9pt;color:#787D85;margin-top:2px}
+.marca{text-align:right;font-size:7.5pt;color:#787D85}
+.marca b{display:block;font-size:11pt;color:#ED5B23;letter-spacing:.06em}
+.marca img{max-height:34px;margin-bottom:3px}
+.datos{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;margin-bottom:10px}
+.datos span{display:block;font-size:6.8pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B}
+h2{font-size:11pt;border-left:3px solid #ED5B23;padding:3px 8px;background:#FAF8F4;margin:8px 0 8px}
+h3{font-size:7pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B;margin:10px 0 3px}
+.txt{white-space:pre-wrap;border:1px solid #E3E0D8;border-radius:2px;padding:6px 8px}
+table{width:100%;border-collapse:collapse;margin-top:6px}
+th,td{padding:5px 7px;border:1px solid #E3E0D8;vertical-align:top}
+thead th{background:#35383C;color:#fff;font-size:7pt;text-transform:uppercase;text-align:left}
+td.v{text-align:right;font-weight:700;width:110px;white-space:nowrap}
+td.c{text-align:center;width:24px}
+.mut{color:#8D939B;font-size:7.5pt}
+tr.tot td{background:#FDEEE7;color:#ED5B23;font-size:10pt;font-weight:700}
+${FOTOS_CSS}
+.pie{margin-top:14px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.8pt;color:#8D939B;display:flex;justify-content:space-between}
+</style></head><body>
+<div class="pagina">${cabecera("Proforma de servicios", `${servicios.length} servicio(s) · emitida el ${fmtDMY(fmtDate(new Date()))}`)}
+<table><thead><tr><th>#</th><th>Código</th><th>Sede / ubicación</th><th>Trabajo</th><th style="text-align:right">Valor (USD)</th></tr></thead>
+<tbody>${filas}<tr class="tot"><td colspan="4">Total</td><td class="v">${esc(money(total))}</td></tr></tbody></table>
+<div class="pie"><span>Documento generado desde IndustriaMe</span><span>Valores estimados, sujetos a aprobación</span></div>
+</div>
+${detalle}
+</body></html>`;
+}
+
 /* PDF del cronograma del año consultado: una sección por sede. */
 /* Ejecuciones cerradas de una fila del plan anual (plan + ubicación) dentro
    del año, de la más antigua a la más reciente. */
@@ -9960,7 +10208,7 @@ function PendientesCompra({ data, persist, sedes, editable, user }) {
                   </div>
                   <span className="flex flex-col items-end gap-1 shrink-0">
                     <Chip color={e.color}>{e.label}</Chip>
-                    {r.n.noRequerido && <Chip color={COLORS.slate}>Ya no se necesita</Chip>}
+                    {r.n.noRequerido && <Chip color={COLORS.slate}>{r.n.estado === "cancelado" ? "Anulado por la orden" : "Anulado · pasa a bodega"}</Chip>}
                   </span>
                 </div>
                 {editable && (r.n.valorCompra > 0 || r.n.nombreBodega) && (
