@@ -15,7 +15,7 @@ import {
   QrCode, Wrench, ClipboardList, BarChart3, Plus, X, ChevronRight, ChevronDown,
   ChevronLeft, ChevronUp, AlertTriangle, CheckCircle2, Clock, DollarSign, Building2, Layers,
   Users, ShieldCheck, ArrowLeft, Download, Send, Trash2, Pencil, CalendarDays,
-  Filter, KeyRound, Eye, EyeOff, Camera, LogOut, TrendingUp, Wallet, Star, Info, RefreshCw, FileText, Search, Bell, Undo2
+  Filter, KeyRound, Eye, EyeOff, Camera, LogOut, TrendingUp, Wallet, Star, Info, RefreshCw, FileText, Search, Bell, Undo2, ShoppingCart
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, ReferenceLine, XAxis, YAxis, CartesianGrid,
@@ -61,9 +61,10 @@ const ROLES = {
   solicitante: { label: "Solicitante", desc: "Reporta novedades de su sede", color: COLORS.orange, sedes: "una" },
   tecnico: { label: "Técnico de Mantenimiento", desc: "Ejecuta actividades en sus sedes", color: COLORS.charcoal, sedes: "varias" },
   admin: { label: "Supervisor Administrador", desc: "Control total del sistema", color: COLORS.verde, sedes: "todas" },
-  cliente: { label: "Cliente", desc: "Revisa y aprueba costos, sin edición", color: "#3B6EA5", sedes: "todas" },
+  // Retirado: se conserva solo para reconocer usuarios antiguos; no se ofrece al crear usuarios
+  cliente: { label: "Cliente (retirado)", desc: "Perfil retirado", color: "#3B6EA5", sedes: "todas", retirado: true },
 };
-const ROL_IDS = Object.keys(ROLES);
+const ROL_IDS = Object.keys(ROLES).filter((r) => !ROLES[r].retirado);
 const rolDe = (u) => ROLES[u?.rol] || ROLES.solicitante;
 
 // --- Estados de actividad (comunes a preventivo y correctivo) ---
@@ -295,14 +296,13 @@ function seedData() {
 
   const usuarios = [
     { id: uid("usr"), nombre: "Luis Zambrano", rol: "admin", clave: "admin2026", sedeIds: [] },
-    { id: uid("usr"), nombre: "Innova Schools (Dirección)", rol: "cliente", clave: "innova2026", sedeIds: [] },
     { id: uid("usr"), nombre: "Cristian Vargas", rol: "tecnico", clave: "campo2026", sedeIds: [sedes[0].id, sedes[1].id] },
     { id: uid("usr"), nombre: "Juan", rol: "tecnico", clave: "juan2026", sedeIds: [sedes[2].id, sedes[3].id] },
     { id: uid("usr"), nombre: "Patricia Mejía", rol: "solicitante", clave: "quitumbe26", sedeIds: [sedes[0].id] },
     { id: uid("usr"), nombre: "Andrea Castro", rol: "solicitante", clave: "calderon26", sedeIds: [sedes[1].id] },
   ];
-  const admin = usuarios[0], cristian = usuarios[2], juan = usuarios[3];
-  const patricia = usuarios[4], andrea = usuarios[5];
+  const admin = usuarios[0], cristian = usuarios[1], juan = usuarios[2];
+  const patricia = usuarios[3], andrea = usuarios[4];
 
   const flat = flattenActivos(sedes);
   const hoy = new Date();
@@ -1101,6 +1101,22 @@ function preventivoPendiente(plan, rel, mes = mesKey(fmtDate(new Date())), ap = 
 
 /* --- Pendientes: preventivo sin OT abierta (reaparece tras completarse) +
    correctivo en estado 'pendiente' --------------------------------------- */
+/* Siguiente número de un tipo de orden (SOL, OT, SRV). Se calcula al
+   guardar, sobre los datos más recientes, y nunca por debajo del código más
+   alto que ya existe: así dos altas casi seguidas no repiten número aunque el
+   contador del dispositivo esté atrasado. */
+const CONTADOR_DE = { SOL: "solCounter", OT: "otCounter", SRV: "srvCounter" };
+function siguienteNumero(d, prefijo) {
+  const re = new RegExp(`^${prefijo}-(\\d+)$`);
+  let max = 0;
+  ["solicitudes", "servicios", "ordenes"].forEach((col) => (d[col] || []).forEach((x) => {
+    const m = re.exec(x.codigo || "");
+    if (m) max = Math.max(max, Number(m[1]));
+  }));
+  return Math.max(Number(d[CONTADOR_DE[prefijo]]) || 1, max + 1);
+}
+const codigoDe = (prefijo, n) => `${prefijo}-${String(n).padStart(4, "0")}`;
+
 function getPendientes(data) {
   const items = [];
 
@@ -1556,7 +1572,7 @@ function solicitudAServicio(sol, { detalle = "", log = null, pasadaPor = "", pas
    programar. El detalle escrito al pasarla se conserva en observaciones. */
 const CAMPOS_SOLO_SERVICIO = ["trabajo", "detalle", "tipoProveedor", "proveedor", "presupuesto", "presupuestoAprobado",
   "motivoRechazo", "desdeSolicitud", "pasadaPor", "pasadaEn", "fechaReporte", "horaReporte", "createdAt", "previo", "decididoEn", "enEspera"];
-function servicioASolicitud(srv, log) {
+function servicioASolicitud(srv, log, linea = "") {
   const resto = { ...srv };
   CAMPOS_SOLO_SERVICIO.forEach((k) => delete resto[k]);
   const prev = srv.previo || {};
@@ -1570,7 +1586,7 @@ function servicioASolicitud(srv, log) {
     fechaCompletada: "", horaCompletada: "",
     foto: fotosDe({ ...srv, tipo: "servicio" })[0] || "",
     fotoSolicitante: fotoSolicitudDe(srv),
-    observaciones: [srv.observaciones, srv.detalle ? `Detalle al pasar a servicio: ${srv.detalle}` : ""].filter(Boolean).join("\n"),
+    observaciones: conRegistro(srv.observaciones, [linea]),
     log: [...(srv.log || []), log],
   };
 }
@@ -1586,7 +1602,7 @@ function tituloServicio(s) {
 
 /* Descripción heredada de la solicitud que originó el servicio. */
 function novedadServicio(s) {
-  return s.desdeSolicitud ? (s.descripcion || "") : "";
+  return s.desdeSolicitud || s.origenId ? (s.descripcion || "") : "";
 }
 
 function useAcciones(data, persist, usuario) {
@@ -1662,7 +1678,9 @@ function useAcciones(data, persist, usuario) {
         return {
           ...d,
           servicios: d.servicios.filter((s) => s.id !== srv.id),
-          solicitudes: [servicioASolicitud(x, log), ...d.solicitudes.filter((s) => s.id !== srv.id)],
+          solicitudes: [servicioASolicitud(x, log, lineaRegistro(usuario?.nombre,
+            `Devuelta a solicitud (se pasó a servicio por error)${x.detalle ? `. Detalle que tenía: ${x.detalle}` : ""}`)),
+            ...d.solicitudes.filter((s) => s.id !== srv.id)],
         };
       });
     },
@@ -1681,7 +1699,10 @@ function useAcciones(data, persist, usuario) {
         return {
           ...d,
           solicitudes: d.solicitudes.filter((x) => x.id !== item.id),
-          servicios: [solicitudAServicio(sol, { detalle, log, pasadaPor: usuario?.id || "", pasadaEn: sello }), ...(d.servicios || [])],
+          servicios: [{
+            ...solicitudAServicio(sol, { detalle, log, pasadaPor: usuario?.id || "", pasadaEn: sello }),
+            observaciones: conRegistro(sol.observaciones, [lineaRegistro(usuario?.nombre, `Pasa a servicio: ${detalle}`, "servicio")]),
+          }, ...(d.servicios || [])],
         };
       });
     },
@@ -1700,17 +1721,137 @@ function useAcciones(data, persist, usuario) {
           }))]
         : null;
       const conLog = nuevoLog ? { ...patch, log: nuevoLog } : patch;
+      /* Registro de la orden: los mismos movimientos y el comentario, si lo
+         hay, se anexan al final de observaciones. Se arma sobre el registro
+         más reciente de la orden, no sobre la copia que tenía la pantalla. */
+      const autor = usuario?.nombre || "Sistema";
+      const coment = opciones.comentario;
+      /* Si el cambio de estado viene con su anotación (Iniciar, Avance, En
+         espera…), la anotación ya lo explica: la línea "Estado: A → B" queda
+         solo en el historial para no repetir en la bitácora. */
+      const explicaEstado = (coment?.texto || "").trim() && coment?.etiqueta;
+      const lineas = [
+        ...movimientos.filter((m) => !(explicaEstado && m.campo === CAMPOS_SEGUIDOS.estado))
+          .map((m) => lineaRegistro(autor, `${m.campo}: ${m.antes} → ${m.despues}`)),
+        ...((coment?.texto || "").trim() ? [lineaRegistro(autor, coment.texto, coment.etiqueta)] : []),
+        ...(opciones.consumos?.length ? [lineaRegistro(autor, opciones.consumos.map((c) => `${c.art.nombre} × ${c.cantidad} ${c.art.unidad || "u"}`).join("; "), "consumo")] : []),
+      ];
+      /* Pedidos de material: se suman (o actualizan) sobre la lista más
+         reciente de la orden, igual que el registro. */
+      const conNecesidades = (x) => {
+        let nec = x.necesidades || [];
+        if (opciones.necesidades?.length) nec = [...nec, ...opciones.necesidades];
+        if (opciones.mapNecesidades) nec = nec.map(opciones.mapNecesidades);
+        return opciones.necesidades?.length || opciones.mapNecesidades ? { necesidades: nec } : {};
+      };
+      /* Consumo de bodega en el mismo guardado (al finalizar): descuenta
+         existencias y anota el consumo en la orden de una sola vez. */
+      const consumos = (opciones.consumos || []).map((c) => ({
+        id: uid("con"), stockId: c.art.id, nombre: c.art.nombre, unidad: c.art.unidad,
+        cantidad: c.cantidad, costoUnitario: c.art.costoUnitario, fecha: fmtDate(new Date()),
+      }));
+      const aplicar = (x, p) => ({
+        ...x, ...p, ...conNecesidades(x),
+        ...(consumos.length ? { consumos: [...(x.consumos || []), ...consumos] } : {}),
+        ...(lineas.length ? { observaciones: conRegistro(x.observaciones, lineas) } : {}),
+      });
+      /* Reparación paliativa: se crea la orden correctiva para la solución
+         definitiva, enlazada a la original, en el mismo guardado (el número
+         se toma del contador vigente para no repetir códigos). */
+      const derivar = (r) => {
+        if (!opciones.derivar) return r;
+        const n = siguienteNumero(r, "SOL");
+        const codigo = codigoDe("SOL", n);
+        const ahora = new Date();
+        const pendiente = opciones.derivar.pendiente;
+        const nueva = {
+          id: uid("sol"), codigo,
+          sedeId: item.sedeId, faseId: item.faseId || "", activoId: item.activoId || "",
+          descripcion: pendiente, criticidad: item.criticidad || "",
+          solicitanteId: usuario?.id || "", fecha: fmtDate(ahora), hora: fmtHora(ahora),
+          estado: "pendiente", tecnicoId: item.tecnicoId || "",
+          fechaProgramada: "", fechaCompletada: "",
+          observaciones: lineaRegistro(autor, `Continuación de ${item.codigo}, cerrada con reparación paliativa`, "paliativa"),
+          foto: "", fotoSolicitante: "", resolucion: "",
+          materiales: [], materialesEstado: "", consumos: [], reprogramaciones: [],
+          calificacion: 0, comentarioCalif: "",
+          origenId: item.id, origenCodigo: item.codigo || "",
+        };
+        const col = item.tipo === "preventivo" ? "ordenes" : item.tipo === "servicio" ? "servicios" : "solicitudes";
+        const linea = lineaRegistro(autor, `Solución definitiva pendiente en ${codigo}`, "paliativa");
+        const conEnlace = (r[col] || []).map((x) => (x.id === item.id
+          ? { ...x, derivadaId: nueva.id, derivadaCodigo: codigo, observaciones: conRegistro(x.observaciones, [linea]) } : x));
+        const base = { ...r, [col]: conEnlace };
+        return { ...base, solicitudes: [nueva, ...(base.solicitudes || [])], solCounter: n + 1 };
+      };
+      /* Requiere servicio: se crea una orden de servicio nueva (SRV) enlazada
+         al correctivo, que se queda en espera o cerrado como paliativo. */
+      const conServicio = (r) => {
+        if (!opciones.servicio) return r;
+        const n = siguienteNumero(r, "SRV");
+        const codigo = codigoDe("SRV", n);
+        const ahora = new Date();
+        const { detalle } = opciones.servicio;
+        const nuevo = {
+          id: uid("srv"), codigo,
+          sedeId: item.sedeId, faseId: item.faseId || "", activoId: item.activoId || "",
+          descripcion: item.descripcion || item.tarea || "", criticidad: item.criticidad || "",
+          solicitanteId: item.solicitanteId || "", tecnicoId: item.tecnicoId || "",
+          trabajo: "", detalle,
+          fechaReporte: fmtDate(ahora), horaReporte: fmtHora(ahora), createdAt: fmtDate(ahora),
+          fecha: "", fechaCompletada: "", horaCompletada: "",
+          tipoProveedor: "", proveedor: "", presupuesto: 0, presupuestoAprobado: null,
+          motivoRechazo: "", resolucion: "", estado: "por_definir",
+          observaciones: lineaRegistro(autor, `Creado desde ${item.codigo}: ${detalle}`, "servicio"),
+          foto: "", fotos: [], consumos: [], reprogramaciones: [], log: [],
+          origenId: item.id, origenCodigo: item.codigo || "",
+        };
+        const conEnlace = (r.solicitudes || []).map((x) => (x.id === item.id ? { ...x, servicioId: nuevo.id, servicioCodigo: codigo } : x));
+        return { ...r, solicitudes: conEnlace, servicios: [nuevo, ...(r.servicios || [])], srvCounter: n + 1 };
+      };
+      /* Servicio finalizado: el correctivo que lo esperaba se cierra solo. */
+      const cierraOrigen = (r) => {
+        if (item.tipo !== "servicio" || patch.estado !== "completada" || item.estado === "completada") return r;
+        const srv = (r.servicios || []).find((x) => x.id === item.id);
+        if (!srv?.origenId) return r;
+        const ahora = new Date();
+        return { ...r, solicitudes: (r.solicitudes || []).map((x) => {
+          if (x.id !== srv.origenId) return x;
+          if (x.estado === "completada") {
+            return { ...x, observaciones: conRegistro(x.observaciones, [lineaRegistro(autor, `Solución definitiva ejecutada con el servicio ${srv.codigo}`, "servicio")]) };
+          }
+          const sello = selloCierre(x, usuario?.id);
+          return {
+            ...x, ...sello, estado: "completada", motivoEspera: "",
+            resolucion: `Resuelto con el servicio ${srv.codigo}${srv.resolucion ? `: ${srv.resolucion}` : ""}`,
+            observaciones: conRegistro(x.observaciones, [lineaRegistro(autor, `Resuelto con el servicio ${srv.codigo} (cierre automático)`, "finalizada")]),
+            log: [...(x.log || []), { id: uid("log"), titulo: "Estado", detalle: `${ESTADOS[x.estado]?.label || x.estado} → Completada (servicio ${srv.codigo})`, usuarioId: usuario?.id || "", sello: `${fmtDate(ahora)} · ${fmtHora(ahora)}` }],
+          };
+        }) };
+      };
+      const rechazaOrigen = (r) => {
+        if (item.tipo !== "servicio" || patch.estado !== "rechazada" || item.estado === "rechazada") return r;
+        const srv = (r.servicios || []).find((x) => x.id === item.id);
+        return srv ? rechazoEnOrigen(r, [srv], autor) : r;
+      };
+      const persistir = (fn) => persist((d) => {
+        const r = rechazaOrigen(cierraOrigen(conServicio(derivar(fn(d)))));
+        if (!consumos.length) return r;
+        const resta = {};
+        consumos.forEach((c) => { resta[c.stockId] = (resta[c.stockId] || 0) + c.cantidad; });
+        return { ...r, stock: (r.stock || []).map((a) => (resta[a.id] ? { ...a, cantidad: Math.max(0, a.cantidad - resta[a.id]) } : a)) };
+      });
 
       if (item.tipo === "preventivo") {
-        return persist((data) => ({ ...data, ordenes: data.ordenes.map((o) => (o.id === item.id ? { ...o, ...conLog } : o)) }));
+        return persistir((data) => ({ ...data, ordenes: data.ordenes.map((o) => (o.id === item.id ? aplicar(o, conLog) : o)) }));
       }
       if (item.tipo === "servicio") {
         // El servicio guarda su fecha en "fecha"; la agenda la expone como fechaProgramada
         const p = { ...conLog };
         if (p.fechaProgramada !== undefined) { p.fecha = p.fechaProgramada; delete p.fechaProgramada; }
-        return persist((data) => ({ ...data, servicios: data.servicios.map((x) => (x.id === item.id ? { ...x, ...p } : x)) }));
+        return persistir((data) => ({ ...data, servicios: data.servicios.map((x) => (x.id === item.id ? aplicar(x, p) : x)) }));
       }
-      return persist((data) => ({ ...data, solicitudes: data.solicitudes.map((s) => (s.id === item.id ? { ...s, ...conLog } : s)) }));
+      return persistir((data) => ({ ...data, solicitudes: data.solicitudes.map((s) => (s.id === item.id ? aplicar(s, conLog) : s)) }));
     },
   }), [data, persist, usuario]);
 }
@@ -1730,13 +1871,15 @@ function Chip({ children, color = COLORS.charcoal, solid, className = "" }) {
   );
 }
 
-function EstadoChip({ estado }) {
+function EstadoChip({ estado, motivo }) {
   const e = ESTADOS[estado] || ESTADOS.pendiente;
+  // En espera muestra por qué: "En espera · material"
+  const sufijo = estado === "espera" && motivo ? ` · ${motivo}` : "";
   return (
     <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap"
       style={{ background: `${e.color}1A`, color: e.color }}>
       <span className="w-1.5 h-1.5 rounded-full" style={{ background: e.color }} />
-      {e.label}
+      {e.label}{sufijo}
     </span>
   );
 }
@@ -2691,7 +2834,7 @@ function DetalleActividad({ item, data, onClose }) {
         <ChecklistEjecucion items={item.checklist || item.procedimientoPasos} readOnly compacto />
       )}
 
-      {item.observaciones && <Field label="Observaciones del técnico"><ReadOnly>{item.observaciones}</ReadOnly></Field>}
+      {item.observaciones && <Field label="Registro de la orden"><RegistroOrden texto={item.observaciones} /></Field>}
       {item.resolucion && <Field label="Resolución"><ReadOnly>{item.resolucion}</ReadOnly></Field>}
 
       {/* Consumo de bodega */}
@@ -2830,7 +2973,12 @@ function FichaServicio({ srv, data, costos = true }) {
 
       {bloque("Detalle de novedad", novedad, COLORS.cream)}
       {bloque("Detalle del trabajo", srv.detalle)}
-      {bloque("Observaciones", srv.observaciones)}
+      {srv.observaciones && (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Registro de la orden</p>
+          <RegistroOrden texto={srv.observaciones} />
+        </div>
+      )}
       {bloque("Novedades del servicio", srv.resolucion)}
       {srv.motivoRechazo && bloque("Motivo del rechazo", srv.motivoRechazo, `${COLORS.rojo}12`)}
 
@@ -3225,6 +3373,7 @@ function diffCambios(antes, patch, usuarios) {
     if (campo === "materialesEstado") return MAT_ESTADO[v]?.label || v;
     if (campo === "tecnicoId") return usuarioNombre(usuarios, v);
     if (campo === "presupuestoAprobado") return money(v);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(v))) return fmtDMY(String(v));
     return String(v);
   };
   return Object.keys(patch || {})
@@ -3234,6 +3383,222 @@ function diffCambios(antes, patch, usuarios) {
       antes: legible(k, antes?.[k]),
       despues: legible(k, patch[k]),
     }));
+}
+
+/* ---- Registro de la orden (campo observaciones) ----
+   observaciones guarda un registro que solo crece, una línea por anotación:
+     "dd/mm/aaaa hh:mm · Autor · [Etiqueta] texto"
+   Las líneas automáticas (creación, activación, cambios de estado, fechas,
+   responsable, paso a servicio) y los comentarios del técnico van en el mismo
+   texto, así que la base no cambia. Lo escrito antes de este formato se
+   muestra como "Observación anterior". La etiqueta permite luego extraer, por
+   ejemplo, todo lo marcado como [Requiere material] en el mes. */
+const ETIQUETAS_REGISTRO = {
+  inicio: { label: "Inicio", color: COLORS.orange },
+  avance: { label: "Avance", color: COLORS.slate },
+  continua: { label: "Reprogramada", color: "#3B6EA5" },
+  paliativa: { label: "Reparación paliativa", color: COLORS.ambar },
+  material: { label: "Requiere material", color: COLORS.orange },
+  larga: { label: "Tarea larga", color: "#3B6EA5" },
+  servicio: { label: "Requiere servicio", color: "#7B5EA7" },
+  espera: { label: "En espera", color: COLORS.ambar },
+  resolucion: { label: "Resolución", color: COLORS.verde },
+  finalizada: { label: "Finalizada", color: COLORS.verde },
+  compra: { label: "Compra", color: "#3B6EA5" },
+  consumo: { label: "Material usado", color: COLORS.verde },
+  correccion: { label: "Corrección", color: COLORS.rojo },
+};
+const ETIQUETAS_TECNICO = ["avance", "material", "servicio", "espera"];
+const etiquetaDe = (label) => Object.values(ETIQUETAS_REGISTRO).find((e) => e.label === label);
+function lineaRegistro(autor, texto, etiqueta) {
+  const ahora = new Date();
+  const [y, m, d] = fmtDate(ahora).split("-");
+  const tag = etiqueta ? `[${ETIQUETAS_REGISTRO[etiqueta]?.label || etiqueta}] ` : "";
+  return `${d}/${m}/${y} ${fmtHora(ahora)} · ${autor || "Sistema"} · ${tag}${String(texto || "").replace(/\s*\n+\s*/g, " ").trim()}`;
+}
+const conRegistro = (obs, lineas) => [String(obs || "").trim(), ...lineas].filter(Boolean).join("\n");
+const RE_LINEA_REGISTRO = /^(\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}) · (.+?) · (?:\[([^\]]+)\] )?(.*)$/;
+function leerRegistro(obs) {
+  const entradas = [];
+  String(obs || "").split("\n").forEach((l) => {
+    if (!l.trim()) return;
+    const m = l.match(RE_LINEA_REGISTRO);
+    if (m) { entradas.push({ fecha: m[1], autor: m[2], etiqueta: m[3] || "", texto: m[4] }); return; }
+    // Texto libre de antes del registro: se agrupa en una sola entrada
+    const ult = entradas[entradas.length - 1];
+    if (ult?.anterior) ult.texto += `\n${l}`;
+    else entradas.push({ fecha: "", autor: "", etiqueta: "", texto: l, anterior: true });
+  });
+  return entradas;
+}
+
+/* Vuelve a armar el texto del registro a partir de sus entradas. */
+function textoRegistro(entradas) {
+  return entradas.map((e) => (e.anterior ? e.texto
+    : `${e.fecha} · ${e.autor} · ${e.etiqueta ? `[${e.etiqueta}] ` : ""}${String(e.texto || "").replace(/\s*\n+\s*/g, " ").trim()}`)).join("\n");
+}
+
+/* Registro de la orden en pantalla: una sola lista compacta, de lo más
+   reciente a lo más antiguo, una línea por anotación. Con onEditar (el
+   supervisor en modo corrección) cada línea se puede corregir o borrar. */
+function RegistroOrden({ texto, vacio = "Sin anotaciones todavía.", alto = 200, onEditar }) {
+  const [editando, setEditando] = useState(null);   // { i, texto, etiqueta }
+  const [borrando, setBorrando] = useState(null);
+  const todas = leerRegistro(texto);
+  const entradas = todas.map((e, i) => ({ ...e, i })).reverse();
+  if (!entradas.length) return <p className="text-[11px] text-left" style={cSlate}>{vacio}</p>;
+  const guardar = (nuevas) => { onEditar(textoRegistro(nuevas)); setEditando(null); setBorrando(null); };
+  const icono = "p-0.5 shrink-0 opacity-60 hover:opacity-100";
+  return (
+    <div className="border rounded-md bg-white text-left overflow-y-auto" style={{ borderColor: COLORS.line, maxHeight: onEditar ? alto * 1.6 : alto }}>
+      {entradas.map((e, k) => {
+        const et = etiquetaDe(e.etiqueta);
+        const borde = { borderTop: k ? `1px solid ${COLORS.line}` : "none" };
+        if (editando?.i === e.i) {
+          return (
+            <div key={e.i} className="px-2 py-1.5 space-y-1" style={{ ...borde, background: COLORS.cream }}>
+              <p className="text-[10px]" style={cSlate}>{e.anterior ? "Anterior" : `${e.fecha} · ${e.autor}`}</p>
+              {!e.anterior && (
+                <select value={editando.etiqueta} onChange={(ev) => setEditando({ ...editando, etiqueta: ev.target.value })}
+                  className="w-full border rounded-md px-1.5 py-1 text-[11px] bg-white" style={inputStyle}>
+                  <option value="">Sin etiqueta</option>
+                  {Object.values(ETIQUETAS_REGISTRO).map((x) => <option key={x.label} value={x.label}>{x.label}</option>)}
+                </select>
+              )}
+              <textarea autoFocus value={editando.texto} onChange={(ev) => setEditando({ ...editando, texto: ev.target.value })} rows={2}
+                className={`${inputCls} resize-none bg-white text-xs`} style={inputStyle} />
+              <div className="flex gap-1.5">
+                <button type="button" onClick={() => setEditando(null)} className="flex-1 py-1 rounded-md text-[11px] font-semibold border bg-white"
+                  style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>Cancelar</button>
+                <button type="button" disabled={!editando.texto.trim()}
+                  onClick={() => guardar(todas.map((x, j) => (j === e.i ? { ...x, texto: editando.texto.trim(), etiqueta: editando.etiqueta } : x)))}
+                  className="flex-1 py-1 rounded-md text-[11px] font-semibold text-white disabled:opacity-40" style={{ background: COLORS.charcoal }}>
+                  Guardar corrección
+                </button>
+              </div>
+            </div>
+          );
+        }
+        return (
+          <div key={e.i} className="flex items-start gap-1 px-2 py-1" style={borde}>
+            <p className="flex-1 min-w-0 text-[11px] leading-snug break-words whitespace-pre-wrap" style={cChar}>
+              <span style={cSlate}>{e.anterior ? "Anterior" : `${e.fecha.slice(0, 5)} ${e.fecha.slice(11)} · ${e.autor.split(" ")[0]}`} · </span>
+              {e.etiqueta && <b style={{ color: et?.color || COLORS.slate }}>[{e.etiqueta}] </b>}
+              {e.texto}
+            </p>
+            {onEditar && (borrando === e.i ? (
+              <span className="flex items-center gap-1 shrink-0 text-[10px] font-semibold">
+                <button type="button" onClick={() => guardar(todas.filter((_, j) => j !== e.i))} style={{ color: COLORS.rojo }}>Borrar</button>
+                <button type="button" onClick={() => setBorrando(null)} style={cSlate}>No</button>
+              </span>
+            ) : (
+              <>
+                <button type="button" title="Corregir" className={icono}
+                  onClick={() => { setBorrando(null); setEditando({ i: e.i, texto: e.texto, etiqueta: e.etiqueta || "" }); }}>
+                  <Pencil size={11} color={COLORS.slate} />
+                </button>
+                <button type="button" title="Borrar" className={icono} onClick={() => { setEditando(null); setBorrando(e.i); }}>
+                  <Trash2 size={11} color={COLORS.slate} />
+                </button>
+              </>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* Registro en los PDF: en orden cronológico, una línea por anotación. */
+const REG_CSS = `.reg{width:100%;border-collapse:collapse;font-size:7.8pt;margin-top:2px}
+.reg td{padding:2.5px 4px;border-bottom:1px solid #EFEDE8;vertical-align:top}
+.reg .reg-f{width:24%;color:#8D939B;font-size:7pt;white-space:nowrap}`;
+function registroHTML(texto, esc) {
+  const entradas = leerRegistro(texto);
+  if (!entradas.length) return "";
+  return `<table class="reg">${entradas.map((e) => `<tr><td class="reg-f">${e.anterior ? "Anterior" : `${esc(e.fecha)}<br>${esc(e.autor)}`}</td><td>${e.etiqueta ? `<b>[${esc(e.etiqueta)}]</b> ` : ""}${esc(e.texto).replace(/\n/g, "<br>")}</td></tr>`).join("")}</table>`;
+}
+
+/* Lista de materiales que hacen falta: del kardex (aunque no haya
+   existencias) o escritos a mano si no están, cada uno con cantidad y unidad. */
+function ListaMateriales({ materiales = [], onChange, stock = [], textoBoton }) {
+  const setMat = (i, p) => onChange(materiales.map((m, j) => (j === i ? { ...m, ...p } : m)));
+  const agregar = (m) => onChange([...materiales, { cantidad: "1", ...m }]);
+  return (
+        <div className="rounded-md p-2 space-y-1.5" style={{ background: COLORS.cream }}>
+          {materiales.map((m, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <div className="flex-1 min-w-0 text-left">
+                <p className="text-xs font-semibold break-words" style={cChar}>{m.nombre}</p>
+                <p className="text-[10px]" style={{ color: m.stockId ? COLORS.slate : COLORS.orange }}>
+                  {m.stockId ? "Del kardex" : "No está en el kardex"}
+                </p>
+              </div>
+              <input type="text" inputMode="decimal" value={m.cantidad} placeholder="Cant."
+                onChange={(e) => setMat(i, { cantidad: e.target.value.replace(/[^0-9.,]/g, "") })}
+                className="w-14 border rounded-md px-1.5 py-1.5 text-xs outline-none bg-white" style={inputStyle} />
+              <input type="text" value={m.unidad} placeholder="u" disabled={!!m.stockId}
+                onChange={(e) => setMat(i, { unidad: e.target.value })}
+                className="w-14 border rounded-md px-1.5 py-1.5 text-xs outline-none bg-white disabled:opacity-60" style={inputStyle} />
+              <button type="button" onClick={() => onChange(materiales.filter((_, j) => j !== i))} className="p-1" title="Quitar">
+                <X size={13} color={COLORS.slate} />
+              </button>
+            </div>
+          ))}
+          <SelectorArticulo articulos={stock} value=""
+            textoBoton={materiales.length ? "Agregar otro material…" : textoBoton || "Buscar en el kardex o escribir el material…"}
+            onChange={(id) => { const a = stock.find((x) => x.id === id); if (a) agregar({ stockId: a.id, nombre: a.nombre, unidad: a.unidad || "u" }); }}
+            onNuevo={(nombre) => agregar({ nombre, unidad: "u" })} />
+        </div>
+  );
+}
+
+/* Comentario nuevo para el registro: etiqueta + texto. Con "Requiere
+   material" se agregan uno o varios materiales: del kardex (aunque no haya
+   existencias) o escritos a mano si no están, cada uno con cantidad y unidad. */
+function NuevoComentario({ valor, onChange, etiquetas = ETIQUETAS_TECNICO, stock = [], requerido, placeholder, onGuardar }) {
+  const { texto = "", etiqueta = "", materiales = [] } = valor;
+  const set = (p) => onChange({ ...valor, ...p });
+  return (
+    <div className="space-y-1.5">
+      <div className="flex gap-1 flex-wrap">
+        {etiquetas.map((k) => {
+          const e = ETIQUETAS_REGISTRO[k];
+          const on = etiqueta === k;
+          return (
+            <button key={k} type="button" onClick={() => set({ etiqueta: on ? "" : k })}
+              className="text-[10px] font-semibold px-2 py-1 rounded-md"
+              style={on ? { background: e.color, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
+              {e.label}
+            </button>
+          );
+        })}
+      </div>
+      {etiqueta === "material" && (
+        <ListaMateriales materiales={materiales} onChange={(m) => set({ materiales: m })} stock={stock} />
+      )}
+      <textarea value={texto} onChange={(e) => set({ texto: e.target.value })} rows={2}
+        placeholder={placeholder || (etiqueta === "material" ? "Detalle adicional (opcional)…" : "Qué se hizo, qué falta o qué se encontró…")}
+        className={`${inputCls} resize-none`} style={{ ...inputStyle, ...(requerido ? { borderColor: COLORS.orange } : {}) }} />
+      {onGuardar && (
+        <button type="button" onClick={onGuardar} disabled={!textoComentario(valor)}
+          className="w-full py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40" style={{ background: COLORS.charcoal }}>
+          Guardar comentario
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* Texto final del comentario: materiales + lo escrito. */
+function textoComentario(valor) {
+  const partes = [];
+  const mats = (valor.materiales || []).filter((m) => (m.nombre || "").trim());
+  if (mats.length) {
+    partes.push(mats.map((m) => `${m.nombre.trim()} × ${String(m.cantidad || 1).replace(",", ".")} ${(m.unidad || "u").trim()}${m.stockId ? "" : " (no está en el kardex)"}`).join("; "));
+  }
+  if ((valor.texto || "").trim()) partes.push(valor.texto.trim());
+  return partes.join(" · ");
 }
 
 function HistorialActividad({ item, data }) {
@@ -3304,7 +3669,7 @@ const coincideArticulo = (nombre, q) => {
 /* Desplegable de artículos con buscador integrado. La lista se abre debajo,
    dentro del mismo flujo (no flotante), para que en el celular y dentro de
    los modales nunca quede cortada; los nombres largos se ven completos. */
-function SelectorArticulo({ articulos, value, onChange }) {
+function SelectorArticulo({ articulos, value, onChange, onNuevo, textoBoton }) {
   const [abierto, setAbierto] = useState(false);
   const [q, setQ] = useState("");
   const [activo, setActivo] = useState(0);
@@ -3349,7 +3714,7 @@ function SelectorArticulo({ articulos, value, onChange }) {
               <span className="block text-[10px]" style={{ color: sel.cantidad > 0 ? COLORS.slate : COLORS.rojo }}>{existencia(sel)}</span>
             </span>
           ) : (
-            <span className="text-xs flex items-center gap-1.5" style={cSlate}><Search size={13} /> Buscar o elegir artículo…</span>
+            <span className="text-xs flex items-center gap-1.5" style={cSlate}><Search size={13} /> {textoBoton || "Buscar o elegir artículo…"}</span>
           )}
           <ChevronDown size={14} color={COLORS.slate} className="shrink-0 mt-0.5" />
         </button>
@@ -3376,8 +3741,18 @@ function SelectorArticulo({ articulos, value, onChange }) {
                 </span>
               </button>
             ))}
-            {filtrados.length === 0 && (
-              <p className="px-2.5 py-3 text-xs text-center" style={cSlate}>Ningún artículo coincide con “{q}”.</p>
+            {filtrados.length === 0 && !(onNuevo && q.trim()) && (
+              <p className="px-2.5 py-3 text-xs text-center" style={cSlate}>
+                {q.trim() ? `Ningún artículo coincide con “${q}”.` : "No hay artículos en el kardex de esta sede. Escribe el nombre para agregarlo."}
+              </p>
+            )}
+            {/* Material que no está en el kardex: se agrega con el nombre escrito */}
+            {onNuevo && q.trim() && !filtrados.some((x) => sinTildes(x.nombre) === sinTildes(q.trim())) && (
+              <button type="button" onClick={() => { onNuevo(q.trim()); setAbierto(false); setQ(""); }}
+                className="w-full flex items-center gap-1.5 px-2.5 py-2 text-left text-xs font-semibold border-t"
+                style={{ borderColor: COLORS.line, color: COLORS.orange, background: "white" }}>
+                <Plus size={13} /> Agregar “{q.trim()}” (no está en el kardex)
+              </button>
             )}
           </div>
         </div>
@@ -3386,7 +3761,7 @@ function SelectorArticulo({ articulos, value, onChange }) {
   );
 }
 
-function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
+function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly, soloLista }) {
   const [sel, setSel] = useState("");
   const [cant, setCant] = useState(1);
 
@@ -3397,6 +3772,8 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
   const numCant = Number(String(cant).replace(",", "."));
   const excede = art && numCant > art.cantidad;
   const valido = art && numCant > 0;
+  // El técnico carga el material desde "Registrar avance"; aquí solo lo ve
+  if (soloLista && consumos.length === 0) return null;
 
   return (
     <div>
@@ -3419,7 +3796,7 @@ function ConsumoStock({ item, stockSede, onRegistrar, onQuitar, readOnly }) {
         </div>
       )}
 
-      {!readOnly && (
+      {!readOnly && !soloLista && (
         <>
           {stockSede.length > 0 && (
             <>
@@ -4536,10 +4913,9 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
 
   const crearSolicitud = async (ubic, form) => {
     const now = new Date();
-    const n = data.solCounter || 1;
-    const nueva = {
+        const nueva = {
       id: uid("sol"),
-      codigo: `SOL-${String(n).padStart(4, "0")}`,
+      codigo: "",
       sedeId: sede.id, faseId: ubic.faseId, activoId: ubic.activoId,
       descripcion: form.descripcion, criticidad: form.criticidad || "",
       solicitanteId: form.solicitanteId || user.id, fecha: fmtDate(now), hora: fmtHora(now),
@@ -4549,7 +4925,9 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
          permanece en "Sin Programar" hasta que se le agende. */
       tecnicoId: tecnicosDeSede(data.usuarios, sede.id)[0]?.id || "",
       fechaProgramada: "", fechaCompletada: "",
-      observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
+      observaciones: lineaRegistro(user?.nombre, form.solicitanteId && form.solicitanteId !== user?.id
+        ? `Solicitud creada a nombre de ${usuarioNombre(data.usuarios, form.solicitanteId)}` : "Solicitud creada"),
+      foto: "", fotoSolicitante: form.foto || "", resolucion: "",
       materiales: [], materialesEstado: "",
       calificacion: 0, comentarioCalif: "",
     };
@@ -4558,9 +4936,14 @@ function VistaSolicitante({ data, persist, persistYa, user, onLogout, ultimaSync
        Antes el mensaje salía de inmediato: si el guardado fallaba (señal
        intermitente en campo), el solicitante creía que había quedado
        registrada y la solicitud desaparecía al siguiente refresco. */
-    const ok = await persistYa((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    let codigo = "";
+    const ok = await persistYa((data) => {
+      const n = siguienteNumero(data, "SOL");
+      codigo = codigoDe("SOL", n);
+      return { ...data, solicitudes: [{ ...nueva, codigo }, ...data.solicitudes], solCounter: n + 1 };
+    });
     setMsg(ok
-      ? `Solicitud ${nueva.codigo} enviada.`
+      ? `Solicitud ${codigo} enviada.`
       : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
     setTimeout(() => setMsg(""), ok ? 4000 : 8000);
   };
@@ -4805,49 +5188,522 @@ function ArbolPendientes({ sedes, todosLosSedes, usuarios, pendientes, onActivar
    (programado, en proceso o en espera). Lo pueden hacer el técnico y el
    supervisor: se agrega el detalle del trabajo y la solicitud pasa a ser un
    servicio "Por definir", con su mismo número. */
-function PasoAServicio({ item, rol, acciones }) {
-  const [abierto, setAbierto] = useState(false);
-  const [detalle, setDetalle] = useState("");
-  const morado = "#7B5EA7";
-  if (!ESTADOS_ABIERTOS.includes(item.estado)) return null;
-  if (rol !== "admin" && rol !== "tecnico") return null;
+/* Sello de cierre: fecha y hora de hoy. Si se ejecutó otro día que el
+   programado, la orden se reubica en el calendario al día real y el salto
+   queda en sus reprogramaciones, así no se pierde la fecha original. */
+function selloCierre(item, usuarioId) {
+  const ahora = new Date();
+  const hoyStr = fmtDate(ahora);
+  const p = { fechaCompletada: hoyStr, horaCompletada: fmtHora(ahora) };
+  if (item.fechaProgramada && item.fechaProgramada !== hoyStr) {
+    const adelantada = hoyStr < item.fechaProgramada;
+    p.fechaProgramada = hoyStr;
+    p.reprogramaciones = [...(item.reprogramaciones || []), {
+      id: uid("rep"),
+      fechaAnterior: item.fechaProgramada,
+      fechaNueva: hoyStr,
+      estadoAnterior: item.estado,
+      estadoNuevo: "completada",
+      motivo: adelantada ? "Ejecutada antes de lo programado" : "Ejecutada después de lo programado",
+      detalle: "Ajuste automático al cerrar: la fecha programada se igualó al día de ejecución.",
+      usuarioId: usuarioId || "",
+      sello: `${hoyStr} · ${fmtHora(ahora)}`,
+      automatico: true,
+    }];
+  }
+  return p;
+}
 
-  return !abierto ? (
-    <button onClick={() => setAbierto(true)}
-      className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2 rounded-md border"
-      style={{ borderColor: morado, color: morado, background: "white" }}>
-      <Wrench size={13} /> Pasar a servicio
-    </button>
-  ) : (
-    <div className="rounded-md p-2.5 border" style={{ borderColor: morado }}>
-      <p className="text-xs font-semibold mb-1" style={{ color: morado }}>Pasar {item.codigo} a servicio</p>
-      <p className="text-[11px] mb-2" style={cSlate}>
-        Deja de ser correctivo (sale de los indicadores) y pasa a Servicios con el mismo número. Se quita la fecha
-        programada: el supervisor completa tipo de proveedor y presupuesto, lo envía a aprobación del cliente y,
-        una vez aprobado, asigna el proveedor y la fecha.
-      </p>
-      <Field label="Detalle del trabajo" hint="Qué hay que hacer y por qué requiere un servicio: alcance, materiales, obra, proveedor externo…">
-        <textarea autoFocus value={detalle} onChange={(e) => setDetalle(e.target.value)} rows={4}
-          className={`${inputCls} resize-none`} style={inputStyle} />
-      </Field>
-      <div className="flex gap-1.5 mt-2">
-        <button onClick={() => { setAbierto(false); setDetalle(""); }} className="flex-1 py-1.5 rounded-md text-[11px] font-semibold border"
-          style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
-          Cancelar
-        </button>
-        <button disabled={!detalle.trim()} onClick={() => acciones.pasarAServicio(item, detalle.trim())}
-          className="flex-1 py-1.5 rounded-md text-[11px] font-semibold text-white disabled:opacity-40" style={{ background: morado }}>
-          Pasar a servicio
+const cantNum = (v) => Number(String(v ?? "").replace(",", ".")) || 0;
+
+/* Motivos para dejar una orden en espera (la falta de material tiene su
+   propia opción, porque además genera el pedido de compra). */
+const MOTIVOS_ESPERA = [
+  "Decisión del cliente",
+  "Sin acceso al área",
+  "Falta de personal o herramienta",
+  "Otro",
+];
+// Lo que se ve en la etiqueta de estado: "En espera · cliente"
+const MOTIVO_CORTO = {
+  "Decisión del cliente": "cliente",
+  "Sin acceso al área": "acceso",
+  "Falta de personal o herramienta": "personal",
+  "Trabajo largo, continúa otro día": "continúa",
+  "Otro": "otro",
+};
+
+/* Estados de un pedido de material. Lo gestiona el supervisor desde
+   Bodega → Pendientes de compra. */
+const ESTADOS_NECESIDAD = {
+  pendiente: { label: "Pendiente", color: COLORS.orange },
+  comprado: { label: "Comprado", color: "#3B6EA5" },
+  entregado: { label: "Entregado", color: COLORS.verde },
+  cancelado: { label: "Cancelado", color: COLORS.slate },
+};
+
+/* Registrar avance: la única forma en que el técnico mueve una orden.
+   Cada registro queda en el registro de la orden con fecha, autor y
+   etiqueta, y es lo que cambia el estado:
+     · Avance           → En proceso (también retoma una orden en espera)
+     · Requiere material→ En espera + pedido en Pendientes de compra
+     · Requiere servicio→ solo correctivos: pasa a Servicios
+     · En espera        → En espera con su motivo
+     · Finalizar        → Completada; el texto queda como resolución
+   Material y espera aceptan una fecha nueva, que se guarda como
+   reprogramación. El supervisor, además, puede dejar una corrección. */
+function RegistrarAvance({ item, acciones, stock, supervisor, onFinalizada }) {
+  const esPrev = item.tipo === "preventivo";
+  const esCorr = item.tipo === "correctivo";
+  // Programada: primero hay que iniciarla; después se registra lo que pasa
+  const porIniciar = item.estado === "programada";
+  const enCurso = ["en_proceso", "espera"].includes(item.estado);
+  const tipos = [
+    ...(enCurso ? ["avance", "continua", "material", ...(esCorr ? ["servicio"] : []), "espera", "finalizada"] : []),
+    ...(supervisor ? ["correccion"] : []),
+  ];
+  const corrige = supervisor;
+  const [tipo, setTipo] = useState("");
+  const [texto, setTexto] = useState("");
+  const [materiales, setMateriales] = useState([]);
+  const [motivo, setMotivo] = useState(MOTIVOS_ESPERA[0]);
+  const [nuevaFecha, setNuevaFecha] = useState("");
+  const [confirmar, setConfirmar] = useState(false);
+  const [enviando, setEnviando] = useState(false);
+  const [hecho, setHecho] = useState("");
+  // Material de bodega que se descuenta al finalizar
+  const [usados, setUsados] = useState([]);
+  // Cierre definitivo o paliativo (funciona, pero falta la solución de fondo)
+  const [paliativa, setPaliativa] = useState(false);
+  // Requiere servicio: lo realizado en la visita y cómo queda la orden
+  const [obsServ, setObsServ] = useState("");
+  const [modoServ, setModoServ] = useState("espera");
+  // Pedidos que el técnico marca "Ya no se necesita" para poder finalizar
+  const [noReq, setNoReq] = useState([]);
+  const [falta, setFalta] = useState("");
+
+  const iniciar = async () => {
+    setEnviando(true);
+    try {
+      const ahora = new Date();
+      const que = item.tipo === "servicio" ? "el servicio" : esPrev ? "la orden de trabajo" : "la revisión de la orden";
+      await acciones.updateActividad(item, {
+        estado: "en_proceso",
+        ...(item.fechaInicio ? {} : { fechaInicio: fmtDate(ahora), horaInicio: fmtHora(ahora) }),
+      }, { comentario: { texto: `Se inicia ${que} ${item.codigo || ""}`.trim(), etiqueta: "inicio" } });
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  if (porIniciar) {
+    return (
+      <div className="rounded-md p-2.5 space-y-2" style={{ background: `${COLORS.orange}0D`, border: `1px solid ${COLORS.orange}33` }}>
+        <p className="text-[11px]" style={cSlate}>
+          Al iniciarla pasa a En proceso y queda anotada la fecha y hora de inicio.{esPrev && (item.checklist || []).length > 0 ? " Ahí se abre el procedimiento para llenarlo." : ""} Después podrás registrar avances, material, esperas o finalizarla.
+        </p>
+        <button type="button" onClick={iniciar} disabled={enviando}
+          className="w-full py-2.5 rounded-md text-sm font-semibold text-white disabled:opacity-40" style={{ background: COLORS.orange }}>
+          Iniciar orden
         </button>
       </div>
+    );
+  }
+
+  if (!tipos.length) {
+    return item.estado === "pendiente" && !corrige ? (
+      <p className="text-[11px] rounded-md p-2" style={{ background: COLORS.cream, color: COLORS.slate }}>
+        Agenda una fecha para empezar a registrar el trabajo de esta orden.
+      </p>
+    ) : null;
+  }
+
+  // Bodega de la sede: con existencias se usa; sin existencias se pide
+  const conStock = stock.filter((a) => Number(a.cantidad) > 0);
+  const sinExistencias = stock.filter((a) => !(Number(a.cantidad) > 0));
+  // Material pedido que aún no llega: la orden no se puede finalizar
+  const sinEntregar = (item.necesidades || []).filter((n) => ["pendiente", "comprado"].includes(n.estado) && !n.noRequerido);
+  const checklistPend = esPrev ? avanceChecklist(item.checklist).pendientes : 0;
+  const mats = materiales.filter((m) => (m.nombre || "").trim());
+  const conFecha = tipo === "material" || tipo === "espera" || tipo === "continua";
+  const fechaActual = item.fechaProgramada || "";
+  const cambiaFecha = conFecha && nuevaFecha && nuevaFecha !== fechaActual;
+  const hoyStr = fmtDate(new Date());
+
+  // Material usado de bodega: se puede cargar en cualquier registro de trabajo
+  const conUsados = ["avance", "continua", "material", "espera", "finalizada"].includes(tipo);
+  const consumosSel = conUsados ? usados
+    .filter((u) => u.usar && cantNum(u.cantidad) > 0)
+    .map((u) => ({ art: stock.find((a) => a.id === u.stockId), cantidad: cantNum(u.cantidad), necId: u.necId }))
+    .filter((c) => c.art) : [];
+  const valido = !!tipo && !enviando && (
+    tipo === "material" ? mats.length > 0
+    : tipo === "finalizada" ? !!texto.trim() && checklistPend === 0
+      && sinEntregar.every((n) => noReq.includes(n.id)) && (!paliativa || !!falta.trim())
+    : tipo === "avance" ? !!texto.trim() || consumosSel.length > 0
+    // Reprogramar: qué se hizo / qué falta y la fecha en que se sigue
+    : tipo === "continua" ? !!texto.trim() && !!nuevaFecha && nuevaFecha >= hoyStr
+    : tipo === "servicio" ? !!texto.trim() && !!obsServ.trim()
+    : !!texto.trim());
+  // Pedidos de la orden que se cargan ahora: quedan entregados y consumidos
+  const opcionesConsumo = () => {
+    const necCargadas = new Set(consumosSel.map((c) => c.necId).filter(Boolean));
+    return {
+      consumos: consumosSel,
+      ...(necCargadas.size ? { mapNecesidades: (n) => (necCargadas.has(n.id)
+        ? { ...n, consumido: true, ...(["pendiente", "comprado"].includes(n.estado) ? { estado: "entregado", fechaEstado: fmtDate(new Date()), horaEstado: fmtHora(new Date()) } : {}) }
+        : n) } : {}),
+    };
+  };
+
+  const limpiar = (msg) => {
+    setTipo(""); setTexto(""); setMateriales([]); setMotivo(MOTIVOS_ESPERA[0]);
+    setNuevaFecha(""); setConfirmar(false); setUsados([]); setPaliativa(false); setFalta(""); setNoReq([]);
+    setObsServ(""); setModoServ("espera"); setHecho(msg);
+    setTimeout(() => setHecho(""), 2500);
+  };
+
+  const registrar = async () => {
+    if (!valido) return;
+    if (tipo === "finalizada" && !confirmar) { setConfirmar(true); return; }
+    setEnviando(true);
+    const usuarioId = acciones.usuario?.id || "";
+    const t = texto.trim();
+    try {
+      if (tipo === "servicio") {
+        /* Se crea la orden de servicio con el detalle requerido. El correctivo
+           queda En espera · servicio, o cerrado como paliativo hasta el servicio. */
+        const obs = obsServ.trim();
+        const paliativo = modoServ === "paliativa";
+        const patch = paliativo
+          ? { estado: "completada", ...selloCierre(item, usuarioId), cierre: "paliativo", motivoEspera: "",
+            pendienteDefinitivo: t, resolucion: `Reparación paliativa: ${obs}. Pendiente con servicio: ${t}` }
+          : { estado: "espera", motivoEspera: "servicio" };
+        await acciones.updateActividad(item, patch, {
+          comentario: { texto: `${obs} · Servicio requerido: ${t}`, etiqueta: paliativo ? "paliativa" : "servicio" },
+          servicio: { detalle: t },
+        });
+        if (paliativo) { limpiar(""); onFinalizada?.(); } else limpiar("Orden de servicio creada: queda en espera del servicio");
+        return;
+      }
+      if (tipo === "correccion") {
+        await acciones.updateActividad(item, {}, { sinRegistro: true, comentario: { texto: t, etiqueta: "correccion" } });
+        limpiar("Corrección anotada");
+        return;
+      }
+      if (tipo === "finalizada") {
+        const patch = { estado: "completada", ...selloCierre(item, usuarioId) };
+        if (!esPrev) patch.resolucion = paliativa ? `Reparación paliativa: ${t}. Falta: ${falta.trim()}` : t;
+        if (paliativa) { patch.cierre = "paliativo"; patch.pendienteDefinitivo = falta.trim(); }
+        /* Material pedido que ya no se necesita: si no se compró, el pedido
+           se cancela; si ya se compró, sigue en Pendientes de compra para
+           ingresarlo a bodega, pero deja de frenar la orden. */
+        const dejados = sinEntregar.filter((n) => noReq.includes(n.id));
+        const notaMat = dejados.length
+          ? ` · Pedidos anulados: ${dejados.map((n) => `${textoNecesidad(n)}${n.estado === "comprado" ? " (ya comprado, pasa a bodega)" : ""}`).join("; ")}`
+          : "";
+        const conc = opcionesConsumo();
+        const mapCons = conc.mapNecesidades || ((n) => n);
+        const ahoraNR = new Date();
+        conc.mapNecesidades = (n) => {
+          const m = mapCons(n);
+          if (!noReq.includes(n.id) || m.consumido) return m;
+          return m.estado === "pendiente"
+            ? { ...m, estado: "cancelado", noRequerido: true, fechaEstado: fmtDate(ahoraNR), horaEstado: fmtHora(ahoraNR), actualizadoPor: usuarioId }
+            : { ...m, noRequerido: true };
+        };
+        await acciones.updateActividad(item, patch, {
+          comentario: paliativa
+            ? { texto: `${t} · Falta para la solución definitiva: ${falta.trim()}${notaMat}`, etiqueta: "paliativa" }
+            : { texto: `${t}${notaMat}`, etiqueta: "finalizada" },
+          ...(paliativa ? { derivar: { pendiente: falta.trim() } } : {}),
+          ...conc,
+        });
+        limpiar("");
+        onFinalizada?.();
+        return;
+      }
+      /* Avance y Reprogramar dejan la orden En proceso (el trabajo es del
+         técnico), salvo que haya material pedido sin entregar: entonces
+         sigue "En espera · material" hasta que llegue. */
+      const esperaMaterial = (tipo === "avance" || tipo === "continua") && sinEntregar.length > 0;
+      const estadoNuevo = (tipo === "avance" || tipo === "continua") && !esperaMaterial ? "en_proceso" : "espera";
+      const patch = item.estado === estadoNuevo ? {} : { estado: estadoNuevo };
+      patch.motivoEspera = tipo === "material" || esperaMaterial ? "material" : tipo === "espera" ? MOTIVO_CORTO[motivo] || "" : "";
+      const motivoFinal = tipo === "material" ? "Falta de repuesto o material"
+        : esperaMaterial && tipo === "continua" ? "Falta de repuesto o material (aún no llega)"
+        : tipo === "continua" ? "Trabajo no terminado, continúa otro día" : motivo;
+      if (cambiaFecha) {
+        patch.fechaProgramada = nuevaFecha;
+        patch.reprogramaciones = [...(item.reprogramaciones || []), {
+          id: uid("rep"),
+          fechaAnterior: fechaActual, fechaNueva: nuevaFecha,
+          estadoAnterior: item.estado, estadoNuevo,
+          motivo: motivoFinal, detalle: t,
+          usuarioId, sello: `${fmtDate(new Date())} · ${fmtHora(new Date())}`,
+        }];
+      }
+      const cuerpo = tipo === "material" ? textoComentario({ materiales: mats, texto: t })
+        : tipo === "espera" ? `${motivo}${t ? `: ${t}` : ""}`
+        : tipo === "continua" ? `Sigue el ${fmtDMY(nuevaFecha)}: ${t}` : t;
+      const necesidades = tipo === "material" ? mats.map((m) => ({
+        id: uid("nec"), nombre: m.nombre.trim(),
+        cantidad: Number(String(m.cantidad || 1).replace(",", ".")) || 1,
+        unidad: (m.unidad || "u").trim(), stockId: m.stockId || "",
+        estado: "pendiente", fecha: fmtDate(new Date()), hora: fmtHora(new Date()), usuarioId,
+      })) : undefined;
+      const conc = opcionesConsumo();
+      if (necesidades && conc.mapNecesidades) {
+        // Los pedidos nuevos no se tocan; solo los que se cargan ahora
+        const m = conc.mapNecesidades;
+        conc.mapNecesidades = (n) => (necesidades.some((x) => x.id === n.id) ? n : m(n));
+      }
+      await acciones.updateActividad(item, patch, {
+        comentario: cuerpo ? { texto: cuerpo, etiqueta: tipo } : null, necesidades, ...conc,
+      });
+      limpiar(tipo === "material" ? "Material pedido: quedó en Pendientes de compra"
+        : tipo === "continua" ? `Reagendada para el ${fmtDMY(nuevaFecha)}` : "Registrado en la orden");
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  /* Al elegir Finalizar se proponen los materiales pedidos en la orden que
+     están en el kardex (y no se cancelaron ni se cargaron ya). */
+  const proponerUsados = () => setUsados((item.necesidades || [])
+    .filter((n) => n.stockId && n.estado !== "cancelado" && !n.consumido && conStock.some((a) => a.id === n.stockId))
+    .map((n) => ({ necId: n.id, stockId: n.stockId, cantidad: String(n.cantidad || 1), usar: true })));
+  const boton = (k) => {
+    const e = ETIQUETAS_REGISTRO[k];
+    const on = tipo === k;
+    return (
+      <button key={k} type="button" onClick={() => { setTipo(on ? "" : k); setConfirmar(false); if (!on && k === "finalizada" && !usados.length) proponerUsados(); }}
+        className="text-[11px] font-semibold px-2.5 py-1.5 rounded-md"
+        style={on ? { background: e.color, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.charcoal, background: "white" }}>
+        {k === "finalizada" ? "Finalizar" : k === "continua" ? "Reprogramar" : e.label}
+      </button>
+    );
+  };
+
+  const placeholder = {
+    avance: "Qué se hizo hoy, qué se encontró, qué falta…",
+    continua: "Qué se alcanzó a hacer hoy y qué falta para terminar…",
+    material: "Para qué se necesita (opcional)…",
+    servicio: "Detalle del servicio requerido, cantidades aproximadas, etc.",
+    espera: "Detalle del motivo…",
+    finalizada: esPrev ? "Observación de cierre: cómo quedó el equipo, novedades…" : "Qué se hizo para resolverlo…",
+    correccion: "Qué se corrige y por qué…",
+  }[tipo] || "";
+
+  return (
+    <div className="rounded-md p-2.5 space-y-2" style={{ background: `${COLORS.orange}0D`, border: `1px solid ${COLORS.orange}33` }}>
+      <p className="text-[11px] font-semibold uppercase tracking-wide" style={cChar}>Registrar en la bitácora</p>
+      <div className="flex gap-1 flex-wrap">{tipos.map(boton)}</div>
+
+      {tipo === "material" && (
+        <>
+          <p className="text-[11px]" style={cSlate}>
+            Solo lo que <b>no hay en bodega</b> o no está en el kardex: queda en Pendientes de compra.
+            Lo que sí hay en bodega cárgalo abajo, en “Material usado de bodega”.
+          </p>
+          <ListaMateriales materiales={materiales} onChange={setMateriales}
+            stock={sinExistencias} textoBoton="Buscar en el kardex (sin existencias) o escribir el material…" />
+        </>
+      )}
+      {tipo === "espera" && (
+        <select value={motivo} onChange={(e) => setMotivo(e.target.value)} className={inputCls} style={inputStyle}>
+          {MOTIVOS_ESPERA.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+      )}
+      {tipo === "servicio" && (
+        <p className="text-[11px] font-semibold" style={cChar}>Detalle específicamente el servicio requerido</p>
+      )}
+      {conUsados && conStock.length > 0 && (
+        <div className="rounded-md p-2 space-y-1.5 bg-white border" style={bLine}>
+          <p className="text-[10px] font-semibold uppercase tracking-wide" style={cSlate}>Material usado de bodega</p>
+          {usados.length === 0 && (
+            <p className="text-[11px]" style={cSlate}>Si usaste material de bodega, agrégalo: se descuenta al registrar.</p>
+          )}
+          {usados.map((u, i) => {
+            const art = stock.find((a) => a.id === u.stockId);
+            if (!art) return null;
+            const set = (p) => setUsados(usados.map((x, j) => (j === i ? { ...x, ...p } : x)));
+            const excede = u.usar && cantNum(u.cantidad) > art.cantidad;
+            return (
+              <div key={i}>
+                <div className="flex items-center gap-1.5">
+                  <input type="checkbox" checked={u.usar} onChange={(e) => set({ usar: e.target.checked })} className="shrink-0" />
+                  <div className="flex-1 min-w-0 text-left">
+                    <p className="text-xs font-semibold break-words" style={{ ...cChar, opacity: u.usar ? 1 : 0.5 }}>{art.nombre}</p>
+                    <p className="text-[10px]" style={cSlate}>{u.necId ? "Pedido en la orden" : "Agregado"} · en bodega: {art.cantidad} {art.unidad}</p>
+                  </div>
+                  <input type="text" inputMode="decimal" value={u.cantidad} disabled={!u.usar}
+                    onChange={(e) => set({ cantidad: e.target.value.replace(/[^0-9.,]/g, "") })}
+                    className="w-14 border rounded-md px-1.5 py-1.5 text-xs outline-none bg-white disabled:opacity-50" style={inputStyle} />
+                  <span className="text-[10px] w-8" style={cSlate}>{art.unidad}</span>
+                  {!u.necId && (
+                    <button type="button" onClick={() => setUsados(usados.filter((_, j) => j !== i))} className="p-1" title="Quitar">
+                      <X size={13} color={COLORS.slate} />
+                    </button>
+                  )}
+                </div>
+                {excede && <p className="text-[10px] mt-0.5" style={{ color: COLORS.ambar }}>En bodega solo hay {art.cantidad} {art.unidad}: la existencia quedará en cero.</p>}
+              </div>
+            );
+          })}
+          <SelectorArticulo articulos={conStock.filter((a) => !usados.some((u) => u.stockId === a.id))} value=""
+            textoBoton="Agregar material de bodega…"
+            onChange={(id) => setUsados([...usados, { stockId: id, cantidad: "1", usar: true }])} />
+        </div>
+      )}
+      {tipo === "finalizada" && (
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-2 gap-1 p-1 rounded-md bg-white border" style={bLine}>
+            {[[false, "Definitiva"], [true, "Paliativa"]].map(([v, l]) => (
+              <button key={l} type="button" onClick={() => { setPaliativa(v); setConfirmar(false); }}
+                className="py-1.5 rounded text-[11px] font-semibold"
+                style={paliativa === v ? { background: v ? COLORS.ambar : COLORS.verde, color: "white" } : { color: COLORS.slate }}>
+                Reparación {l.toLowerCase()}
+              </button>
+            ))}
+          </div>
+          {paliativa && (
+            <>
+              <p className="text-[11px]" style={cSlate}>
+                El equipo queda funcionando, pero falta la solución de fondo. La orden se cierra y se crea una
+                <b> orden correctiva nueva</b> en Sin programar, enlazada a esta, para la solución definitiva.
+              </p>
+            </>
+          )}
+        </div>
+      )}
+      {tipo === "finalizada" && sinEntregar.length > 0 && (
+        <div className="rounded-md p-2 text-[11px] space-y-1.5" style={{ background: `${COLORS.rojo}0D` }}>
+          <p className="font-semibold" style={{ color: COLORS.rojo }}>Hay material pedido que aún no se entrega.</p>
+          <p style={cSlate}>
+            Para finalizar, espera a que llegue o anula los pedidos que ya no hacen falta (por ejemplo, si encontraste otra solución).
+          </p>
+          {sinEntregar.map((n) => {
+            const on = noReq.includes(n.id);
+            return (
+              <div key={n.id} className="flex items-center justify-between gap-2 rounded-md bg-white border px-2 py-1.5" style={bLine}>
+                <span className="min-w-0 text-left">
+                  <span style={{ ...cChar, textDecoration: on ? "line-through" : "none" }}>
+                    {textoNecesidad(n)} <span style={cSlate}>· {ESTADOS_NECESIDAD[n.estado].label.toLowerCase()}</span>
+                  </span>
+                  {on && (
+                    <span className="block text-[10px]" style={cSlate}>
+                      {n.estado === "comprado" ? "Ya comprado: el supervisor lo ingresa a bodega." : "El pedido queda anulado."}
+                    </span>
+                  )}
+                </span>
+                <button type="button" onClick={() => setNoReq(on ? noReq.filter((x) => x !== n.id) : [...noReq, n.id])}
+                  className="shrink-0 text-[10px] font-semibold px-2 py-1 rounded-md border"
+                  style={on ? { background: COLORS.slate, borderColor: COLORS.slate, color: "white" } : { borderColor: COLORS.line, color: COLORS.charcoal }}>
+                  {on ? "Anulado ✓" : "Anular pedido"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {tipo === "finalizada" && checklistPend > 0 && (
+        <p className="text-[11px] font-semibold" style={{ color: COLORS.rojo }}>
+          Falta marcar {checklistPend} {checklistPend === 1 ? "punto" : "puntos"} del checklist para finalizar.
+        </p>
+      )}
+      {tipo && (
+        <textarea value={texto} onChange={(e) => setTexto(e.target.value)} rows={2} placeholder={placeholder}
+          className={`${inputCls} resize-none bg-white`} style={inputStyle} />
+      )}
+      {tipo === "servicio" && (
+        <>
+          <Field label="Observación de lo realizado" hint="Queda en la bitácora de esta orden; no va en el detalle del servicio.">
+            <textarea value={obsServ} onChange={(e) => setObsServ(e.target.value)} rows={2}
+              placeholder="Qué se revisó o se hizo en la visita…"
+              className={`${inputCls} resize-none bg-white`} style={inputStyle} />
+          </Field>
+          <div className="grid grid-cols-2 gap-1 p-1 rounded-md bg-white border" style={bLine}>
+            {[["espera", "Queda en espera del servicio", "#7B5EA7"], ["paliativa", "Paliativa hasta el servicio", COLORS.ambar]].map(([v, l, c]) => (
+              <button key={v} type="button" onClick={() => setModoServ(v)}
+                className="py-1.5 px-1 rounded text-[11px] font-semibold leading-tight"
+                style={modoServ === v ? { background: c, color: "white" } : { color: COLORS.slate }}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px]" style={cSlate}>
+            {modoServ === "espera"
+              ? "Esta orden queda En espera · servicio y se cierra sola cuando el servicio se finalice."
+              : "Esta orden se cierra como reparación paliativa; la solución definitiva queda en el servicio."}
+          </p>
+        </>
+      )}
+      {tipo === "finalizada" && paliativa && (
+        <Field label="¿Qué falta para la solución definitiva?" hint="Será el título de la orden correctiva nueva.">
+          <textarea value={falta} onChange={(e) => setFalta(e.target.value)} rows={2}
+            placeholder="Ej. Cambiar el grifo completo"
+            className={`${inputCls} resize-none bg-white`} style={inputStyle} />
+        </Field>
+      )}
+      {(tipo === "continua" || tipo === "avance") && sinEntregar.length > 0 ? (
+        <p className="text-[11px] rounded-md p-2" style={{ background: `${COLORS.ambar}14`, color: COLORS.charcoal }}>
+          Hay material pedido que aún no llega ({sinEntregar.map((n) => textoNecesidad(n)).join("; ")}): la orden
+          seguirá <b>En espera · material</b>{tipo === "continua" ? " y pasa en el calendario a la nueva fecha" : ""}.
+        </p>
+      ) : tipo === "continua" && (
+        <p className="text-[11px]" style={cSlate}>
+          La orden sigue <b>En proceso</b> (no es una espera) y pasa en el calendario al día en que la vas a continuar.
+        </p>
+      )}
+      {conFecha && (
+        <Field label={tipo === "continua" ? "¿Qué día continúas?" : "Nueva fecha (opcional)"}
+          hint={`Programada: ${fechaActual || "—"}. ${tipo === "continua" ? "Queda como reprogramación." : "Si la cambias, queda como reprogramación."}`}>
+          <input type="date" value={nuevaFecha} min={tipo === "continua" ? hoyStr : undefined} onChange={(e) => setNuevaFecha(e.target.value)}
+            className="w-full border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle} />
+        </Field>
+      )}
+      {tipo && (
+        confirmar ? (
+          <div className="flex gap-1.5">
+            <button type="button" onClick={() => setConfirmar(false)} className="flex-1 py-2 rounded-md text-xs font-semibold border bg-white"
+              style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
+              Cancelar
+            </button>
+            <button type="button" onClick={registrar} disabled={enviando}
+              className="flex-1 py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40" style={{ background: COLORS.verde }}>
+              Sí, finalizar la orden
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={registrar} disabled={!valido}
+            className="w-full py-2 rounded-md text-xs font-semibold text-white disabled:opacity-40"
+            style={{ background: tipo === "finalizada" && paliativa ? COLORS.ambar : ETIQUETAS_REGISTRO[tipo].color }}>
+            {tipo === "finalizada" ? (paliativa ? "Cerrar como paliativa" : "Finalizar orden")
+              : tipo === "servicio" ? "Crear orden de servicio" : tipo === "continua" ? "Reprogramar" : "Registrar"}
+          </button>
+        )
+      )}
+      {confirmar && (
+        <p className="text-[11px] text-center" style={cSlate}>
+          Se registrará la fecha y hora de cierre y la orden quedará completada.
+          {paliativa ? " Se creará una orden correctiva nueva para la solución definitiva." : ""}
+        </p>
+      )}
+      {hecho && (
+        <p className="text-[11px] font-semibold flex items-center gap-1" style={{ color: COLORS.verde }}>
+          <CheckCircle2 size={12} /> {hecho}
+        </p>
+      )}
     </div>
   );
 }
 
 function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicial, permitirReasignar, onCompletada }) {
   const [open, setOpen] = useState(!!abiertoInicial);
-  const [estado, setEstado] = useState(item.estado);
-  const [observaciones, setObservaciones] = useState(item.observaciones || "");
+  // El estado solo lo cambia a mano el supervisor (corrección); el técnico
+  // lo mueve con "Registrar avance"
+  const [estadoForm, setEstado] = useState(item.estado);
   const [resolucion, setResolucion] = useState(item.resolucion || "");
   const [tecnicoId, setTecnicoId] = useState(item.tecnicoId || "");
   const [durValor, setDurValor] = useState(item.duracionValor ?? "");
@@ -4862,7 +5718,12 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   /* El supervisor puede corregir cualquier dato directamente sobre la tarjeta.
      Es lo que permite arreglar registros capturados a destiempo —sin señal en
      sitio, cargados al día siguiente— sin salir de la orden. */
-  const corrige = rol === "admin";
+  /* El supervisor trabaja la orden igual que el técnico (el estado lo
+     mueve la bitácora). Con "Corregir datos" abre el modo corrección para
+     arreglar estado, fechas, ubicación, textos o el propio registro. */
+  const esSupervisor = rol === "admin";
+  const [corrigiendo, setCorrigiendo] = useState(false);
+  const corrige = esSupervisor && corrigiendo;
   const [txt, setTxt] = useState(esServ ? item.trabajo || "" : esPrev ? item.tarea || "" : item.descripcion || "");
   const [detalle, setDetalle] = useState(item.detalle || "");
   const [criticidad, setCriticidad] = useState(item.criticidad || "");
@@ -4884,7 +5745,10 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   const puedeEditarTiempo = rol === "admin" && !esServ;
   // Reprogramar está disponible mientras la actividad siga abierta
   // La fecha de un servicio solo la mueve el supervisor
-  const puedeReprogramar = ESTADOS_ABIERTOS.includes(item.estado) && !(esServ && rol !== "admin");
+  const puedeReprogramar = ESTADOS_ABIERTOS.includes(item.estado) && !(esServ && rol !== "admin")
+    // Ya iniciada, se reprograma desde la bitácora (deja lo hecho y lo que falta);
+    // el supervisor además puede mover la fecha en "Corregir datos"
+    && item.estado === "programada";
   const stockSede = (data.stock || []).filter((x) => x.sedeId === item.sedeId);
 
   // Si otro usuario modifica este mismo registro, el formulario se pone al día
@@ -4892,7 +5756,6 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   useEffect(() => {
     if (open) return;
     setEstado(item.estado);
-    setObservaciones(item.observaciones || "");
     setResolucion(item.resolucion || "");
     setTecnicoId(item.tecnicoId || "");
     setDurValor(item.duracionValor ?? "");
@@ -4912,6 +5775,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
   const [confirmarCierre, setConfirmarCierre] = useState(false);
 
   const guardar = async () => {
+    // Para el técnico el estado es el guardado: lo cambia "Registrar avance"
+    const estado = corrige ? estadoForm : item.estado;
     // Marcar como completada es irreversible en la práctica: se pide confirmar
     if (estado === "completada" && item.estado !== "completada" && !confirmarCierre) {
       setConfirmarCierre(true);
@@ -4932,9 +5797,9 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
       : (agendaTecnico && fProg && estado === "pendiente") ? "programada"
       : estado;
 
-    const patch = { estado: estadoSeguro, observaciones };
+    const patch = { estado: estadoSeguro };
     if (agendaTecnico) patch.fechaProgramada = fProg;
-    if (!esPrev) patch.resolucion = resolucion;
+    if (corrige && !esPrev) patch.resolucion = resolucion;
     if (permitirReasignar) patch.tecnicoId = tecnicoId;
     if (puedeEditarTiempo) {
       patch.duracionValor = Number(durValor) || 0;
@@ -4968,29 +5833,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
        queda registrado en la bitácora, así no se pierde la fecha original. */
     if (estado === "completada") {
       // Si el supervisor escribió la fecha de cierre, esa manda sobre el sello automático
-      if (!item.fechaCompletada && !patch.fechaCompletada) {
-        const ahora = new Date();
-        const hoyStr = fmtDate(ahora);
-        patch.fechaCompletada = hoyStr;
-        patch.horaCompletada = fmtHora(ahora);
-
-        if (item.fechaProgramada && item.fechaProgramada !== hoyStr) {
-          const adelantada = hoyStr < item.fechaProgramada;
-          patch.fechaProgramada = hoyStr;
-          patch.reprogramaciones = [...(item.reprogramaciones || []), {
-            id: uid("rep"),
-            fechaAnterior: item.fechaProgramada,
-            fechaNueva: hoyStr,
-            estadoAnterior: item.estado,
-            estadoNuevo: "completada",
-            motivo: adelantada ? "Ejecutada antes de lo programado" : "Ejecutada después de lo programado",
-            detalle: "Ajuste automático al cerrar: la fecha programada se igualó al día de ejecución.",
-            usuarioId: acciones.usuario?.id || "",
-            sello: `${hoyStr} · ${fmtHora(ahora)}`,
-            automatico: true,
-          }];
-        }
-      }
+      if (!item.fechaCompletada && !patch.fechaCompletada) Object.assign(patch, selloCierre(item, acciones.usuario?.id));
     } else if (item.fechaCompletada) {
       patch.fechaCompletada = "";
       patch.horaCompletada = "";
@@ -5026,9 +5869,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
      no aparecía y el cambio se perdía al cerrar la tarjeta. */
   const dif = (valorForm, valorItem) => String(valorForm ?? "") !== String(valorItem ?? "");
   const sinGuardar =
-    dif(estado, item.estado) ||
-    dif(observaciones, item.observaciones) ||
-    (!esPrev && dif(resolucion, item.resolucion)) ||
+    (corrige && dif(estadoForm, item.estado)) ||
+    (corrige && !esPrev && dif(resolucion, item.resolucion)) ||
     (permitirReasignar && dif(tecnicoId, item.tecnicoId)) ||
     (!corrige && !permitirReasignar && !esServ && item.estado === "pendiente" && dif(fProg, item.fechaProgramada)) ||
     (puedeEditarTiempo && (dif(durValor, item.duracionValor) || dif(durUnidad, item.duracionUnidad || "minutos"))) ||
@@ -5061,19 +5903,34 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               <TipoChip tipo={item.tipo} />
               <span className="text-[10px] font-bold" style={cChar}>{item.codigo}</span>
               {item.criticidad && <Chip color={CRITICIDAD[item.criticidad].color}>{CRITICIDAD[item.criticidad].label}</Chip>}
+              {item.cierre === "paliativo" && <Chip color={COLORS.ambar}>Paliativa{item.derivadaCodigo ? ` → ${item.derivadaCodigo}` : ""}</Chip>}
+              {item.origenCodigo && <Chip color={COLORS.ambar}>Definitiva de {item.origenCodigo}</Chip>}
+              {item.servicioCodigo && (() => {
+                const rech = (data.servicios || []).find((x) => x.id === item.servicioId)?.estado === "rechazada";
+                return <Chip color={rech ? COLORS.rojo : "#7B5EA7"}>Servicio {item.servicioCodigo}{rech ? " · rechazado" : ""}</Chip>;
+              })()}
             </div>
             <p className="font-semibold text-sm mt-0.5 truncate" style={cChar}>{item.tarea}</p>
             <p className="text-xs truncate" style={cSlate}>{ubicacionTexto(data.sedes, item)}</p>
           </div>
         </div>
         <span className="flex items-center gap-2 shrink-0">
-          <EstadoChip estado={item.estado} />
+          <EstadoChip estado={item.estado} motivo={item.motivoEspera} />
           <BotonDetalle item={item} />
         </span>
       </button>
 
       {open && (
         <div className="px-2.5 pb-2.5 space-y-2.5 border-t pt-2.5" style={bLine}>
+          {esSupervisor && (
+            <div className="flex justify-end">
+              <button type="button" onClick={() => setCorrigiendo(!corrigiendo)}
+                className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md border"
+                style={corrigiendo ? { background: COLORS.rojo, borderColor: COLORS.rojo, color: "white" } : { borderColor: COLORS.line, color: COLORS.charcoal }}>
+                <Pencil size={11} /> {corrigiendo ? "Salir de corrección" : "Corregir datos"}
+              </button>
+            </div>
+          )}
           {!corrige ? (
             <p className="text-xs" style={cSlate}>
               Programada: {item.fechaProgramada || "—"}
@@ -5129,7 +5986,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                          como Sin Programar. Solo se ajusta si el estado aún
                          no avanzó más allá (en proceso, espera, completada). */
                       if (!v) setEstado("pendiente");
-                      else if (estado === "pendiente") setEstado("programada");
+                      else if (estadoForm === "pendiente") setEstado("programada");
                     }}
                     className="w-full border rounded-md px-2 py-1.5 text-xs" style={inputStyle} />
                 </Field>
@@ -5155,7 +6012,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                   La ejecución es anterior {fecha ? "al reporte" : "a la fecha programada"}: revisa el año, suele ser un error de tecleo.
                 </p>
               )}
-              {fCompl && estado !== "completada" && (
+              {fCompl && estadoForm !== "completada" && (
                 <p className="text-[10px]" style={{ color: COLORS.ambar }}>
                   Hay fecha de ejecución pero el estado no es Completada.
                 </p>
@@ -5284,7 +6141,14 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                 {novedadServicio(item) && <Field label="Detalle de novedad"><ReadOnly>{novedadServicio(item)}</ReadOnly></Field>}
                 {item.detalle && <Field label="Detalle del trabajo"><ReadOnly>{item.detalle}</ReadOnly></Field>}
               </>
-            ) : !esPrev && <Field label="Descripción de la solicitud"><ReadOnly>{item.descripcion}</ReadOnly></Field>
+            ) : !esPrev && (
+              <Field label="Descripción de la solicitud">
+                <ReadOnly>
+                  {item.descripcion}
+                  {item.origenCodigo && <span className="block text-[11px] mt-0.5" style={cSlate}>Continuación de {item.origenCodigo}</span>}
+                </ReadOnly>
+              </Field>
+            )
           )}
 
           {corrige && esCorr && (
@@ -5308,7 +6172,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               {item.comentarioCalif && <p className="text-xs mt-1.5" style={cChar}>“{item.comentarioCalif}”</p>}
             </div>
           )}
-          {esPrev && (item.checklist || []).length > 0 && (
+          {/* El procedimiento se llena una vez iniciada la orden */}
+          {esPrev && (item.checklist || []).length > 0 && (corrige || !["programada", "pendiente"].includes(item.estado)) && (
             <ChecklistEjecucion
               items={item.checklist}
               readOnly={item.estado === "completada"}
@@ -5316,9 +6181,8 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               onChange={(items) => acciones.updateActividad(item, { checklist: items })} />
           )}
 
-          <Field label="Estado"
-            hint={!fProg ? "Sin fecha programada solo puede estar en Sin Programar. Asigna una fecha arriba para poder avanzarla." : undefined}>
-            <select value={estado} onChange={(e) => setEstado(e.target.value)} className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
+          {corrige && <Field label="Estado" hint={!fProg ? "Sin fecha programada solo puede estar en Sin Programar. Asigna una fecha arriba para poder avanzarla." : undefined}>
+            <select value={estadoForm} onChange={(e) => setEstado(e.target.value)} className="w-full border rounded-md px-2 py-2 text-sm" style={inputStyle}>
               {/* "Sin Programar" aparece en la lista: antes no estaba, así que
                   una actividad pendiente mostraba "Programada" por defecto y se
                   guardaba con ese estado aunque no tuviera fecha. Los estados
@@ -5328,19 +6192,25 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                 <option key={e} value={e} disabled={!fProg}>{ESTADOS[e].label}</option>
               ))}
             </select>
-          </Field>
+          </Field>}
 
-          <Field label="Observaciones">
-            <textarea value={observaciones} onChange={(e) => setObservaciones(e.target.value)} rows={2}
-              placeholder="Notas de campo, avance, hallazgos..." className={`${inputCls} resize-none`} style={inputStyle} />
+          <Field label="Bitácora de la orden" hint={corrige ? "Modo corrección: puedes corregir o borrar cada línea." : undefined}>
+            <RegistroOrden texto={item.observaciones}
+              onEditar={corrige ? (t) => acciones.updateActividad(item, { observaciones: t }, { sinRegistro: true }) : undefined} />
           </Field>
+          <RegistrarAvance item={item} acciones={acciones} stock={stockSede} supervisor={esSupervisor}
+            onFinalizada={() => { if (onCompletada) onCompletada(); else setOpen(false); }} />
 
-          {!esPrev && (
-            <Field label={esServ ? "Novedades del servicio" : "Resolución"}>
+          {/* La resolución sale del comentario de "Finalizar". El supervisor la
+              ve y la puede corregir; también conserva las escritas antes. */}
+          {corrige && !esPrev && (
+            <Field label={esServ ? "Novedades del servicio" : "Resolución"} hint="Se llena con el comentario de Finalizar. Edítala solo para corregir.">
               <textarea value={resolucion} onChange={(e) => setResolucion(e.target.value)} rows={2}
-                placeholder={esServ ? "Qué ejecutó el proveedor, hallazgos, pendientes…" : "Qué se hizo para resolverlo"}
                 className={`${inputCls} resize-none`} style={inputStyle} />
             </Field>
+          )}
+          {!corrige && item.resolucion && !(item.observaciones || "").includes(item.resolucion) && (
+            <Field label={esServ ? "Novedades del servicio" : "Resolución"}><ReadOnly>{item.resolucion}</ReadOnly></Field>
           )}
 
           {corrige ? (
@@ -5359,7 +6229,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               servicios solo aparecía la opción de material nuevo. */}
           <ConsumoStock item={item} stockSede={stockSede}
             onRegistrar={registrarConsumo} onQuitar={quitarConsumo}
-            readOnly={item.estado === "completada"} />
+            readOnly={item.estado === "completada"} soloLista={!corrige} />
 
           {esServ && (
             <div className="rounded-md p-2.5 flex items-center justify-between gap-2" style={{ background: COLORS.cream }}>
@@ -5369,8 +6239,6 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               )}
             </div>
           )}
-
-          {esCorr && <PasoAServicio item={item} rol={rol} acciones={acciones} />}
 
           <div className="flex items-center justify-between gap-2">
             <BotonHistorial item={item} data={data} />
@@ -5418,13 +6286,18 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
                   acciones.updateActividad(item, {
                     fechaProgramada, estado: nuevoEstado,
                     reprogramaciones: [...(item.reprogramaciones || []), registro],
-                  });
+                  }, { comentario: {
+                    texto: `Reprogramada: ${registro.motivo}${registro.detalle ? ` · ${registro.detalle}` : ""}`,
+                    etiqueta: nuevoEstado === "espera" ? "espera" : "",
+                  } });
                   setEstado(nuevoEstado);
                 }} />
             </Modal>
           )}
 
-          <div>
+          {/* El técnico solo guarda aquí lo que no pasa por "Registrar avance"
+              (agendar, reasignar); si no hay nada pendiente, no se muestra */}
+          {(corrige || sinGuardar || guardado) && <div>
             <button onClick={guardar} disabled={guardado === "ok"}
               className="w-full py-2 rounded-md text-sm font-semibold text-white flex items-center justify-center gap-1.5 transition-colors"
               style={{ background: guardado === "ok" ? COLORS.verde : sinGuardar ? COLORS.orange : COLORS.charcoal }}>
@@ -5435,7 +6308,7 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             {sinGuardar && guardado !== "ok" && (
               <p className="text-[10px] mt-1 text-center" style={{ color: COLORS.orange }}>Tienes cambios sin guardar.</p>
             )}
-          </div>
+          </div>}
         </div>
       )}
 
@@ -5483,6 +6356,7 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
     const foco = focoProgramacion(data, destinoNotif.id);
     if (foco?.activar) setActivar(foco.activar);
     if (foco?.ejecutar) setEjecutar(foco.ejecutar);
+    if (destinoNotif.orden) setEjecutar(destinoNotif.orden);
   }
   const [msg, setMsg] = useState("");
 
@@ -5521,24 +6395,25 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
       persist((data) => ({
         ...data,
         solicitudes: data.solicitudes.map((x) =>
-          x.id === item.solicitudId ? { ...x, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: estadoNuevo } : x),
+          x.id === item.solicitudId ? { ...x, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: estadoNuevo,
+            observaciones: conRegistro(x.observaciones, [lineaRegistro(user?.nombre, `Activada · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)}${fecha ? ` · Programada para ${fmtDMY(fecha)}` : " · sin fecha"}`)]) } : x),
       }));
     } else {
-      const n = data.otCounter || 1;
-      persist((data) => ({
+      persist((data) => { const n = siguienteNumero(data, "OT"); return {
         ...data,
         ordenes: [...data.ordenes, {
-          id: uid("ot"), codigo: `OT-${String(n).padStart(4, "0")}`,
+          id: uid("ot"), codigo: codigoDe("OT", n),
           planId: item.planId, tarea: item.tarea, checklist: checklistDesdePasos(item.procedimientoPasos),
           categoria: item.categoria, frecuencia: item.frecuencia,
           duracionValor, duracionUnidad,
           sedeId: item.sedeId, faseId: item.faseId, activoId: item.activoId,
           tecnicoId, fechaProgramada: fecha, fechaCompletada: "",
-          estado: "programada", observaciones: "", foto: "",
+          estado: "programada", foto: "",
+          observaciones: lineaRegistro(user?.nombre, `Orden creada desde el plan · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)} · Programada para ${fmtDMY(fecha)}`),
           materiales: [], materialesEstado: "", consumos: [], createdAt: fmtDate(new Date()),
         }],
         otCounter: n + 1,
-      }));
+      }; });
     }
     setMsg("Actividad activada y asignada a ti. Ya aparece en el calendario.");
     setTimeout(() => setMsg(""), 4000);
@@ -5546,9 +6421,8 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
 
   const crearHallazgo = async (form) => {
     const now = new Date();
-    const n = data.solCounter || 1;
-    const nueva = {
-      id: uid("sol"), codigo: `SOL-${String(n).padStart(4, "0")}`,
+        const nueva = {
+      id: uid("sol"), codigo: "",
       sedeId: form.sedeId, faseId: form.faseId, activoId: form.activoId,
       descripcion: form.descripcion, criticidad: form.criticidad || "",
       solicitanteId: form.solicitanteId || user.id, fecha: fmtDate(now), hora: fmtHora(now),
@@ -5556,14 +6430,21 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
       estado: "pendiente",
       tecnicoId: tecnicosDeSede(data.usuarios, form.sedeId)[0]?.id || "",
       fechaProgramada: "", fechaCompletada: "",
-      observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
+      observaciones: lineaRegistro(user?.nombre, form.solicitanteId && form.solicitanteId !== user?.id
+        ? `Solicitud creada a nombre de ${usuarioNombre(data.usuarios, form.solicitanteId)}` : "Solicitud creada"),
+      foto: "", fotoSolicitante: form.foto || "", resolucion: "",
       materiales: [], materialesEstado: "", consumos: [], reprogramaciones: [],
       calificacion: 0, comentarioCalif: "",
     };
     setMsg("Enviando…");
-    const ok = await persistYa((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    let codigo = "";
+    const ok = await persistYa((data) => {
+      const n = siguienteNumero(data, "SOL");
+      codigo = codigoDe("SOL", n);
+      return { ...data, solicitudes: [{ ...nueva, codigo }, ...data.solicitudes], solCounter: n + 1 };
+    });
     setMsg(ok
-      ? `Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`
+      ? `Novedad ${codigo} reportada. Queda pendiente de programación.`
       : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
     setTimeout(() => setMsg(""), ok ? 4000 : 8000);
   };
@@ -5593,7 +6474,7 @@ function VistaTecnico({ data, persist, persistYa, user, onLogout, ultimaSync }) 
         </div>
       )}
 
-      {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={misSedes} editable={false} />}
+      {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={misSedes} editable={false} user={user} />}
       {tab === "sedes" && (
         <AdminSedes data={{ ...data, sedes: misSedes }} persist={persist} editable={false} />
       )}
@@ -6721,21 +7602,22 @@ function AdminProgramacion({ data, persist, user, foco }) {
       persist((data) => ({
         ...data,
         solicitudes: data.solicitudes.map((s) =>
-          s.id === item.solicitudId ? { ...s, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: estadoNuevo } : s),
+          s.id === item.solicitudId ? { ...s, tecnicoId, fechaProgramada: fecha, duracionValor, duracionUnidad, estado: estadoNuevo,
+            observaciones: conRegistro(s.observaciones, [lineaRegistro(user?.nombre, `Activada · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)}${fecha ? ` · Programada para ${fmtDMY(fecha)}` : " · sin fecha"}`)]) } : s),
       }));
     } else {
-      const n = data.otCounter || 1;
       const orden = {
-        id: uid("ot"), codigo: `OT-${String(n).padStart(4, "0")}`,
+        id: uid("ot"), codigo: "",
         planId: item.planId, tarea: item.tarea, checklist: checklistDesdePasos(item.procedimientoPasos),
         categoria: item.categoria, frecuencia: item.frecuencia,
         duracionValor, duracionUnidad,
         sedeId: item.sedeId, faseId: item.faseId, activoId: item.activoId,
         tecnicoId, fechaProgramada: fecha, fechaCompletada: "",
-        estado: "programada", observaciones: "", foto: "",
+        estado: "programada", foto: "",
+        observaciones: lineaRegistro(user?.nombre, `Orden creada desde el plan · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)} · Programada para ${fmtDMY(fecha)}`),
         materiales: [], materialesEstado: "", consumos: [], createdAt: fmtDate(new Date()),
       };
-      persist((data) => ({ ...data, ordenes: [...data.ordenes, orden], otCounter: n + 1 }));
+      persist((data) => { const n = siguienteNumero(data, "OT"); return { ...data, ordenes: [...data.ordenes, { ...orden, codigo: codigoDe("OT", n) }], otCounter: n + 1 }; });
     }
     setActivar(null);
   };
@@ -6979,8 +7861,6 @@ function TecnicoMisActividades({ data, persist, user, misSedeIds }) {
 
 function AdminCorrectivos({ data, persist, persistYa, user }) {
   const acciones = useAcciones(data, persist, user);
-  const [fSede, setFSede] = useState("todas");
-  const [q, setQ] = useState("");
   const [nuevo, setNuevo] = useState(false);
   const [msg, setMsg] = useState("");
 
@@ -6989,9 +7869,8 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
      igual que una solicitud del usuario, para que pase por Programación. */
   const crearCorrectivo = async (form) => {
     const now = new Date();
-    const n = data.solCounter || 1;
-    const nueva = {
-      id: uid("sol"), codigo: `SOL-${String(n).padStart(4, "0")}`,
+        const nueva = {
+      id: uid("sol"), codigo: "",
       sedeId: form.sedeId, faseId: form.faseId, activoId: form.activoId,
       descripcion: form.descripcion, criticidad: form.criticidad || "",
       solicitanteId: form.solicitanteId || user.id,
@@ -7000,33 +7879,27 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
       estado: "pendiente",
       tecnicoId: tecnicosDeSede(data.usuarios, form.sedeId)[0]?.id || "",
       fechaProgramada: "", fechaCompletada: "",
-      observaciones: "", foto: "", fotoSolicitante: form.foto || "", resolucion: "",
+      observaciones: lineaRegistro(user?.nombre, form.solicitanteId && form.solicitanteId !== user?.id
+        ? `Solicitud creada a nombre de ${usuarioNombre(data.usuarios, form.solicitanteId)}` : "Solicitud creada"),
+      foto: "", fotoSolicitante: form.foto || "", resolucion: "",
       materiales: [], materialesEstado: "",
       consumos: [], reprogramaciones: [], calificacion: 0, comentarioCalif: "",
     };
     setMsg("Enviando…");
-    const ok = await persistYa((data) => ({ ...data, solicitudes: [nueva, ...data.solicitudes], solCounter: n + 1 }));
+    let codigo = "";
+    const ok = await persistYa((data) => {
+      const n = siguienteNumero(data, "SOL");
+      codigo = codigoDe("SOL", n);
+      return { ...data, solicitudes: [{ ...nueva, codigo }, ...data.solicitudes], solCounter: n + 1 };
+    });
     setMsg(ok
-      ? `Novedad ${nueva.codigo} reportada. Queda pendiente de programación.`
+      ? `Novedad ${codigo} reportada. Queda pendiente de programación.`
       : "No se pudo enviar: revisa tu conexión y vuelve a intentarlo.");
     setTimeout(() => setMsg(""), ok ? 4000 : 8000);
   };
 
   /* Mismas etapas que preventivos y servicios, para que las tres pestañas se
      lean igual: sin programar → programadas → en ejecución → resueltas. */
-  const visibles = data.solicitudes.filter((s) => (fSede === "todas" || s.sedeId === fSede) && coincideBusqueda(s, data, q));
-  const sinProgramar = visibles.filter((s) => s.estado === "pendiente")
-    .sort((a, b) => (CRITICIDAD[b.criticidad]?.nivel || 0) - (CRITICIDAD[a.criticidad]?.nivel || 0));
-  const programadas = visibles.filter((s) => s.estado === "programada")
-    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
-  const enEjecucion = visibles.filter((s) => ["en_proceso", "espera"].includes(s.estado))
-    .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
-  const finalizadas = visibles.filter((s) => s.estado === "completada")
-    .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
-  const tarjetaAct = (sol) => (
-    <TarjetaActividad key={sol.id} rol="admin" data={data} acciones={acciones}
-      item={{ ...sol, tipo: "correctivo", tarea: sol.descripcion }} permitirReasignar />
-  );
 
   return (
     <div className="mt-4 space-y-5">
@@ -7042,37 +7915,13 @@ function AdminCorrectivos({ data, persist, persistYa, user }) {
         </div>
       )}
 
-      <FiltroSedeBusqueda sedes={data.sedes} fSede={fSede} setFSede={setFSede} q={q} setQ={setQ} />
-
       {nuevo && (
         <ModalReportarNovedad data={data} sedes={data.sedes} user={user} elegirSolicitante
           onSubmit={crearCorrectivo} onClose={() => setNuevo(false)} />
       )}
 
-      <SeccionPlegable titulo="Sin Programar" count={sinProgramar.length} color={COLORS.slate}
-        nota="Reportadas, aún sin técnico ni fecha. Se programan desde Programación.">
-        {sinProgramar.map(tarjetaAct)}
-        {sinProgramar.length === 0 && <Empty>Nada esperando programación.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="Programadas" count={programadas.length} color={COLORS.ambar}>
-        {programadas.map(tarjetaAct)}
-        {programadas.length === 0 && <Empty>Sin correctivos programados.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange}>
-        {enEjecucion.map(tarjetaAct)}
-        {enEjecucion.length === 0 && <Empty>Sin correctivos en ejecución.</Empty>}
-      </SeccionPlegable>
-
-
-      <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
-        {finalizadas.slice(0, 5).map(tarjetaAct)}
-        {finalizadas.length > 5 && (
-          <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Reportes.</p>
-        )}
-        {finalizadas.length === 0 && <Empty>Aún no hay correctivos resueltos.</Empty>}
-      </SeccionPlegable>
+      <TablaActividades data={data} tipo="correctivo" acciones={acciones}
+        filas={data.solicitudes.map((x) => ({ ...x, key: x.id, titulo: x.descripcion }))} />
     </div>
   );
 }
@@ -7265,11 +8114,8 @@ function FormDefinirServicio({ srv, onSave, onClose, textoBoton }) {
 
   return (
     <div className="space-y-3">
-      {novedad && (
-        <div className="rounded-md p-2.5" style={{ background: COLORS.cream }}>
-          <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={cSlate}>Detalle de novedad · de la solicitud</p>
-          <p className="text-xs whitespace-pre-wrap" style={cChar}>{novedad}</p>
-        </div>
+      {srv.origenCodigo && (
+        <p className="text-[11px]" style={cSlate}>Creado desde <b style={cChar}>{srv.origenCodigo}</b>{novedad ? ` · ${novedad}` : ""}</p>
       )}
       <Field label="Trabajo a realizar" hint="Título corto que identifica el servicio. Lo define el supervisor.">
         <input autoFocus={!trabajo} value={trabajo} onChange={(e) => setTrabajo(e.target.value)} className={inputCls} style={inputStyle} />
@@ -7325,13 +8171,14 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
     estado: srv.estado || "por_definir",
     fechaCompletada: srv.fechaCompletada || "",
     horaCompletada: srv.horaCompletada || "",
-    observaciones: srv.observaciones || "",
     resolucion: srv.resolucion || "",
     motivoRechazo: srv.motivoRechazo || "",
     fotoSolicitante: fotoSolicitudDe(srv),
     fotos: fotosDe({ ...srv, tipo: "servicio" }),
   }));
   const set = (patch) => setF((x) => ({ ...x, ...patch }));
+  // El registro (observaciones) no se edita: solo se le agrega un comentario
+  const [comentario, setComentario] = useState({});
   const sede = data.sedes.find((x) => x.id === f.sedeId);
   const fase = sede?.fases.find((x) => x.id === f.faseId);
   const area = (k, label, rows = 3, hint) => (
@@ -7350,14 +8197,14 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
       presupuestoAprobado: f.presupuestoAprobado === "" ? null : Number(f.presupuestoAprobado),
     };
     if (srv.desdeSolicitud) patch.foto = f.fotoSolicitante;
-    onSave(patch);
+    const texto = textoComentario(comentario);
+    onSave(patch, texto ? { comentario: { texto, etiqueta: comentario.etiqueta || "" } } : {});
     onClose();
   };
 
   return (
     <div className="space-y-3">
-      <p className="text-[11px] font-semibold uppercase tracking-wide" style={cSlate}>Solicitud</p>
-      {area("descripcion", "Detalle de novedad", 2, srv.desdeSolicitud ? "Heredado de la solicitud." : undefined)}
+      {srv.origenCodigo && <p className="text-[11px]" style={cSlate}>Creado desde <b style={cChar}>{srv.origenCodigo}</b></p>}
       <Field label="Ubicación">
         <div className="space-y-1.5">
           <select value={f.sedeId} onChange={(e) => set({ sedeId: e.target.value, faseId: "", activoId: "" })} className={sel} style={inputStyle}>
@@ -7376,7 +8223,7 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
         </div>
       </Field>
       <div className="grid grid-cols-2 gap-2">
-        <Field label="Fecha y hora de solicitud">
+        <Field label="Fecha y hora de creación">
           <div className="flex gap-1.5">
             <input type="date" value={f.fechaReporte} onChange={(e) => set({ fechaReporte: e.target.value })}
               className="flex-1 min-w-0 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
@@ -7391,9 +8238,8 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
           </select>
         </Field>
       </div>
-      <FotoUploader foto={f.fotoSolicitante} onChange={(v) => set({ fotoSolicitante: v })} label="Foto de la solicitud" carpeta="solicitudes" />
+      {f.fotoSolicitante && <FotoUploader foto={f.fotoSolicitante} onChange={(v) => set({ fotoSolicitante: v })} label="Foto de la solicitud" carpeta="solicitudes" />}
 
-      <p className="text-[11px] font-semibold uppercase tracking-wide pt-2 border-t" style={{ ...cSlate, ...bLine }}>Servicio</p>
       <Field label="Trabajo a realizar">
         <input value={f.trabajo} onChange={(e) => set({ trabajo: e.target.value })} className={inputCls} style={inputStyle} />
       </Field>
@@ -7440,7 +8286,12 @@ function FormEditarServicio({ srv, data, onSave, onClose }) {
             className="w-20 border rounded-md px-1.5 py-1.5 text-xs" style={inputStyle} />
         </div>
       </Field>
-      {area("observaciones", "Observaciones", 2)}
+      <Field label="Registro de la orden">
+        <div className="max-h-48 overflow-y-auto pr-0.5"><RegistroOrden texto={srv.observaciones} /></div>
+      </Field>
+      <Field label="Agregar comentario" hint="Queda en el registro con la fecha y no se puede editar.">
+        <NuevoComentario valor={comentario} onChange={setComentario} etiquetas={[...ETIQUETAS_TECNICO, "correccion"]} />
+      </Field>
       {area("resolucion", "Novedades del servicio", 2)}
       {(f.estado === "rechazada" || f.motivoRechazo) && area("motivoRechazo", "Motivo del rechazo", 2)}
       <FotosEvidencia fotos={f.fotos} onChange={(v) => set({ fotos: v })} carpeta="servicios" />
@@ -7534,177 +8385,463 @@ function BotonDevolverSolicitud({ srv, acciones }) {
   );
 }
 
-/* Servicios por etapa. Todo servicio nace de una solicitud (Pasar a
-   servicio). El supervisor lo define, el cliente lo aprueba y el supervisor
-   asigna proveedor y fecha. En modo "cliente" es la misma vista, de solo
-   consulta, salvo aprobar o rechazar lo que está en aprobación. */
-function AdminServicios({ data, persist, user, modo = "admin" }) {
-  const esCliente = modo === "cliente";
+/* Servicios: una sola tabla para el supervisor, que define, aprueba,
+   programa y cierra cada servicio. Se filtra y ordena desde los encabezados
+   y se seleccionan varios para la proforma (PDF), enviarlos a aprobación,
+   aprobarlos o rechazarlos. */
+/* Servicio rechazado: la orden de origen deja de esperarlo. Si estaba
+   "En espera · servicio" vuelve a En proceso para que el técnico decida cómo
+   seguir; si ya estaba cerrada (paliativa) solo queda anotado. */
+function rechazoEnOrigen(d, servicios, autor) {
+  const porOrigen = new Map(servicios.filter((s) => s.origenId).map((s) => [s.origenId, s]));
+  if (!porOrigen.size) return d;
+  return { ...d, solicitudes: (d.solicitudes || []).map((x) => {
+    const srv = porOrigen.get(x.id);
+    if (!srv || x.servicioId !== srv.id) return x;
+    const linea = lineaRegistro(autor, `Servicio ${srv.codigo} rechazado${srv.motivoRechazo ? `: ${srv.motivoRechazo}` : ""}`, "servicio");
+    if (x.estado === "espera" && x.motivoEspera === "servicio") {
+      return { ...x, estado: "en_proceso", motivoEspera: "", observaciones: conRegistro(x.observaciones, [linea]) };
+    }
+    return { ...x, observaciones: conRegistro(x.observaciones, [linea]) };
+  }) };
+}
+
+const ORDEN_ESTADO_SRV = ["por_definir", "por_aprobar", "aprobada", "programada", "en_proceso", "completada", "rechazada"];
+function AdminServicios({ data, persist, user }) {
   const acciones = useAcciones(data, persist, user);
-  const [modal, setModal] = useState(null);     // {srv, enviar} para definir/editar
-  const [cerrar, setCerrar] = useState(null);   // servicio aprobado por definir
-
+  const [modal, setModal] = useState(null);       // {srv, enviar} para completar/editar
+  const [cerrar, setCerrar] = useState(null);     // aprobado: proveedor y fecha
+  const [gestionar, setGestionar] = useState(null);
+  const [sel, setSel] = useState([]);
+  const [progPdf, setProgPdf] = useState("");
+  const [rechazo, setRechazo] = useState(null);   // texto del motivo mientras se rechaza
+  // Filtros y orden desde los encabezados
+  const [fTexto, setFTexto] = useState("");
   const [fSede, setFSede] = useState("todas");
-  const [q, setQ] = useState("");
-  const servicios = (data.servicios || []).filter((s) => (fSede === "todas" || s.sedeId === fSede) && coincideBusqueda(s, data, q));
-  const set = (id, patch) => persist((data) => ({ ...data, servicios: (data.servicios || []).map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
+  const [fTipo, setFTipo] = useState("todos");
+  const [fEstado, setFEstado] = useState("todos");
+  const [orden, setOrden] = useState({ col: "estado", asc: true });
 
-  // Agrupación por etapa, en el mismo orden que preventivos y correctivos
-  const porDefinir = servicios.filter((s) => s.estado === "por_definir");
-  const porAprobar = servicios.filter((s) => s.estado === "por_aprobar");
-  const aprobados = servicios.filter((s) => s.estado === "aprobada");
-  const programados = servicios.filter((s) => s.estado === "programada");
-  const enEjecucion = servicios.filter((s) => s.estado === "en_proceso");
-  const finalizados = servicios.filter((s) => s.estado === "completada");
-  const rechazados = servicios.filter((s) => s.estado === "rechazada");
+  const set = (ids, fn) => persist((d) => ({ ...d, servicios: (d.servicios || []).map((x) => (ids.includes(x.id) ? fn(x) : x)) }));
+  const completo = (s) => !!(s.trabajo || "").trim() && Number(s.presupuesto) > 0;
+  const valor = (s) => (s.presupuestoAprobado != null && !["por_definir", "por_aprobar", "rechazada"].includes(s.estado)
+    ? Number(s.presupuestoAprobado) : Number(s.presupuesto) || 0);
 
-  const [gestionar, setGestionar] = useState(null);   // id del servicio en curso desplegado
+  const todos = data.servicios || [];
+  const tiposUsados = [...new Set(todos.map((s) => s.tipoProveedor).filter(Boolean))].sort();
+  const t = fTexto.trim().toLowerCase();
+  const visibles = todos
+    .filter((s) => fSede === "todas" || s.sedeId === fSede)
+    .filter((s) => fTipo === "todos" || (s.tipoProveedor || "") === fTipo)
+    .filter((s) => fEstado === "todos" || (fEstado === "activos" ? !["completada", "rechazada"].includes(s.estado) : s.estado === fEstado))
+    .filter((s) => !t || [s.codigo, s.origenCodigo, tituloServicio(s), s.detalle, s.proveedor, ubicacionTexto(data.sedes, s)]
+      .some((v) => String(v || "").toLowerCase().includes(t)))
+    .sort((a, b) => {
+      const k = {
+        codigo: (x) => x.codigo || "",
+        sede: (x) => sedeNombre(data.sedes, x.sedeId),
+        trabajo: (x) => tituloServicio(x).toLowerCase(),
+        tipo: (x) => x.tipoProveedor || "",
+        proveedor: (x) => x.proveedor || "",
+        valor: (x) => valor(x),
+        fecha: (x) => x.fecha || "",
+        estado: (x) => `${ORDEN_ESTADO_SRV.indexOf(x.estado)}`.padStart(2, "0") + (x.codigo || ""),
+      }[orden.col];
+      const va = k(a); const vb = k(b);
+      const r = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "es");
+      return orden.asc ? r : -r;
+    });
+  const seleccionados = todos.filter((s) => sel.includes(s.id));
+  const totalSel = seleccionados.reduce((a, s) => a + valor(s), 0);
+  const totalVis = visibles.reduce((a, s) => a + valor(s), 0);
+  const alternar = (id) => setSel((x) => (x.includes(id) ? x.filter((y) => y !== id) : [...x, id]));
+  const todosMarcados = visibles.length > 0 && visibles.every((s) => sel.includes(s.id));
 
-  /* Fila compacta: código, estado, título y monto en una línea; ubicación,
-     proveedor y fecha en la segunda. El detalle completo se abre con (i). */
-  const tarjeta = (srv, extra) => (
-    <div key={srv.id} className="border rounded-md px-2.5 py-2 text-left" style={{ ...cardStyle, borderLeft: `3px solid ${ESTADOS[srv.estado]?.color || COLORS.line}` }}>
-      <div className="flex items-center gap-2">
-        <span className="text-[10px] font-bold shrink-0" style={cChar}>{srv.codigo}</span>
-        <p className="text-xs font-semibold truncate flex-1 min-w-0" style={cChar} title={tituloServicio(srv)}>{tituloServicio(srv)}</p>
-        <span className="text-xs font-bold shrink-0" style={cOrange}>
-          {!srv.presupuesto && !srv.presupuestoAprobado ? "—"
-            : ["por_definir", "por_aprobar", "rechazada"].includes(srv.estado) ? money(srv.presupuesto)
-            : money(srv.presupuestoAprobado ?? srv.presupuesto)}
-        </span>
-      </div>
-      <div className="flex items-center gap-2 mt-1">
-        <p className="text-[10px] truncate flex-1 min-w-0" style={cSlate}>
-          {sedeNombre(data.sedes, srv.sedeId)}
-          {srv.tipoProveedor ? ` · ${srv.tipoProveedor}` : ""}
-          {srv.proveedor ? ` · ${srv.proveedor}` : ""}
-          {srv.fecha ? ` · ${srv.fecha}` : ""}
-        </p>
-        <div className="flex items-center gap-2 shrink-0">
-          <EstadoChip estado={srv.estado} />
-          <BotonDetalle item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }} size={13} />
-          {!esCliente && (
-            <button onClick={() => setModal({ srv })} title="Editar la ficha del servicio"><Pencil size={12} color={COLORS.slate} /></button>
-          )}
-          {!esCliente && (
-            <DeleteBtn onConfirm={() => {
-              marcarBorrado("servicios", srv.id);
-              persist((data) => ({ ...data, servicios: (data.servicios || []).filter((x) => x.id !== srv.id) }));
-            }} />
-          )}
-        </div>
-      </div>
-      {srv.motivoRechazo && (
-        <p className="text-[10px] mt-1.5 rounded px-2 py-1" style={{ background: `${COLORS.rojo}12`, color: COLORS.charcoal }}>
-          <b>Rechazado:</b> {srv.motivoRechazo}
-        </p>
-      )}
-      {extra}
-    </div>
+  const ahora = () => `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
+  const registrar = (x, texto, de, a) => ({
+    observaciones: conRegistro(x.observaciones, [lineaRegistro(user?.nombre, texto)]),
+    log: [...(x.log || []), { id: uid("log"), titulo: "Estado", detalle: `${ESTADOS[de]?.label || de} → ${ESTADOS[a]?.label || a}`, usuarioId: user?.id || "", sello: ahora() }],
+  });
+  // Acciones en lote: cada una aplica solo a los seleccionados que pueden recibirla
+  const paraAprobar = seleccionados.filter((s) => (s.estado === "por_aprobar" || s.estado === "por_definir") && completo(s));
+  const paraRechazar = seleccionados.filter((s) => ["por_definir", "por_aprobar"].includes(s.estado));
+  const aprobar = () => {
+    const ids = paraAprobar.map((s) => s.id);
+    set(ids, (x) => ({ ...x, estado: "aprobada", presupuestoAprobado: Number(x.presupuesto) || 0, decididoEn: ahora(),
+      ...registrar(x, `Aprobado por ${money(x.presupuesto || 0)}`, x.estado, "aprobada") }));
+    setSel([]);
+  };
+  const rechazar = () => {
+    const ids = paraRechazar.map((s) => s.id);
+    const motivo = (rechazo || "").trim();
+    persist((d) => {
+      const servicios = (d.servicios || []).map((x) => (ids.includes(x.id) ? {
+        ...x, estado: "rechazada", motivoRechazo: motivo, decididoEn: ahora(),
+        ...registrar(x, `Rechazado: ${motivo}`, x.estado, "rechazada"),
+      } : x));
+      return rechazoEnOrigen({ ...d, servicios }, servicios.filter((x) => ids.includes(x.id)), user?.nombre);
+    });
+    setSel([]); setRechazo(null);
+  };
+  const proforma = async () => {
+    if (!seleccionados.length) return;
+    setProgPdf("Preparando…");
+    try {
+      const blob = await generarPDF(construirProformaHTML(seleccionados, data), { onProgreso: setProgPdf });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `proforma-servicios-${fmtDate(new Date())}.pdf`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("[proforma]", e);
+    } finally { setProgPdf(""); }
+  };
+
+  const th = "px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left whitespace-nowrap";
+  const filtroCls = "w-full border rounded px-1.5 py-1 text-[11px] font-normal normal-case tracking-normal bg-white";
+  const encabezado = (col, label, extra = "") => (
+    <th className={`${th} ${extra}`} style={cSlate}>
+      <button type="button" onClick={() => setOrden((o) => ({ col, asc: o.col === col ? !o.asc : true }))}
+        className="inline-flex items-center gap-0.5 uppercase" style={orden.col === col ? cChar : cSlate}>
+        {label}{orden.col === col ? (orden.asc ? " ▲" : " ▼") : ""}
+      </button>
+    </th>
   );
-
-  const botonAccion = (texto, color, onClick) => (
-    <button onClick={onClick} className="w-full mt-1.5 text-[11px] font-semibold py-1.5 rounded text-white" style={{ background: color }}>
-      {texto}
-    </button>
+  const accion = (texto, color, onClick) => (
+    <button type="button" onClick={onClick} className="text-[11px] font-semibold whitespace-nowrap" style={{ color }}>{texto}</button>
   );
-
-  // Programados y en ejecución: el supervisor los despliega para trabajarlos; el cliente solo los consulta
-  const enCurso = (srv) => tarjeta(srv, !esCliente && (
-    gestionar === srv.id ? (
-      <div className="mt-2">
-        <TarjetaActividad
-          item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }}
-          data={data} acciones={acciones} rol="admin" abiertoInicial onCompletada={() => setGestionar(null)} />
-        <button onClick={() => setGestionar(null)} className="w-full mt-1 text-[10px] font-semibold" style={cSlate}>Ocultar</button>
-      </div>
-    ) : botonAccion("Gestionar", COLORS.slate, () => setGestionar(srv.id))
-  ));
-
-  // El cliente revisa la ficha completa solo al desplegarla para decidir
-  const enAprobacion = (srv) => !esCliente ? tarjeta(srv, <BotonDevolverSolicitud srv={srv} acciones={acciones} />) : gestionar === srv.id ? (
-    <div key={srv.id}>
-      <TarjetaServicioCliente srv={srv} data={data} onDecidir={(patch) => { set(srv.id, patch); setGestionar(null); }} />
-      <button onClick={() => setGestionar(null)} className="w-full mt-1 text-[10px] font-semibold" style={cSlate}>Ocultar</button>
-    </div>
-  ) : tarjeta(srv, botonAccion("Revisar y decidir", ESTADOS.por_aprobar.color, () => setGestionar(srv.id)));
+  const btnLote = "text-[11px] font-semibold px-2.5 py-1.5 rounded-md text-white disabled:opacity-40";
 
   return (
-    <div className="mt-4 space-y-3">
+    <div className="mt-4 space-y-2">
       <p className="text-xs" style={cSlate}>
-        {esCliente
-          ? "Servicios externos por etapa. En \"En aprobación\" decides si se autorizan; el resto es para consulta."
-          : "Los servicios nacen de una solicitud (\"Pasar a servicio\" en la actividad). Complétalos y envíalos a aprobación; una vez aprobados, asigna el proveedor y la fecha."}
+        Los servicios nacen de un correctivo ("Requiere servicio" en la bitácora). Complétalos, selecciona varios para la
+        proforma, apruébalos o recházalos y luego asigna proveedor y fecha. Filtra y ordena desde los encabezados.
       </p>
 
-      <FiltroSedeBusqueda sedes={data.sedes} fSede={fSede} setFSede={setFSede} q={q} setQ={setQ}
-        placeholder="Buscar por código, trabajo, proveedor o ubicación…" />
-
-      <SeccionPlegable titulo={esCliente ? "Por definir (supervisor)" : "Por definir · completar y enviar a aprobación"} count={porDefinir.length}
-        color={ESTADOS.por_definir.color} defaultOpen={!esCliente && porDefinir.length > 0}>
-        {porDefinir.map((s) => tarjeta(s, !esCliente && (
-          <>
-            {botonAccion("Completar y enviar a aprobación", ESTADOS.por_definir.color, () => setModal({ srv: s, enviar: true }))}
-            <BotonDevolverSolicitud srv={s} acciones={acciones} />
-          </>
-        )))}
-        {porDefinir.length === 0 && <Empty>Nada por definir.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo={esCliente ? "En aprobación · tu decisión" : "En espera de aprobación del cliente"} count={porAprobar.length}
-        color={ESTADOS.por_aprobar.color} defaultOpen={esCliente}>
-        {porAprobar.map(enAprobacion)}
-        {porAprobar.length === 0 && <Empty>Sin servicios esperando aprobación.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="Aprobados · por definir proveedor y fecha" count={aprobados.length} color={ESTADOS.aprobada.color}>
-        {aprobados.map((s) => tarjeta(s, !esCliente &&
-          botonAccion("Definir proveedor y fecha", COLORS.orange, () => setCerrar(s))))}
-        {aprobados.length === 0 && <Empty>Nada aprobado pendiente de programar.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="Programados" count={programados.length} color={COLORS.ambar}>
-        {programados.map(enCurso)}
-        {programados.length === 0 && <Empty>Sin servicios programados.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange}>
-        {enEjecucion.map(enCurso)}
-        {enEjecucion.length === 0 && <Empty>Sin servicios en ejecución.</Empty>}
-      </SeccionPlegable>
-
-      <SeccionPlegable titulo="Finalizados" count={finalizados.length} color={COLORS.verde} defaultOpen={false}>
-        {finalizados.slice(0, 5).map((s) => tarjeta(s))}
-        {finalizados.length > 5 && (
-          <p className="text-[11px] text-center" style={cSlate}>{finalizados.length - 5} más en Reportes.</p>
-        )}
-        {finalizados.length === 0 && <Empty>Aún no hay servicios finalizados.</Empty>}
-      </SeccionPlegable>
-
-      {rechazados.length > 0 && (
-        <SeccionPlegable titulo="Rechazados" count={rechazados.length} color={COLORS.rojo} defaultOpen={false}
-          nota="No consumen presupuesto, pero quedan registrados para consulta.">
-          {rechazados.map((s) => tarjeta(s))}
-        </SeccionPlegable>
+      {/* Barra de acciones sobre lo seleccionado */}
+      <div className="flex items-center gap-1.5 flex-wrap rounded-md p-2" style={{ background: COLORS.cream }}>
+        <span className="text-xs mr-auto" style={cChar}>
+          {seleccionados.length ? <>{seleccionados.length} seleccionado(s) · <b style={cOrange}>{money(totalSel)}</b></> : "Selecciona servicios para actuar sobre varios a la vez."}
+        </span>
+        <button disabled={!seleccionados.length || !!progPdf} onClick={proforma} className={btnLote} style={{ background: COLORS.charcoal }}>
+          {progPdf || "Proforma PDF"}
+        </button>
+        <button disabled={!paraAprobar.length} onClick={aprobar} className={btnLote} style={{ background: COLORS.verde }}>
+          Aprobar{paraAprobar.length ? ` (${paraAprobar.length})` : ""}
+        </button>
+        <button disabled={!paraRechazar.length} onClick={() => setRechazo("")} className={btnLote} style={{ background: COLORS.rojo }}>
+          Rechazar{paraRechazar.length ? ` (${paraRechazar.length})` : ""}
+        </button>
+      </div>
+      {rechazo !== null && (
+        <div className="flex gap-1.5 items-center rounded-md p-2" style={{ background: `${COLORS.rojo}0D` }}>
+          <input autoFocus value={rechazo} onChange={(e) => setRechazo(e.target.value)} placeholder="Motivo del rechazo"
+            className="flex-1 min-w-0 border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+          <button onClick={() => setRechazo(null)} className="text-[11px] font-semibold px-2" style={cSlate}>Cancelar</button>
+          <button disabled={!rechazo.trim()} onClick={rechazar} className={btnLote} style={{ background: COLORS.rojo }}>Confirmar rechazo</button>
+        </div>
       )}
 
-      {!esCliente && modal && (
-        <Modal title={`${modal.enviar ? "Definir" : "Editar"} ${modal.srv.codigo}`} onClose={() => setModal(null)} wide>
+      <div className="overflow-x-auto border rounded-md bg-white" style={bLine}>
+        <table className="w-full text-xs text-left" style={{ minWidth: 980 }}>
+          <thead>
+            <tr style={{ background: COLORS.cream }}>
+              <th className={th}>
+                <input type="checkbox" checked={todosMarcados} title="Seleccionar todo lo filtrado"
+                  onChange={() => setSel(todosMarcados ? sel.filter((id) => !visibles.some((s) => s.id === id)) : [...new Set([...sel, ...visibles.map((s) => s.id)])])} />
+              </th>
+              {encabezado("codigo", "Código")}
+              {encabezado("sede", "Sede")}
+              {encabezado("trabajo", "Trabajo")}
+              {encabezado("tipo", "Tipo de proveedor")}
+              {encabezado("proveedor", "Proveedor")}
+              {encabezado("valor", "Valor", "text-right")}
+              {encabezado("fecha", "Fecha")}
+              {encabezado("estado", "Estado")}
+              <th className={th} />
+            </tr>
+            <tr style={{ background: COLORS.cream }}>
+              <th className="px-2 pb-1.5" />
+              <th className="px-2 pb-1.5" colSpan={1}>
+                <input value={fTexto} onChange={(e) => setFTexto(e.target.value)} placeholder="Buscar…" className={filtroCls} style={inputStyle} />
+              </th>
+              <th className="px-2 pb-1.5">
+                <select value={fSede} onChange={(e) => setFSede(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todas">Todas</option>
+                  {data.sedes.map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                </select>
+              </th>
+              <th className="px-2 pb-1.5" />
+              <th className="px-2 pb-1.5">
+                <select value={fTipo} onChange={(e) => setFTipo(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todos">Todos</option>
+                  {tiposUsados.map((x) => <option key={x} value={x}>{x}</option>)}
+                </select>
+              </th>
+              <th className="px-2 pb-1.5" />
+              <th className="px-2 pb-1.5" />
+              <th className="px-2 pb-1.5" />
+              <th className="px-2 pb-1.5">
+                <select value={fEstado} onChange={(e) => setFEstado(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todos">Todos</option>
+                  <option value="activos">Abiertos</option>
+                  {ORDEN_ESTADO_SRV.map((e) => <option key={e} value={e}>{ESTADOS[e]?.label || e}</option>)}
+                </select>
+              </th>
+              <th className="px-2 pb-1.5" />
+            </tr>
+          </thead>
+          <tbody>
+            {visibles.length === 0 && (
+              <tr><td colSpan={10} className="px-2 py-4 text-center" style={cSlate}>Ningún servicio coincide con los filtros.</td></tr>
+            )}
+            {visibles.map((s) => {
+              const ok = completo(s);
+              return (
+                <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.line}`, background: sel.includes(s.id) ? `${COLORS.orange}0D` : "white" }}>
+                  <td className="px-2 py-1.5"><input type="checkbox" checked={sel.includes(s.id)} onChange={() => alternar(s.id)} /></td>
+                  <td className="px-2 py-1.5 font-bold whitespace-nowrap" style={cChar}>
+                    {s.codigo}
+                    {s.origenCodigo && <span className="block text-[9px] font-semibold" style={cSlate}>de {s.origenCodigo}</span>}
+                  </td>
+                  <td className="px-2 py-1.5 whitespace-nowrap" style={cChar}>{sedeNombre(data.sedes, s.sedeId)}</td>
+                  <td className="px-2 py-1.5" style={{ ...cChar, maxWidth: 260 }}>
+                    {s.trabajo || <span style={{ color: COLORS.orange }}>Sin definir</span>}
+                    {s.detalle && <span className="text-[10px] line-clamp-2" style={cSlate}>{s.detalle}</span>}
+                    {s.motivoRechazo && s.estado === "rechazada" && <span className="block text-[10px]" style={{ color: COLORS.rojo }}>Rechazo: {s.motivoRechazo}</span>}
+                  </td>
+                  <td className="px-2 py-1.5" style={cSlate}>{s.tipoProveedor || "—"}</td>
+                  <td className="px-2 py-1.5" style={cSlate}>{s.proveedor || "—"}</td>
+                  <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                    <b style={cOrange}>{valor(s) > 0 ? money(valor(s)) : "—"}</b>
+                    {s.presupuestoAprobado != null && Number(s.presupuestoAprobado) !== Number(s.presupuesto) && !["por_definir", "por_aprobar"].includes(s.estado) && (
+                      <span className="block text-[9px]" style={cSlate}>est. {money(s.presupuesto || 0)}</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1.5 whitespace-nowrap" style={cSlate}>{s.fecha || "—"}</td>
+                  <td className="px-2 py-1.5"><EstadoChip estado={s.estado} /></td>
+                  <td className="px-2 py-1.5">
+                    <div className="flex items-center gap-2 justify-end">
+                      {s.estado === "por_definir" && accion(ok ? "Modificar" : "Completar", COLORS.orange, () => setModal({ srv: s, enviar: true }))}
+                      {s.estado === "aprobada" && accion("Programar", COLORS.orange, () => setCerrar(s))}
+                      {["programada", "en_proceso"].includes(s.estado) && accion("Gestionar", COLORS.charcoal, () => setGestionar(s.id))}
+                      <BotonDetalle item={{ ...s, tipo: "servicio", tarea: tituloServicio(s), fechaProgramada: s.fecha }} size={13} />
+                      <button onClick={() => setModal({ srv: s })} title="Editar la ficha del servicio"><Pencil size={12} color={COLORS.slate} /></button>
+                      <DeleteBtn onConfirm={() => {
+                        marcarBorrado("servicios", s.id);
+                        persist((d) => ({ ...d, servicios: (d.servicios || []).filter((x) => x.id !== s.id) }));
+                      }} />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          {visibles.length > 0 && (
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.cream }}>
+                <td colSpan={6} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>{visibles.length} servicio(s)</td>
+                <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap" style={cOrange}>{money(totalVis)}</td>
+                <td colSpan={3} />
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
+
+      {modal && (
+        <Modal title={`${modal.enviar ? "Completar" : "Editar"} ${modal.srv.codigo}`} onClose={() => setModal(null)} wide>
           {modal.enviar ? (
-            <FormDefinirServicio srv={modal.srv} onClose={() => setModal(null)}
-              textoBoton="Enviar a aprobación del cliente"
-              onSave={(f) => set(modal.srv.id, { ...f, estado: "por_aprobar" })} />
+            <FormDefinirServicio srv={modal.srv} onClose={() => setModal(null)} textoBoton="Guardar"
+              onSave={(f) => set([modal.srv.id], (x) => ({ ...x, ...f }))} />
           ) : (
-            <FormEditarServicio srv={modal.srv} data={data} onClose={() => setModal(null)}
-              onSave={(patch) => acciones.updateActividad({ ...modal.srv, tipo: "servicio" }, patch)} />
+            <>
+              <BotonDevolverSolicitud srv={modal.srv} acciones={acciones} />
+              <FormEditarServicio srv={modal.srv} data={data} onClose={() => setModal(null)}
+                onSave={(patch, opciones) => acciones.updateActividad({ ...modal.srv, tipo: "servicio" }, patch, opciones)} />
+            </>
           )}
         </Modal>
       )}
-
-      {!esCliente && cerrar && (
+      {cerrar && (
         <Modal title={`Programar ${cerrar.codigo}`} onClose={() => setCerrar(null)} wide>
           <FormCerrarServicio srv={cerrar} onClose={() => setCerrar(null)}
-            onConfirm={(patch) => set(cerrar.id, patch)} />
+            onConfirm={(patch) => set([cerrar.id], (x) => ({ ...x, ...patch }))} />
+        </Modal>
+      )}
+      {gestionar && (() => {
+        const srv = todos.find((x) => x.id === gestionar);
+        if (!srv) return null;
+        return (
+          <Modal title={`Gestionar ${srv.codigo}`} onClose={() => setGestionar(null)} wide>
+            <TarjetaActividad item={{ ...srv, tipo: "servicio", tarea: tituloServicio(srv), fechaProgramada: srv.fecha }}
+              data={data} acciones={acciones} rol="admin" abiertoInicial onCompletada={() => setGestionar(null)} />
+          </Modal>
+        );
+      })()}
+    </div>
+  );
+}
+
+/* Tabla de actividades (preventivos o correctivos) para el supervisor, igual
+   que Servicios: filtros en los encabezados, orden al tocar cada columna y la
+   orden se abre en una ventana. "filas" ya viene armado por cada pestaña. */
+const ORDEN_ESTADO_ACT = ["pendiente", "programada", "en_proceso", "espera", "completada"];
+function TablaActividades({ data, filas, tipo, acciones, onActivar }) {
+  const hoy = fmtDate(new Date());
+  const [abrir, setAbrir] = useState(null);       // id de la orden abierta
+  const [fTexto, setFTexto] = useState("");
+  const [fSede, setFSede] = useState("todas");
+  const [fTec, setFTec] = useState("todos");
+  const [fEstado, setFEstado] = useState("abiertos");
+  const [orden, setOrden] = useState({ col: "estado", asc: true });
+  const esCorr = tipo === "correctivo";
+  const atrasada = (r) => ESTADOS_ABIERTOS.includes(r.estado) && r.fechaProgramada && r.fechaProgramada < hoy;
+  const diasAtraso = (r) => Math.round((new Date(`${hoy}T00:00:00`) - new Date(`${r.fechaProgramada}T00:00:00`)) / 86400000);
+  const tecnicos = data.usuarios.filter((u) => u.rol === "tecnico");
+
+  const t = fTexto.trim().toLowerCase();
+  const visibles = filas
+    .filter((r) => fSede === "todas" || r.sedeId === fSede)
+    .filter((r) => fTec === "todos" || (fTec === "sin" ? !r.tecnicoId : r.tecnicoId === fTec))
+    .filter((r) => fEstado === "todos" ? true
+      : fEstado === "abiertos" ? r.estado !== "completada"
+      : fEstado === "atrasadas" ? atrasada(r)
+      : r.estado === fEstado)
+    .filter((r) => !t || [r.codigo, r.titulo, ubicacionTexto(data.sedes, r)].some((v) => String(v || "").toLowerCase().includes(t)))
+    .sort((a, b) => {
+      const k = {
+        codigo: (x) => x.codigo || "~",
+        sede: (x) => sedeNombre(data.sedes, x.sedeId),
+        titulo: (x) => (x.titulo || "").toLowerCase(),
+        criticidad: (x) => -(CRITICIDAD[x.criticidad]?.nivel || 0),
+        tecnico: (x) => (x.tecnicoId ? usuarioNombre(data.usuarios, x.tecnicoId) : "~"),
+        fecha: (x) => x.fechaProgramada || "9999",
+        estado: (x) => `${atrasada(x) ? 0 : 1}${ORDEN_ESTADO_ACT.indexOf(x.estado)}${x.fechaProgramada || "9999"}`,
+      }[orden.col];
+      const va = k(a); const vb = k(b);
+      const r = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "es");
+      return orden.asc ? r : -r;
+    });
+
+  const th = "px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-left whitespace-nowrap";
+  const filtroCls = "w-full border rounded px-1.5 py-1 text-[11px] font-normal normal-case tracking-normal bg-white";
+  const encabezado = (col, label) => (
+    <th className={th} style={cSlate}>
+      <button type="button" onClick={() => setOrden((o) => ({ col, asc: o.col === col ? !o.asc : true }))}
+        className="inline-flex items-center gap-0.5 uppercase" style={orden.col === col ? cChar : cSlate}>
+        {label}{orden.col === col ? (orden.asc ? " ▲" : " ▼") : ""}
+      </button>
+    </th>
+  );
+  const vacio = <th className="px-2 pb-1.5" />;
+  const abierta = abrir && (tipo === "preventivo" ? data.ordenes : data.solicitudes).find((x) => x.id === abrir);
+
+  return (
+    <div className="space-y-2">
+      <div className="overflow-x-auto border rounded-md bg-white" style={bLine}>
+        <table className="w-full text-xs text-left" style={{ minWidth: esCorr ? 920 : 860 }}>
+          <thead>
+            <tr style={{ background: COLORS.cream }}>
+              {encabezado("codigo", "Código")}
+              {encabezado("sede", "Sede")}
+              {encabezado("titulo", esCorr ? "Descripción" : "Tarea")}
+              {esCorr && encabezado("criticidad", "Criticidad")}
+              {encabezado("tecnico", "Técnico")}
+              {encabezado("fecha", "Programada")}
+              {encabezado("estado", "Estado")}
+              <th className={th} />
+            </tr>
+            <tr style={{ background: COLORS.cream }}>
+              <th className="px-2 pb-1.5" colSpan={1}>
+                <input value={fTexto} onChange={(e) => setFTexto(e.target.value)} placeholder="Buscar…" className={filtroCls} style={inputStyle} />
+              </th>
+              <th className="px-2 pb-1.5">
+                <select value={fSede} onChange={(e) => setFSede(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todas">Todas</option>
+                  {data.sedes.map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                </select>
+              </th>
+              {vacio}
+              {esCorr && vacio}
+              <th className="px-2 pb-1.5">
+                <select value={fTec} onChange={(e) => setFTec(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="todos">Todos</option>
+                  <option value="sin">Sin asignar</option>
+                  {tecnicos.map((u) => <option key={u.id} value={u.id}>{u.nombre}</option>)}
+                </select>
+              </th>
+              {vacio}
+              <th className="px-2 pb-1.5">
+                <select value={fEstado} onChange={(e) => setFEstado(e.target.value)} className={filtroCls} style={inputStyle}>
+                  <option value="abiertos">Abiertas</option>
+                  <option value="atrasadas">Atrasadas</option>
+                  <option value="todos">Todas</option>
+                  {ORDEN_ESTADO_ACT.map((e) => <option key={e} value={e}>{ESTADOS[e]?.label || e}</option>)}
+                </select>
+              </th>
+              {vacio}
+            </tr>
+          </thead>
+          <tbody>
+            {visibles.length === 0 && (
+              <tr><td colSpan={esCorr ? 8 : 7} className="px-2 py-4 text-center" style={cSlate}>Nada coincide con los filtros.</td></tr>
+            )}
+            {visibles.map((r) => (
+              <tr key={r.key} style={{ borderTop: `1px solid ${COLORS.line}`, background: atrasada(r) ? `${COLORS.rojo}08` : "white" }}>
+                <td className="px-2 py-1.5 font-bold whitespace-nowrap" style={cChar}>
+                  {r.codigo || <span style={cSlate}>—</span>}
+                  {r.origenCodigo && <span className="block text-[9px] font-semibold" style={cSlate}>de {r.origenCodigo}</span>}
+                  {r.servicioCodigo && <span className="block text-[9px] font-semibold" style={{ color: "#7B5EA7" }}>{r.servicioCodigo}</span>}
+                </td>
+                <td className="px-2 py-1.5" style={cChar}>
+                  {sedeNombre(data.sedes, r.sedeId)}
+                  <span className="block text-[10px]" style={cSlate}>{ubicacionTexto(data.sedes, r).split(" · ").slice(0, -1).join(" · ")}</span>
+                </td>
+                <td className="px-2 py-1.5" style={{ ...cChar, maxWidth: 300 }}>
+                  <span className="line-clamp-2">{r.titulo}</span>
+                  {r.cierre === "paliativo" && <span className="text-[9px] font-semibold" style={{ color: COLORS.ambar }}>Paliativa</span>}
+                </td>
+                {esCorr && (
+                  <td className="px-2 py-1.5">
+                    {r.criticidad && CRITICIDAD[r.criticidad] ? <Chip color={CRITICIDAD[r.criticidad].color}>{CRITICIDAD[r.criticidad].label}</Chip> : <span style={cSlate}>—</span>}
+                  </td>
+                )}
+                <td className="px-2 py-1.5 whitespace-nowrap" style={r.tecnicoId ? cChar : cSlate}>{r.tecnicoId ? usuarioNombre(data.usuarios, r.tecnicoId) : "Sin asignar"}</td>
+                <td className="px-2 py-1.5 whitespace-nowrap" style={atrasada(r) ? { color: COLORS.rojo, fontWeight: 600 } : cSlate}>
+                  {r.fechaProgramada || "—"}
+                  {atrasada(r) && <span className="block text-[9px]">{diasAtraso(r)} día(s) de atraso</span>}
+                </td>
+                <td className="px-2 py-1.5"><EstadoChip estado={r.estado} motivo={r.motivoEspera} /></td>
+                <td className="px-2 py-1.5 whitespace-nowrap text-right">
+                  {r.plan ? (
+                    <button type="button" onClick={() => onActivar(r.plan)} className="text-[11px] font-semibold" style={cOrange}>Activar</button>
+                  ) : (
+                    <button type="button" onClick={() => setAbrir(r.id)} className="text-[11px] font-semibold" style={cChar}>Abrir</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          {visibles.length > 0 && (
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.cream }}>
+                <td colSpan={esCorr ? 8 : 7} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>
+                  {visibles.length} {tipo === "preventivo" ? "preventivo(s)" : "correctivo(s)"}
+                  {visibles.some(atrasada) ? ` · ${visibles.filter(atrasada).length} atrasada(s)` : ""}
+                </td>
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
+
+      {abierta && (
+        <Modal title={`${abierta.codigo}`} onClose={() => setAbrir(null)} wide>
+          <TarjetaActividad item={{ ...abierta, tipo, ...(esCorr ? { tarea: abierta.descripcion } : {}) }}
+            data={data} acciones={acciones} rol="admin" permitirReasignar abiertoInicial onCompletada={() => setAbrir(null)} />
         </Modal>
       )}
     </div>
@@ -7714,81 +8851,50 @@ function AdminServicios({ data, persist, user, modo = "admin" }) {
 function AdminPreventivos({ data, persist, user }) {
   const acciones = useAcciones(data, persist, user);
   const [activar, setActivar] = useState(null);
-  const [fSede, setFSede] = useState("todas");
-  const [q, setQ] = useState("");
   const hoy = fmtDate(new Date());
-
-  const coincide = (x, texto) => {
-    if (fSede !== "todas" && x.sedeId !== fSede) return false;
-    if (!q.trim()) return true;
-    const t = q.trim().toLowerCase();
-    return (texto || "").toLowerCase().includes(t) ||
-      (x.codigo || "").toLowerCase().includes(t) ||
-      ubicacionTexto(data.sedes, x).toLowerCase().includes(t);
-  };
 
   // Aún sin orden generada
   const sinProgramar = ordenarPorUrgencia(
-    getPendientes(data).filter((p) => p.tipo === "preventivo" && coincide(p, p.tarea))
+    getPendientes(data).filter((p) => p.tipo === "preventivo")
   );
 
   // Órdenes vivas, separando las que quedaron con fecha vencida
   const abiertas = data.ordenes
-    .filter((o) => ESTADOS_ABIERTOS.includes(o.estado) && coincide(o, o.tarea))
+    .filter((o) => ESTADOS_ABIERTOS.includes(o.estado))
     .sort((a, b) => (a.fechaProgramada || "").localeCompare(b.fechaProgramada || ""));
 
   const atrasadas = abiertas.filter((o) => o.fechaProgramada && o.fechaProgramada < hoy);
   const alDia = abiertas.filter((o) => !o.fechaProgramada || o.fechaProgramada >= hoy);
 
-  const programadas = alDia.filter((o) => o.estado === "programada");
-  const enEjecucion = alDia.filter((o) => ["en_proceso", "espera"].includes(o.estado));
-
-  const finalizadas = data.ordenes
-    .filter((o) => o.estado === "completada" && coincide(o, o.tarea))
-    .sort((a, b) => (b.fechaCompletada || "").localeCompare(a.fechaCompletada || ""));
 
   const confirmar = ({ tecnicoId, fecha, duracionValor, duracionUnidad }) => {
     const item = activar;
-    const n = data.otCounter || 1;
-    persist((data) => ({
+    persist((data) => { const n = siguienteNumero(data, "OT"); return {
       ...data,
       ordenes: [...data.ordenes, {
-        id: uid("ot"), codigo: `OT-${String(n).padStart(4, "0")}`,
+        id: uid("ot"), codigo: codigoDe("OT", n),
         planId: item.planId, tarea: item.tarea, checklist: checklistDesdePasos(item.procedimientoPasos),
         categoria: item.categoria, frecuencia: item.frecuencia,
         duracionValor, duracionUnidad,
         sedeId: item.sedeId, faseId: item.faseId, activoId: item.activoId,
         tecnicoId, fechaProgramada: fecha, fechaCompletada: "",
-        estado: "programada", observaciones: "", foto: "",
+        estado: "programada", foto: "",
+        observaciones: lineaRegistro(user?.nombre, `Orden creada desde el plan · Responsable: ${usuarioNombre(data.usuarios, tecnicoId)} · Programada para ${fmtDMY(fecha)}`),
         materiales: [], materialesEstado: "", consumos: [], reprogramaciones: [],
         createdAt: fmtDate(new Date()),
       }],
       otCounter: n + 1,
-    }));
+    }; });
     setActivar(null);
   };
 
-  const tarjeta = (o) => (
-    <TarjetaActividad key={o.id} item={{ ...o, tipo: "preventivo" }} data={data}
-      acciones={acciones} rol="admin" permitirReasignar />
-  );
 
   return (
     <div className="mt-4">
       <p className="text-xs mb-3" style={cSlate}>
-        Preventivos que siguen abiertos. Los completados se consultan en Reportes.
+        Preventivos del plan: los "Sin programar" se activan desde la tabla. Filtra y ordena desde los encabezados.
       </p>
 
-      <div className="flex gap-2 mb-3 flex-wrap">
-        <input value={q} onChange={(e) => setQ(e.target.value)}
-          placeholder="Buscar por tarea, código o activo…"
-          className="flex-1 min-w-44 border rounded-md px-3 py-2 text-sm outline-none" style={inputStyle} />
-        <select value={fSede} onChange={(e) => setFSede(e.target.value)}
-          className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
-          <option value="todas">Todas las sedes</option>
-          {data.sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
-        </select>
-      </div>
 
       <div className="grid grid-cols-3 gap-3 mb-4">
         <Stat label="Sin Programar" value={sinProgramar.length} icon={<ClipboardList size={14} />} color={COLORS.slate} sub="Sin orden generada" />
@@ -7797,53 +8903,10 @@ function AdminPreventivos({ data, persist, user }) {
         <Stat label="Vigentes" value={alDia.length} icon={<CalendarDays size={14} />} color={COLORS.orange} sub="Programadas o en curso" />
       </div>
 
-      {atrasadas.length > 0 && (
-        <div className="mb-3">
-          <SeccionPlegable titulo="Atrasadas" count={atrasadas.length} color={COLORS.rojo}
-            nota="Su fecha ya pasó, así que no aparecen en el calendario del mes en curso. Ábrelas y usa Reprogramar para moverlas a una fecha válida; el cambio queda en el historial.">
-            {atrasadas.map((o) => (
-              <div key={o.id} className="rounded-md" style={{ boxShadow: `0 0 0 1.5px ${COLORS.rojo}55` }}>
-                <div className="flex items-center gap-1.5 px-2.5 pt-2">
-                  <AlertTriangle size={11} color={COLORS.rojo} />
-                  <span className="text-[10px] font-semibold" style={{ color: COLORS.rojo }}>
-                    Programada el {o.fechaProgramada} · {Math.round((new Date(`${hoy}T00:00:00`) - new Date(`${o.fechaProgramada}T00:00:00`)) / 86400000)} día(s) de atraso
-                  </span>
-                </div>
-                {tarjeta(o)}
-              </div>
-            ))}
-          </SeccionPlegable>
-        </div>
-      )}
-
-      <div className="space-y-3">
-        <SeccionPlegable titulo="Sin Programar" count={sinProgramar.length} color={COLORS.slate}>
-          {sinProgramar.map((item) => (
-            <TarjetaPendiente key={item.key} item={item} sedes={data.sedes} usuarios={data.usuarios}
-              onActivar={() => setActivar(item)} />
-          ))}
-          {sinProgramar.length === 0 && <Empty>Todo el plan preventivo está activado.</Empty>}
-        </SeccionPlegable>
-
-        <SeccionPlegable titulo="Programadas" count={programadas.length} color={COLORS.ambar}>
-          {programadas.map(tarjeta)}
-          {programadas.length === 0 && <Empty>Sin preventivos programados.</Empty>}
-        </SeccionPlegable>
-
-        <SeccionPlegable titulo="En Ejecución" count={enEjecucion.length} color={COLORS.orange}>
-          {enEjecucion.map(tarjeta)}
-          {enEjecucion.length === 0 && <Empty>Sin órdenes preventivas en ejecución.</Empty>}
-        </SeccionPlegable>
-
-
-        <SeccionPlegable titulo="Resueltas" count={finalizadas.length} color={COLORS.verde} defaultOpen={false}>
-          {finalizadas.slice(0, 5).map(tarjeta)}
-          {finalizadas.length > 5 && (
-            <p className="text-[11px] text-center" style={cSlate}>{finalizadas.length - 5} más en Reportes.</p>
-          )}
-          {finalizadas.length === 0 && <Empty>Aún no hay preventivos completados.</Empty>}
-        </SeccionPlegable>
-      </div>
+      <TablaActividades data={data} tipo="preventivo" acciones={acciones} onActivar={setActivar} filas={[
+        ...sinProgramar.map((p) => ({ ...p, key: p.key, codigo: "", titulo: p.tarea, estado: "pendiente", plan: p })),
+        ...data.ordenes.map((o) => ({ ...o, key: o.id, titulo: o.tarea })),
+      ]} />
 
       {activar && (
         <Modal title="Activar preventivo" onClose={() => setActivar(null)}>
@@ -7856,65 +8919,6 @@ function AdminPreventivos({ data, persist, user }) {
 
 /* Decisión del cliente sobre un servicio externo: puede aprobarlo por el
    valor solicitado o por uno distinto, dejarlo en espera o rechazarlo. */
-function TarjetaServicioCliente({ srv, data, onDecidir }) {
-  const [valor, setValor] = useState(srv.presupuesto);
-  const [motivo, setMotivo] = useState("");
-  const [rechazando, setRechazando] = useState(false);
-  const ahora = () => `${fmtDate(new Date())} · ${fmtHora(new Date())}`;
-
-  return (
-    <div className="border rounded-md p-3" style={{ ...cardStyle, borderLeft: `3px solid #7B5EA7` }}>
-      <FichaServicio srv={srv} data={data} />
-
-      <div className="flex items-center justify-between gap-2 mt-2.5 pt-2.5 border-t" style={bLine}>
-        <span className="text-xs" style={cSlate}>Presupuesto solicitado</span>
-        <span className="text-base font-bold" style={cOrange}>{money(srv.presupuesto)}</span>
-      </div>
-
-      {!rechazando ? (
-        <>
-          <Field label="Aprobar por (USD)" hint="Puedes ajustar el monto autorizado.">
-            <input type="number" min="0" step="0.01" value={valor} onChange={(e) => setValor(e.target.value)}
-              className="w-full border rounded-md px-2 py-2 text-sm outline-none" style={inputStyle} />
-          </Field>
-          <div className="grid grid-cols-3 gap-1.5 mt-2">
-            <button onClick={() => onDecidir({ estado: "aprobada", presupuestoAprobado: Number(valor) || 0, decididoEn: ahora() })}
-              className="text-xs font-semibold py-2 rounded-md text-white" style={{ background: COLORS.verde }}>
-              Aprobar
-            </button>
-            <button onClick={() => onDecidir({ estado: "por_aprobar", enEspera: true, decididoEn: ahora() })}
-              className="text-xs font-semibold py-2 rounded-md border" style={{ borderColor: COLORS.ambar, color: COLORS.ambar }}>
-              En espera
-            </button>
-            <button onClick={() => setRechazando(true)}
-              className="text-xs font-semibold py-2 rounded-md border" style={{ borderColor: COLORS.rojo, color: COLORS.rojo }}>
-              Rechazar
-            </button>
-          </div>
-        </>
-      ) : (
-        <div className="mt-2">
-          <Field label="Motivo del rechazo">
-            <textarea value={motivo} onChange={(e) => setMotivo(e.target.value)} rows={2}
-              placeholder="Por qué no se autoriza este servicio" className={`${inputCls} resize-none`} style={inputStyle} />
-          </Field>
-          <div className="flex gap-1.5 mt-2">
-            <button onClick={() => setRechazando(false)}
-              className="flex-1 text-xs font-semibold py-2 rounded-md border" style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>
-              Cancelar
-            </button>
-            <button disabled={!motivo.trim()}
-              onClick={() => onDecidir({ estado: "rechazada", motivoRechazo: motivo.trim(), decididoEn: ahora() })}
-              className="flex-1 text-xs font-semibold py-2 rounded-md text-white disabled:opacity-40" style={{ background: COLORS.rojo }}>
-              Confirmar rechazo
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /* Agrupa los tres tipos de actividad en un solo apartado. */
 function AdminActividades({ data, persist, persistYa, user }) {
   const [sub, setSub] = useState("preventivos");
@@ -8669,7 +9673,7 @@ function DetallePlanAnual({ fila, data }) {
                     {(o.checklist || []).length > 0
                       ? <ChecklistEjecucion items={o.checklist} readOnly compacto />
                       : <p className="text-[11px]" style={cSlate}>Sin pasos registrados en esta ejecución.</p>}
-                    {o.observaciones && <Field label="Observaciones"><ReadOnly>{o.observaciones}</ReadOnly></Field>}
+                    {o.observaciones && <Field label="Registro de la orden"><RegistroOrden texto={o.observaciones} /></Field>}
                     <FotosEvidencia fotos={fotosDe(o)} readOnly />
                   </div>
                 )}
@@ -8723,6 +9727,7 @@ th,td{padding:5px 7px;border:1px solid #E3E0D8}
 thead th{background:#35383C;color:#fff;font-size:7pt;text-transform:uppercase;text-align:left}
 td.v{text-align:right;font-weight:700;width:130px}
 tr.tot td{background:#FDEEE7;color:#ED5B23;font-size:10pt}
+${REG_CSS}
 ${FOTOS_CSS}
 .pie{margin-top:14px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.8pt;color:#8D939B;display:flex;justify-content:space-between}
 </style></head><body>
@@ -8742,7 +9747,7 @@ ${FOTOS_CSS}
 <h2>${esc(tituloServicio(srv))}</h2>
 ${bloque("Detalle de novedad", novedad)}
 ${bloque("Detalle del trabajo", srv.detalle)}
-${bloque("Observaciones", srv.observaciones)}
+${srv.observaciones ? `<h3>Registro de la orden</h3>${registroHTML(srv.observaciones, esc)}` : ""}
 ${bloque("Novedades del servicio", srv.resolucion)}
 ${bloque("Motivo del rechazo", srv.motivoRechazo)}
 ${costos ? `<h3>Valores</h3>
@@ -8752,6 +9757,66 @@ ${costos ? `<h3>Valores</h3>
 </tbody></table>` : ""}
 ${fotosSrv.length ? `<h3>Registro fotográfico (${fotosSrv.length})</h3>${cuadriculaFotos(fotosSrv)}` : ""}
 <div class="pie"><span>Documento generado desde IndustriaMe</span><span>${esc(srv.codigo)}</span></div>
+</body></html>`;
+}
+
+/* Proforma: resumen con el total y, después, el detalle de cada servicio. */
+function construirProformaHTML(servicios, data) {
+  const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const emitido = `${fmtDate(new Date())} ${fmtHora(new Date())}`;
+  const total = servicios.reduce((a, s) => a + (Number(s.presupuesto) || 0), 0);
+  const filas = servicios.map((s, i) => `<tr><td class="c">${i + 1}</td><td><b>${esc(s.codigo)}</b>${s.origenCodigo ? `<br><span class="mut">de ${esc(s.origenCodigo)}</span>` : ""}</td>
+    <td>${esc(sedeNombre(data.sedes, s.sedeId))}<br><span class="mut">${esc(ubicacionTexto(data.sedes, s))}</span></td>
+    <td><b>${esc(tituloServicio(s))}</b>${s.tipoProveedor ? `<br><span class="mut">${esc(s.tipoProveedor)}</span>` : ""}</td>
+    <td class="v">${esc(money(s.presupuesto || 0))}</td></tr>`).join("");
+  const cabecera = (t, sub) => `<div class="hdr"><div><h1>${esc(t)}</h1><p class="sub">${esc(sub)}</p></div>
+    <div class="marca"><img src="${LOGO_REPORTE}" alt="Innova Schools"><br><b>IndustriaMe</b>Gestión de mantenimiento<br>${esc(emitido)}</div></div>`;
+  const detalle = servicios.map((s) => {
+    const novedad = novedadServicio(s);
+    const fotos = listaFotos({ ...s, tipo: "servicio" });
+    return `<div class="pagina">${cabecera("Detalle del servicio", `${s.codigo} · ${sedeNombre(data.sedes, s.sedeId)}`)}
+      <h2>${esc(tituloServicio(s))}</h2>
+      <div class="datos"><div><span>Ubicación</span><b>${esc(ubicacionTexto(data.sedes, s))}</b></div>
+        <div><span>Tipo de proveedor</span><b>${esc(s.tipoProveedor || "—")}</b></div>
+        <div><span>Origen</span><b>${esc(s.origenCodigo || "—")}</b></div>
+        <div><span>Presupuesto estimado</span><b>${esc(money(s.presupuesto || 0))}</b></div></div>
+      ${novedad ? `<h3>Novedad reportada</h3><p class="txt">${esc(novedad)}</p>` : ""}
+      ${s.detalle ? `<h3>Detalle del servicio requerido</h3><p class="txt">${esc(s.detalle)}</p>` : ""}
+      ${fotos.length ? `<h3>Registro fotográfico (${fotos.length})</h3>${cuadriculaFotos(fotos)}` : ""}
+    </div>`;
+  }).join("");
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><title>Proforma de servicios</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;color:#35383C;font-size:9pt;line-height:1.4}
+.pagina{padding:6px}
+.hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #35383C;padding-bottom:8px;margin-bottom:12px}
+.hdr h1{font-size:15pt;text-transform:uppercase;letter-spacing:.02em}
+.hdr .sub{font-size:9pt;color:#787D85;margin-top:2px}
+.marca{text-align:right;font-size:7.5pt;color:#787D85}
+.marca b{display:block;font-size:11pt;color:#ED5B23;letter-spacing:.06em}
+.marca img{max-height:34px;margin-bottom:3px}
+.datos{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;margin-bottom:10px}
+.datos span{display:block;font-size:6.8pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B}
+h2{font-size:11pt;border-left:3px solid #ED5B23;padding:3px 8px;background:#FAF8F4;margin:8px 0 8px}
+h3{font-size:7pt;text-transform:uppercase;letter-spacing:.05em;color:#8D939B;margin:10px 0 3px}
+.txt{white-space:pre-wrap;border:1px solid #E3E0D8;border-radius:2px;padding:6px 8px}
+table{width:100%;border-collapse:collapse;margin-top:6px}
+th,td{padding:5px 7px;border:1px solid #E3E0D8;vertical-align:top}
+thead th{background:#35383C;color:#fff;font-size:7pt;text-transform:uppercase;text-align:left}
+td.v{text-align:right;font-weight:700;width:110px;white-space:nowrap}
+td.c{text-align:center;width:24px}
+.mut{color:#8D939B;font-size:7.5pt}
+tr.tot td{background:#FDEEE7;color:#ED5B23;font-size:10pt;font-weight:700}
+${FOTOS_CSS}
+.pie{margin-top:14px;padding-top:5px;border-top:1px solid #D8D4CB;font-size:6.8pt;color:#8D939B;display:flex;justify-content:space-between}
+</style></head><body>
+<div class="pagina">${cabecera("Proforma de servicios", `${servicios.length} servicio(s) · emitida el ${fmtDMY(fmtDate(new Date()))}`)}
+<table><thead><tr><th>#</th><th>Código</th><th>Sede / ubicación</th><th>Trabajo</th><th style="text-align:right">Valor (USD)</th></tr></thead>
+<tbody>${filas}<tr class="tot"><td colspan="4">Total</td><td class="v">${esc(money(total))}</td></tr></tbody></table>
+<div class="pie"><span>Documento generado desde IndustriaMe</span><span>Valores estimados, sujetos a aprobación</span></div>
+</div>
+${detalle}
 </body></html>`;
 }
 
@@ -8950,7 +10015,329 @@ const claveArticulo = (nombre) => sinTildes(nombre).replace(/\s+/g, " ").trim();
 
 /* Bodega consolidada: una fila por artículo con la cantidad de cada sede en
    su propia columna. Admin edita; el técnico solo consulta y no ve costos. */
-function VistaBodega({ data, persist, sedes, editable }) {
+/* Pedidos de material de todas las órdenes (preventivas, correctivas y
+   servicios) de las sedes dadas, con la orden de la que salen. */
+const COLECCION_TIPO = { ordenes: "preventivo", solicitudes: "correctivo", servicios: "servicio" };
+function necesidadesDe(data, sedeIds) {
+  const filas = [];
+  Object.entries(COLECCION_TIPO).forEach(([col, tipo]) => {
+    (data[col] || []).forEach((o) => {
+      if (sedeIds && !sedeIds.includes(o.sedeId)) return;
+      (o.necesidades || []).forEach((n) => filas.push({ n, orden: o, col, tipo }));
+    });
+  });
+  return filas;
+}
+const textoNecesidad = (n) => `${n.nombre} × ${n.cantidad} ${n.unidad || "u"}`;
+
+/* Datos al marcar un pedido. Comprado: cantidad y valor de la compra.
+   Entregado: a qué artículo de la bodega de la sede ingresa (uno parecido
+   que ya exista o uno nuevo con el nombre corregido), cantidad y valor. */
+function FormNecesidad({ r, modo, stockSede, sede, onConfirm, onCancel }) {
+  const n = r.n;
+  const sugerido = (n.stockId && stockSede.find((a) => a.id === n.stockId))
+    || stockSede.find((a) => claveArticulo(a.nombre) === claveArticulo(n.nombre));
+  const [cantidad, setCantidad] = useState(String(n.cantidadComprada ?? n.cantidad ?? 1));
+  const [valor, setValor] = useState(n.valorCompra ? String(n.valorCompra) : "");
+  const [sel, setSel] = useState(sugerido?.id || "");
+  const [nombre, setNombre] = useState(n.nombre || "");
+  const [unidad, setUnidad] = useState(n.unidad || "u");
+  const art = stockSede.find((a) => a.id === sel);
+  const q = cantNum(cantidad);
+  const v = cantNum(valor);
+  const entrega = modo === "entregado";
+  const valido = q > 0 && (!entrega || art || nombre.trim());
+  const confirmar = () => {
+    const extra = { cantidadComprada: q, ...(v > 0 ? { valorCompra: v } : {}) };
+    if (!entrega) return onConfirm(extra, null);
+    onConfirm(extra, art
+      ? { stockId: art.id, nombre: art.nombre, unidad: art.unidad, cantidad: q, valor: v }
+      : { nombre: nombre.trim(), unidad: unidad.trim() || "u", cantidad: q, valor: v });
+  };
+  const lbl = "text-[10px] font-semibold uppercase tracking-wide block mb-0.5";
+  return (
+    <div className="mt-2 rounded-md p-2.5 space-y-2" style={{ background: COLORS.cream }}>
+      <p className="text-xs font-semibold" style={cChar}>{entrega ? "Entregar e ingresar a bodega" : "Registrar compra"}</p>
+      {entrega && (
+        <div>
+          <span className={lbl} style={cSlate}>Artículo de bodega ({sede})</span>
+          <SelectorArticulo articulos={stockSede} value={sel}
+            textoBoton="Elegir un artículo parecido o escribir el nombre…"
+            onChange={(id) => setSel(id)}
+            onNuevo={(nm) => { setSel(""); setNombre(nm); }} />
+          {art ? (
+            <p className="text-[10px] mt-1" style={cSlate}>
+              Se suma a “{art.nombre}” (hay {art.cantidad} {art.unidad}).{" "}
+              <button type="button" onClick={() => setSel("")} className="font-semibold" style={cOrange}>Crear como artículo nuevo</button>
+            </p>
+          ) : (
+            <div className="flex gap-1.5 mt-1.5">
+              <input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Nombre en bodega"
+                className="flex-1 min-w-0 border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+              <input value={unidad} onChange={(e) => setUnidad(e.target.value)} placeholder="u"
+                className="w-16 border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+            </div>
+          )}
+          {!art && <p className="text-[10px] mt-1" style={cSlate}>Se creará como artículo nuevo en la bodega de la sede.</p>}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        <label>
+          <span className={lbl} style={cSlate}>Cantidad ({art?.unidad || unidad || "u"})</span>
+          <input type="text" inputMode="decimal" value={cantidad} onChange={(e) => setCantidad(e.target.value.replace(/[^0-9.,]/g, ""))}
+            className="w-full border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+        </label>
+        <label>
+          <span className={lbl} style={cSlate}>Valor total de compra (USD)</span>
+          <input type="text" inputMode="decimal" value={valor} onChange={(e) => setValor(e.target.value.replace(/[^0-9.,]/g, ""))}
+            placeholder="0.00" className="w-full border rounded-md px-2 py-1.5 text-xs bg-white" style={inputStyle} />
+        </label>
+      </div>
+      {v > 0 && q > 0 && <p className="text-[10px]" style={cSlate}>{money(v / q)} por {art?.unidad || unidad || "u"}</p>}
+      <div className="flex gap-1.5">
+        <button type="button" onClick={onCancel} className="flex-1 py-1.5 rounded-md text-[11px] font-semibold border bg-white"
+          style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>Cancelar</button>
+        <button type="button" onClick={confirmar} disabled={!valido}
+          className="flex-1 py-1.5 rounded-md text-[11px] font-semibold text-white disabled:opacity-40"
+          style={{ background: entrega ? COLORS.verde : "#3B6EA5" }}>
+          {entrega ? "Entregar e ingresar a bodega" : "Marcar comprado"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* Bodega → Pendientes de compra: lo que los técnicos pidieron al registrar
+   "Requiere material". El supervisor lo marca Comprado → Entregado (o lo
+   cancela); cada cambio queda en el registro de la orden y le llega al
+   técnico asignado como notificación. */
+function PendientesCompra({ data, persist, sedes, editable, user }) {
+  const sedeIds = sedes.map((s) => s.id);
+  const [fEstado, setFEstado] = useState("abiertos");
+  const [fSede, setFSede] = useState("todas");
+  const [q, setQ] = useState("");
+  const todas = necesidadesDe(data, sedeIds);
+  const mes = fmtDate(new Date()).slice(0, 7);
+  const delMes = todas.filter((r) => (r.n.fecha || "").startsWith(mes));
+  const cuenta = (xs, e) => xs.filter((r) => r.n.estado === e).length;
+  const costoDe = (r) => {
+    const art = r.n.stockId && (data.stock || []).find((x) => x.id === r.n.stockId);
+    return art ? (Number(art.costoUnitario) || 0) * (Number(r.n.cantidad) || 0) : 0;
+  };
+  const valorPend = todas.filter((r) => r.n.estado === "pendiente").reduce((a, r) => a + costoDe(r), 0);
+
+  const visibles = todas
+    .filter((r) => fSede === "todas" || r.orden.sedeId === fSede)
+    .filter((r) => fEstado === "todos" || (fEstado === "abiertos" ? ["pendiente", "comprado"].includes(r.n.estado) : r.n.estado === fEstado))
+    .filter((r) => coincideArticulo(`${r.n.nombre} ${r.orden.codigo || ""}`, q))
+    .sort((a, b) => `${b.n.fecha} ${b.n.hora || ""}`.localeCompare(`${a.n.fecha} ${a.n.hora || ""}`));
+
+  const [form, setForm] = useState(null);   // { id, modo: "comprado" | "entregado" }
+
+  /* Cambia el estado del pedido y lo anota en la orden. La orden no cambia
+     de estado: solo queda informada. Al entregar, el material entra a la
+     bodega de la sede (a un artículo existente o como uno nuevo) y el pedido
+     queda enlazado a él, para que el técnico lo cargue al finalizar. */
+  const cambiar = (r, estado, extra = {}, ingreso = null) => {
+    const ahora = new Date();
+    const stockId = ingreso ? (ingreso.stockId || uid("stk")) : null;
+    const detalle = estado === "comprado" && extra.valorCompra ? ` · ${money(extra.valorCompra)}`
+      : ingreso ? ` · ingresó a bodega como “${ingreso.nombre}”` : "";
+    const linea = lineaRegistro(user?.nombre, `${ESTADOS_NECESIDAD[estado].label}: ${textoNecesidad({ ...r.n, ...extra })}${detalle}`, "compra");
+    persist((d) => ({
+      ...d,
+      [r.col]: (d[r.col] || []).map((o) => (o.id !== r.orden.id ? o : {
+        ...o,
+        necesidades: (o.necesidades || []).map((n) => (n.id !== r.n.id ? n : {
+          ...n, ...extra, estado, fechaEstado: fmtDate(ahora), horaEstado: fmtHora(ahora), actualizadoPor: user?.id || "",
+          ...(ingreso ? { stockId, nombreBodega: ingreso.nombre, ingresoNuevo: !ingreso.stockId } : {}),
+        })),
+        observaciones: conRegistro(o.observaciones, [linea]),
+        // Llegó (o se canceló) lo último que faltaba: la etiqueta avisa que ya se puede seguir
+        ...(o.estado === "espera" && o.motivoEspera === "material" && ["entregado", "cancelado"].includes(estado)
+          && !(o.necesidades || []).some((n) => n.id !== r.n.id && ["pendiente", "comprado"].includes(n.estado))
+          ? { motivoEspera: "material listo" } : {}),
+      })),
+      ...(ingreso ? { stock: ingreso.stockId
+        ? (d.stock || []).map((a) => {
+          if (a.id !== stockId) return a;
+          const cant = (Number(a.cantidad) || 0) + ingreso.cantidad;
+          // Costo promedio ponderado con lo que ya había
+          const costo = ingreso.valor > 0
+            ? ((Number(a.cantidad) || 0) * (Number(a.costoUnitario) || 0) + ingreso.valor) / cant
+            : Number(a.costoUnitario) || 0;
+          return { ...a, cantidad: cant, costoUnitario: Math.round(costo * 100) / 100 };
+        })
+        : [...(d.stock || []), {
+          id: stockId, sedeId: r.orden.sedeId, nombre: ingreso.nombre, unidad: ingreso.unidad || "u",
+          cantidad: ingreso.cantidad, costoUnitario: ingreso.valor > 0 ? Math.round((ingreso.valor / ingreso.cantidad) * 100) / 100 : 0, minimo: 0,
+          creadoDesde: { codigo: r.orden.codigo || "", fecha: fmtDate(ahora), usuarioId: user?.id || "" },
+        }] } : {}),
+    }));
+    setForm(null);
+  };
+
+  const filtros = [["abiertos", "Por atender"], ["pendiente", "Pendientes"], ["comprado", "Comprados"], ["entregado", "Entregados"], ["cancelado", "Cancelados"], ["todos", "Todos"]];
+  const btn = "text-[11px] font-semibold px-2 py-1 rounded-md border bg-white";
+
+  return (
+    <div className="mt-4">
+      <p className="text-xs mb-3" style={cSlate}>
+        {editable
+          ? "Material que pidieron los técnicos al registrar “Requiere material” en una orden. Márcalo como comprado y luego entregado: queda en el registro de la orden y se avisa al técnico."
+          : "Material pedido en las órdenes de tus sedes y en qué va la compra."}
+      </p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+        <Stat label="Pendientes de compra" value={cuenta(todas, "pendiente")} icon={<ShoppingCart size={14} />} color={COLORS.orange}
+          sub={editable && valorPend > 0 ? `≈ ${money(valorPend)} (kardex)` : "por comprar"} />
+        <Stat label="Comprados por entregar" value={cuenta(todas, "comprado")} icon={<Layers size={14} />} color="#3B6EA5" sub="falta entregar al técnico" />
+        <Stat label="Pedidos este mes" value={delMes.length} icon={<CalendarDays size={14} />} color={COLORS.charcoal}
+          sub={`${cuenta(delMes, "pendiente")} siguen pendientes`} />
+        <Stat label="Entregados este mes" value={cuenta(delMes, "entregado")} icon={<CheckCircle2 size={14} />} color={COLORS.verde}
+          sub={`${cuenta(delMes, "cancelado")} cancelados`} />
+      </div>
+
+      <div className="flex gap-2 mb-2 flex-wrap">
+        <div className="flex-1 min-w-48 flex items-center gap-1.5 border rounded-md px-2.5 bg-white" style={inputStyle}>
+          <Search size={14} color={COLORS.slate} className="shrink-0" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar material u orden…"
+            className="flex-1 min-w-0 py-2 text-sm outline-none bg-transparent" style={cChar} />
+        </div>
+        {sedes.length > 1 && (
+          <select value={fSede} onChange={(e) => setFSede(e.target.value)} className="border rounded-md px-2 py-2 text-sm bg-white" style={inputStyle}>
+            <option value="todas">Todas las sedes</option>
+            {sedes.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+          </select>
+        )}
+      </div>
+      <div className="flex gap-1 flex-wrap mb-3">
+        {filtros.map(([k, l]) => (
+          <button key={k} onClick={() => setFEstado(k)} className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
+            style={fEstado === k ? { background: COLORS.charcoal, color: "white" } : { border: `1px solid ${COLORS.line}`, color: COLORS.slate }}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      {visibles.length === 0 ? (
+        <Empty>{todas.length ? "Ningún pedido coincide con el filtro." : "No hay material pedido en las órdenes."}</Empty>
+      ) : (
+        <div className="space-y-2">
+          {visibles.map((r) => {
+            const e = ESTADOS_NECESIDAD[r.n.estado] || ESTADOS_NECESIDAD.pendiente;
+            return (
+              <div key={r.n.id} className="border rounded-md p-2.5 bg-white text-left" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${e.color}` }}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold break-words" style={cChar}>
+                      {r.n.nombre} <span className="font-normal" style={cSlate}>× {r.n.cantidad} {r.n.unidad || "u"}</span>
+                    </p>
+                    <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                      <TipoChip tipo={r.tipo} />
+                      <span className="text-[10px] font-bold" style={cOrange}>{r.orden.codigo}</span>
+                      <span className="text-[11px] truncate" style={cChar}>{r.orden.tarea || r.orden.descripcion || r.orden.trabajo || ""}</span>
+                    </div>
+                    <p className="text-[10px] mt-0.5" style={cSlate}>
+                      {sedeNombre(data.sedes, r.orden.sedeId)} · Pedido el {r.n.fecha}{r.n.hora ? ` ${r.n.hora}` : ""} por {usuarioNombre(data.usuarios, r.n.usuarioId)}
+                      {" · "}<span style={{ color: r.n.stockId ? COLORS.slate : COLORS.orange }}>{r.n.stockId ? "Del kardex" : "No está en el kardex"}</span>
+                      {r.n.fechaEstado && r.n.estado !== "pendiente" ? ` · ${e.label} el ${r.n.fechaEstado}` : ""}
+                    </p>
+                  </div>
+                  <span className="flex flex-col items-end gap-1 shrink-0">
+                    <Chip color={e.color}>{e.label}</Chip>
+                    {r.n.noRequerido && <Chip color={COLORS.slate}>{r.n.estado === "cancelado" ? "Anulado por la orden" : "Anulado · pasa a bodega"}</Chip>}
+                  </span>
+                </div>
+                {editable && (r.n.valorCompra > 0 || r.n.nombreBodega) && (
+                  <p className="text-[10px] mt-0.5" style={cSlate}>
+                    {r.n.valorCompra > 0 ? `Compra: ${money(r.n.valorCompra)}` : ""}
+                    {r.n.valorCompra > 0 && r.n.nombreBodega ? " · " : ""}
+                    {r.n.nombreBodega ? `En bodega como “${r.n.nombreBodega}”` : ""}
+                  </p>
+                )}
+                {editable && form?.id === r.n.id ? (
+                  <FormNecesidad r={r} modo={form.modo} sede={sedeNombre(data.sedes, r.orden.sedeId)} stockSede={(data.stock || []).filter((a) => a.sedeId === r.orden.sedeId)}
+                    onCancel={() => setForm(null)}
+                    onConfirm={(extra, ingreso) => cambiar(r, form.modo, extra, ingreso)} />
+                ) : editable && ["pendiente", "comprado"].includes(r.n.estado) && (
+                  <div className="flex gap-1.5 mt-2 flex-wrap">
+                    {r.n.estado === "pendiente" && (
+                      <button onClick={() => setForm({ id: r.n.id, modo: "comprado" })} className={btn} style={{ borderColor: "#3B6EA5", color: "#3B6EA5" }}>Comprado</button>
+                    )}
+                    <button onClick={() => setForm({ id: r.n.id, modo: "entregado" })} className={btn} style={{ borderColor: COLORS.verde, color: COLORS.verde }}>Entregado</button>
+                    <button onClick={() => cambiar(r, "cancelado")} className={btn} style={{ borderColor: COLORS.line, color: COLORS.slate }}>Cancelar</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Bodega → Ingresos: lo que entró a bodega desde Pendientes de compra.
+   Dice si se creó un artículo nuevo o se sumó a uno existente. */
+function IngresosBodega({ data, sedes, editable }) {
+  const filas = necesidadesDe(data, sedes.map((s) => s.id))
+    .filter((r) => r.n.estado === "entregado" && r.n.nombreBodega)
+    .sort((a, b) => `${b.n.fechaEstado} ${b.n.horaEstado || ""}`.localeCompare(`${a.n.fechaEstado} ${a.n.horaEstado || ""}`));
+  return (
+    <div className="mt-4">
+      <p className="text-xs mb-3" style={cSlate}>Material que ingresó a bodega al marcar “Entregado” un pedido de una orden.</p>
+      {filas.length === 0 ? <Empty>Todavía no hay ingresos por compra.</Empty> : (
+        <div className="space-y-2">
+          {filas.map((r) => (
+            <div key={r.n.id} className="border rounded-md p-2.5 bg-white text-left" style={{ borderColor: COLORS.line, borderLeft: `3px solid ${COLORS.verde}` }}>
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-sm font-semibold break-words min-w-0" style={cChar}>
+                  {r.n.nombreBodega} <span className="font-normal" style={cSlate}>+{r.n.cantidadComprada ?? r.n.cantidad} {r.n.unidad || "u"}</span>
+                </p>
+                <Chip color={r.n.ingresoNuevo ? "#3B6EA5" : COLORS.verde}>{r.n.ingresoNuevo ? "Artículo nuevo" : "Sumado a existente"}</Chip>
+              </div>
+              <p className="text-[10px] mt-0.5" style={cSlate}>
+                {sedeNombre(data.sedes, r.orden.sedeId)} · {r.n.fechaEstado}{r.n.horaEstado ? ` ${r.n.horaEstado}` : ""} · {usuarioNombre(data.usuarios, r.n.actualizadoPor)}
+                {editable && r.n.valorCompra > 0 ? ` · ${money(r.n.valorCompra)}` : ""}
+              </p>
+              <p className="text-[10px]" style={cSlate}>
+                Pedido en <b style={cOrange}>{r.orden.codigo}</b> como “{r.n.nombre}” por {usuarioNombre(data.usuarios, r.n.usuarioId)}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Bodega: inventario por sede y, aparte, lo que falta comprar. */
+function VistaBodega({ data, persist, sedes, editable, user, foco }) {
+  const [vista, setVista] = useState(foco?.compras ? "compras" : "inventario");
+  const sedeIds = sedes.map((s) => s.id);
+  const pendientes = necesidadesDe(data, sedeIds).filter((r) => r.n.estado === "pendiente").length;
+  const op = (k, l) => (
+    <button onClick={() => setVista(k)} className="flex-1 sm:flex-none text-xs font-semibold px-3 py-1.5 rounded-md flex items-center justify-center gap-1.5"
+      style={vista === k ? { background: "white", color: COLORS.charcoal, boxShadow: "0 1px 2px rgba(0,0,0,.08)" } : { color: COLORS.slate }}>
+      {l}
+    </button>
+  );
+  return (
+    <div>
+      <div className="mt-4 inline-flex w-full sm:w-auto gap-1 p-1 rounded-lg" style={{ background: COLORS.cream }}>
+        {op("inventario", "Inventario")}
+        {op("ingresos", "Ingresos")}
+        {op("compras", <>Pendientes de compra{pendientes > 0 && <span className="min-w-4 h-4 px-1 rounded-full text-[9px] font-bold text-white flex items-center justify-center" style={{ background: COLORS.orange }}>{pendientes}</span>}</>)}
+      </div>
+      {vista === "compras"
+        ? <PendientesCompra data={data} persist={persist} sedes={sedes} editable={editable} user={user} />
+        : vista === "ingresos" ? <IngresosBodega data={data} sedes={sedes} editable={editable} />
+        : <InventarioBodega data={data} persist={persist} sedes={sedes} editable={editable} />}
+    </div>
+  );
+}
+
+function InventarioBodega({ data, persist, sedes, editable }) {
   const [fSede, setFSede] = useState("todas");
   const [nuevo, setNuevo] = useState(null);
   const [q, setQ] = useState("");
@@ -9033,6 +10420,11 @@ function VistaBodega({ data, persist, sedes, editable }) {
   ) : (
     <span className="break-words font-semibold" style={cChar}>{a.nombre}</span>
   );
+  // Artículos que nacieron de una compra pedida en una orden
+  const chipOrigen = (a) => {
+    const o = a.registros.find((x) => x.creadoDesde)?.creadoDesde;
+    return o ? <span className="block mt-0.5"><Chip color="#3B6EA5">Creado por compra · {o.codigo} · {o.fecha}</Chip></span> : null;
+  };
   const campoUnidad = (a, w) => editable ? (
     <CampoVivo value={a.unidad} onCommit={(v) => setRegistros(ids(a), { unidad: v })}
       className={cellInput} style={{ borderColor: COLORS.line, width: w }} />
@@ -9126,7 +10518,7 @@ function VistaBodega({ data, persist, sedes, editable }) {
           return (
             <div key={a.key} className="border rounded-md p-2.5" style={{ ...cardStyle, borderLeft: `3px solid ${est.color}` }}>
               <div className="flex items-start gap-2">
-                <div className="flex-1 min-w-0 text-sm">{campoNombre(a)}</div>
+                <div className="flex-1 min-w-0 text-sm">{campoNombre(a)}{chipOrigen(a)}</div>
                 {editable && <DeleteBtn onConfirm={() => borrar(a)} />}
               </div>
               <div className="flex items-center justify-between gap-2 mt-1.5">
@@ -9181,7 +10573,7 @@ function VistaBodega({ data, persist, sedes, editable }) {
               const est = META_ESTADO[a.estado];
               return (
                 <tr key={a.key} style={{ background: i % 2 ? COLORS.paper : "white", borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className={td} style={{ minWidth: 200 }}>{campoNombre(a)}</td>
+                  <td className={td} style={{ minWidth: 200 }}>{campoNombre(a)}{chipOrigen(a)}</td>
                   <td className={td}>{campoUnidad(a, 64)}</td>
                   {editable && <td className={td}>{campoCosto(a, 74)}</td>}
                   {columnas.map((s) => (
@@ -10249,7 +11641,7 @@ function construirReporteHTML(items, data, meta) {
           <br><span class="mut">${esc(nom(r.usuarioId))} · ${esc(r.sello)}</span>
         </div>`).join("")
       }</div>` : ""}
-      ${a.observaciones ? `<div class="blk"><h4>Observaciones</h4><p>${esc(a.observaciones)}</p></div>` : ""}
+      ${a.observaciones ? `<div class="blk"><h4>Registro de la orden</h4>${registroHTML(a.observaciones, esc)}</div>` : ""}
       ${a.resolucion ? `<div class="blk"><h4>Resolución</h4><p>${esc(a.resolucion)}</p></div>` : ""}
       ${consumos ? `<div class="blk"><h4>Consumo de bodega</h4><table class="mini"><tbody>${consumos}</tbody></table></div>` : ""}
       ${materiales ? `<div class="blk"><h4>Materiales comprados (registro anterior)</h4><table class="mini"><tbody>${materiales}</tbody></table>${a.materialesLiquidados ? '<p class="mut">Solo consulta: su costo ya está incluido en el consumo de bodega.</p>' : ""}</div>` : ""}
@@ -10297,6 +11689,7 @@ tbody tr:nth-child(even){background:#F7F6F3}
 .blk h4{font-size:8pt;text-transform:uppercase;letter-spacing:.05em;color:#787D85;margin-bottom:3px}
 .blk p,.blk pre{font-size:8.5pt;white-space:pre-wrap;font-family:inherit}
 .mini td{padding:3px 5px;border-bottom:1px solid #EFEDE8;font-size:8pt}
+${REG_CSS}
 .chk{width:100%;border-collapse:collapse}
 .chk td{padding:2.5px 4px;border-bottom:1px solid #F0EEE9;font-size:8pt;vertical-align:top}
 .chk .p-txt{padding-top:6px;border-bottom:none;font-size:8.3pt}
@@ -11152,7 +12545,7 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
       {tab === "actividades" && <AdminActividades data={data} persist={persist} persistYa={persistYa} user={user} />}
       {tab === "planual" && <VistaPlanAnual data={data} sedes={data.sedes} />}
       {tab === "monitoreo" && <VistaMonitoreo data={data} />}
-      {tab === "bodega" && <VistaBodega data={data} persist={persist} sedes={data.sedes} editable />}
+      {tab === "bodega" && <VistaBodega key={focoProg?.ts || 0} data={data} persist={persist} sedes={data.sedes} editable user={user} foco={focoProg} />}
       {tab === "reportes" && <VistaReportes data={data} sedes={data.sedes} user={user} />}
       {tab === "config" && <AdminConfiguracion data={data} persist={persist} setPlanModal={setPlanModal} />}
 
@@ -11167,47 +12560,6 @@ function VistaAdmin({ data, persist, persistYa, user, onLogout, ultimaSync }) {
             onClose={() => setPlanModal(null)} />
         </Modal>
       )}
-    </div>
-   </ProveedorDetalle>
-  );
-}
-
-function VistaCliente({ data, persist, user, onLogout, ultimaSync }) {
-  const [tab, setTab] = useState("dashboard");
-  const [mes, setMes] = useState(mesKey(fmtDate(new Date())));
-
-  const serviciosPorAprobar = (data.servicios || []).filter((s) => s.estado === "por_aprobar");
-  const bandeja = serviciosPorAprobar.length;
-
-  const tabs = [
-    { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={14} /> },
-    { id: "programacion", label: "Programación", icon: <CalendarDays size={14} /> },
-    { id: "planual", label: "Plan anual", icon: <CalendarDays size={14} /> },
-    { id: "servicios", label: bandeja ? `Servicios (${bandeja} por aprobar)` : "Servicios", icon: <Wrench size={14} /> },
-    { id: "presupuesto", label: "Presupuesto", icon: <Wallet size={14} /> },
-    { id: "reportes", label: "Reportes", icon: <Download size={14} /> },
-  ];
-
-  const pendientesCliente = getPendientes(data);
-
-  return (
-   <ProveedorDetalle data={data}>
-    <div className="w-full max-w-screen-2xl mx-auto px-4 lg:px-8 pb-16">
-      <AppHeader user={user} onLogout={onLogout} ultimaSync={ultimaSync} sedesTexto="Todas las sedes · Solo lectura" />
-      <Tabs tabs={tabs} active={tab} onChange={setTab} />
-
-      {tab === "dashboard" && <Dashboard data={data} persist={persist} sedes={data.sedes} mes={mes} onMesChange={setMes} mostrarPresupuesto mostrarCosto mostrarSatisfaccion />}
-      {tab === "presupuesto" && <VistaPresupuesto data={data} mes={mes} onMesChange={setMes} />}
-      {tab === "reportes" && <VistaReportes data={data} sedes={data.sedes} user={user} />}
-
-      {tab === "programacion" && (
-        <PanelProgramacion data={data} sedes={data.sedes} pendientes={pendientesCliente}
-          nota="Vista de solo lectura: aquí puedes consultar toda la programación, pero no puedes activar ni editar nada." />
-      )}
-
-      {tab === "planual" && <VistaPlanAnual data={data} sedes={data.sedes} />}
-
-      {tab === "servicios" && <AdminServicios data={data} persist={persist} user={user} modo="cliente" />}
     </div>
    </ProveedorDetalle>
   );
@@ -11270,6 +12622,35 @@ function notificacionesDe(data, user) {
         id: s.id, codigo: s.codigo, sedeId: s.sedeId, criticidad: s.criticidad, esServicio: !!s.esServicio,
         texto: s.descripcion || "", fecha: s.f, hora: s.h || "",
       }));
+  }
+  /* Material: al supervisor le llega cada pedido nuevo (lo lleva a
+     Pendientes de compra); al técnico, cuando su material se compró o se
+     entregó (lo lleva a la orden). */
+  if (user.rol === "admin" || user.rol === "tecnico") {
+    const sedes = user.rol === "tecnico" ? (user.sedeIds || []) : null;
+    necesidadesDe(data, sedes).forEach(({ n, orden, tipo }) => {
+      const base = { codigo: orden.codigo, sedeId: orden.sedeId, material: true };
+      if (user.rol === "admin" && n.estado === "pendiente" && n.usuarioId !== user.id && n.fecha >= ventana) {
+        lista.push({ ...base, id: `matreq|${n.id}`, texto: `Material pedido: ${textoNecesidad(n)}`,
+          fecha: n.fecha, hora: n.hora || "", tab: "bodega", compras: true });
+      }
+      if (user.rol === "tecnico" && orden.tecnicoId === user.id && ["comprado", "entregado"].includes(n.estado)
+        && n.fechaEstado && n.fechaEstado >= ventana) {
+        lista.push({ ...base, id: `mat|${n.id}|${n.estado}`, texto: `Material ${ESTADOS_NECESIDAD[n.estado].label.toLowerCase()}: ${textoNecesidad(n)}`,
+          fecha: n.fechaEstado, hora: n.horaEstado || "", tab: "mias", orden: { tipo, id: orden.id } });
+      }
+    });
+  }
+  /* Servicio rechazado: avisa al técnico de la orden que lo esperaba. */
+  if (user.rol === "tecnico") {
+    (data.servicios || []).filter((s) => s.estado === "rechazada" && s.origenId).forEach((s) => {
+      const orden = (data.solicitudes || []).find((x) => x.id === s.origenId);
+      const [f, h] = String(s.decididoEn || "").split(" · ");
+      if (!orden || orden.tecnicoId !== user.id || !f || f < ventana) return;
+      lista.push({ id: `srvrech|${s.id}`, codigo: orden.codigo, sedeId: orden.sedeId, material: true, etiqueta: "Servicio rechazado",
+        texto: `Servicio ${s.codigo} rechazado${s.motivoRechazo ? `: ${s.motivoRechazo}` : ""}. La orden volvió a En proceso.`,
+        fecha: f, hora: h || "", tab: "mias", orden: { tipo: "correctivo", id: orden.id } });
+    });
   }
   return lista.sort((a, b) => `${b.fecha} ${b.hora}`.localeCompare(`${a.fecha} ${a.hora}`));
 }
@@ -11340,7 +12721,7 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
     marcar([n.id]);
     if (esSolicitante) { setDetalle(n); return; }
     setAbierto(false);
-    setDestino((d) => ({ tab: "programacion", ts: (d?.ts || 0) + 1, id: n.id }));
+    setDestino((d) => ({ tab: n.tab || "programacion", ts: (d?.ts || 0) + 1, id: n.id, orden: n.orden, compras: n.compras }));
   };
   const calificar = (id, patch) =>
     persist((data) => ({ ...data, solicitudes: data.solicitudes.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
@@ -11349,22 +12730,34 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
   const solicitud = detalle && (data.solicitudes || []).find((s) => s.id === detalle.id);
   const servicio = detalle && !solicitud && (data.servicios || []).find((s) => s.id === detalle.id);
 
+  /* Estado actual de la orden de cada aviso, para verlo sin abrirla */
+  const ordenDe = (x) => {
+    if (x.orden) {
+      const col = x.orden.tipo === "preventivo" ? "ordenes" : x.orden.tipo === "servicio" ? "servicios" : "solicitudes";
+      return (data[col] || []).find((o) => o.id === x.orden.id);
+    }
+    return (data.solicitudes || []).find((o) => o.id === x.id) || (data.servicios || []).find((o) => o.id === x.id);
+  };
   const fila = (x, leida) => (
     <button key={x.id} onClick={() => abrirDetalle(x)}
       className="w-full text-left border rounded-md p-2.5 hover:shadow-sm transition-shadow"
-      style={{ ...cardStyle, opacity: leida ? 0.65 : 1, borderLeft: `3px solid ${esSolicitante ? COLORS.verde : (CRITICIDAD[x.criticidad]?.color || COLORS.slate)}` }}>
+      style={{ ...cardStyle, opacity: leida ? 0.65 : 1, borderLeft: `3px solid ${esSolicitante ? COLORS.verde : x.material ? COLORS.orange : (CRITICIDAD[x.criticidad]?.color || COLORS.slate)}` }}>
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-1.5 flex-wrap">
           {!leida && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: COLORS.rojo }} />}
           <span className="text-[11px] font-bold" style={cOrange}>{x.codigo}</span>
           {x.esServicio && <TipoChip tipo="servicio" />}
+          {x.material && <Chip color={COLORS.orange}>{x.etiqueta || "Material"}</Chip>}
           {!esSolicitante && x.criticidad && CRITICIDAD[x.criticidad] && (
             <Chip color={CRITICIDAD[x.criticidad].color}>{CRITICIDAD[x.criticidad].label}</Chip>
           )}
           <span className="text-[11px] font-semibold" style={cChar}>{sedeNombre(data.sedes, x.sedeId)}</span>
         </div>
-        <span className="text-[10px]" style={cSlate}>
-          {esSolicitante ? "Finalizada el " : ""}{x.fecha}{x.hora ? ` · ${x.hora}` : ""}
+        <span className="flex items-center gap-1.5">
+          {!esSolicitante && ordenDe(x) && <EstadoChip estado={ordenDe(x).estado} motivo={ordenDe(x).motivoEspera} />}
+          <span className="text-[10px]" style={cSlate}>
+            {esSolicitante ? "Finalizada el " : ""}{x.fecha}{x.hora ? ` · ${x.hora}` : ""}
+          </span>
         </span>
       </div>
       <p className="text-xs mt-1" style={cChar}>{x.texto.length > 140 ? `${x.texto.slice(0, 138)}…` : x.texto}</p>
@@ -11379,12 +12772,12 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
       {children}
 
       {abierto && !detalle && (
-        <Modal title={esSolicitante ? "Solicitudes finalizadas" : "Solicitudes nuevas"} onClose={() => setAbierto(false)} wide>
+        <Modal title={esSolicitante ? "Solicitudes finalizadas" : "Notificaciones"} onClose={() => setAbierto(false)} wide>
           <div className="flex items-center justify-between gap-2 mb-3">
             <p className="text-xs" style={cSlate}>
               {sinLeer.length === 0
                 ? "No tienes notificaciones sin leer."
-                : `${sinLeer.length} sin leer. ${esSolicitante ? "Toca una para ver el detalle y calificarla." : "Toca una para ir a Programación."}`}
+                : `${sinLeer.length} sin leer. ${esSolicitante ? "Toca una para ver el detalle y calificarla." : "Toca una para abrirla."}`}
             </p>
             {sinLeer.length > 0 && (
               <button onClick={() => marcar(sinLeer.map((n) => n.id))} className="text-[11px] font-semibold shrink-0" style={cOrange}>
@@ -11475,7 +12868,16 @@ export default function App() {
     switch (user.rol) {
       case "solicitante": return <VistaSolicitante data={data} persist={persist} persistYa={persistYa} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
       case "tecnico": return <VistaTecnico data={data} persist={persist} persistYa={persistYa} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
-      case "cliente": return <VistaCliente data={data} persist={persist} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
+      // El perfil Cliente se retiró: todo lo gestiona el supervisor
+      case "cliente": return (
+        <div className="min-h-screen flex items-center justify-center p-6">
+          <div className="max-w-sm text-center space-y-3">
+            <p className="text-sm font-semibold" style={cChar}>Este perfil ya no está disponible.</p>
+            <p className="text-xs" style={cSlate}>La aprobación de servicios ahora la gestiona el supervisor. Si necesitas acceso, pídeselo al administrador.</p>
+            <button onClick={() => setUser(null)} className="text-xs font-semibold px-3 py-2 rounded-md border" style={{ borderColor: COLORS.line, color: COLORS.charcoal }}>Salir</button>
+          </div>
+        </div>
+      );
       default: return <VistaAdmin data={data} persist={persist} persistYa={persistYa} user={user} onLogout={() => setUser(null)} ultimaSync={ultimaSync} />;
     }
   };
