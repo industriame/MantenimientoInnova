@@ -1813,8 +1813,13 @@ function useAcciones(data, persist, usuario) {
           };
         }) };
       };
+      const rechazaOrigen = (r) => {
+        if (item.tipo !== "servicio" || patch.estado !== "rechazada" || item.estado === "rechazada") return r;
+        const srv = (r.servicios || []).find((x) => x.id === item.id);
+        return srv ? rechazoEnOrigen(r, [srv], autor) : r;
+      };
       const persistir = (fn) => persist((d) => {
-        const r = cierraOrigen(conServicio(derivar(fn(d))));
+        const r = rechazaOrigen(cierraOrigen(conServicio(derivar(fn(d)))));
         if (!consumos.length) return r;
         const resta = {};
         consumos.forEach((c) => { resta[c.stockId] = (resta[c.stockId] || 0) + c.cantidad; });
@@ -5880,7 +5885,10 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
               {item.criticidad && <Chip color={CRITICIDAD[item.criticidad].color}>{CRITICIDAD[item.criticidad].label}</Chip>}
               {item.cierre === "paliativo" && <Chip color={COLORS.ambar}>Paliativa{item.derivadaCodigo ? ` → ${item.derivadaCodigo}` : ""}</Chip>}
               {item.origenCodigo && <Chip color={COLORS.ambar}>Definitiva de {item.origenCodigo}</Chip>}
-              {item.servicioCodigo && <Chip color="#7B5EA7">Servicio {item.servicioCodigo}</Chip>}
+              {item.servicioCodigo && (() => {
+                const rech = (data.servicios || []).find((x) => x.id === item.servicioId)?.estado === "rechazada";
+                return <Chip color={rech ? COLORS.rojo : "#7B5EA7"}>Servicio {item.servicioCodigo}{rech ? " · rechazado" : ""}</Chip>;
+              })()}
             </div>
             <p className="font-semibold text-sm mt-0.5 truncate" style={cChar}>{item.tarea}</p>
             <p className="text-xs truncate" style={cSlate}>{ubicacionTexto(data.sedes, item)}</p>
@@ -8394,6 +8402,23 @@ function BotonDevolverSolicitud({ srv, acciones }) {
    programa y cierra cada servicio. Se filtra y ordena desde los encabezados
    y se seleccionan varios para la proforma (PDF), enviarlos a aprobación,
    aprobarlos o rechazarlos. */
+/* Servicio rechazado: la orden de origen deja de esperarlo. Si estaba
+   "En espera · servicio" vuelve a En proceso para que el técnico decida cómo
+   seguir; si ya estaba cerrada (paliativa) solo queda anotado. */
+function rechazoEnOrigen(d, servicios, autor) {
+  const porOrigen = new Map(servicios.filter((s) => s.origenId).map((s) => [s.origenId, s]));
+  if (!porOrigen.size) return d;
+  return { ...d, solicitudes: (d.solicitudes || []).map((x) => {
+    const srv = porOrigen.get(x.id);
+    if (!srv || x.servicioId !== srv.id) return x;
+    const linea = lineaRegistro(autor, `Servicio ${srv.codigo} rechazado${srv.motivoRechazo ? `: ${srv.motivoRechazo}` : ""}`, "servicio");
+    if (x.estado === "espera" && x.motivoEspera === "servicio") {
+      return { ...x, estado: "en_proceso", motivoEspera: "", observaciones: conRegistro(x.observaciones, [linea]) };
+    }
+    return { ...x, observaciones: conRegistro(x.observaciones, [linea]) };
+  }) };
+}
+
 const ORDEN_ESTADO_SRV = ["por_definir", "por_aprobar", "aprobada", "programada", "en_proceso", "completada", "rechazada"];
 function AdminServicios({ data, persist, user }) {
   const acciones = useAcciones(data, persist, user);
@@ -8451,14 +8476,8 @@ function AdminServicios({ data, persist, user }) {
     log: [...(x.log || []), { id: uid("log"), titulo: "Estado", detalle: `${ESTADOS[de]?.label || de} → ${ESTADOS[a]?.label || a}`, usuarioId: user?.id || "", sello: ahora() }],
   });
   // Acciones en lote: cada una aplica solo a los seleccionados que pueden recibirla
-  const paraEnviar = seleccionados.filter((s) => s.estado === "por_definir" && completo(s));
   const paraAprobar = seleccionados.filter((s) => (s.estado === "por_aprobar" || s.estado === "por_definir") && completo(s));
   const paraRechazar = seleccionados.filter((s) => ["por_definir", "por_aprobar"].includes(s.estado));
-  const enviar = () => {
-    const ids = paraEnviar.map((s) => s.id);
-    set(ids, (x) => ({ ...x, estado: "por_aprobar", ...registrar(x, "Enviado a aprobación", x.estado, "por_aprobar") }));
-    setSel([]);
-  };
   const aprobar = () => {
     const ids = paraAprobar.map((s) => s.id);
     set(ids, (x) => ({ ...x, estado: "aprobada", presupuestoAprobado: Number(x.presupuesto) || 0, decididoEn: ahora(),
@@ -8468,8 +8487,13 @@ function AdminServicios({ data, persist, user }) {
   const rechazar = () => {
     const ids = paraRechazar.map((s) => s.id);
     const motivo = (rechazo || "").trim();
-    set(ids, (x) => ({ ...x, estado: "rechazada", motivoRechazo: motivo, decididoEn: ahora(),
-      ...registrar(x, `Rechazado: ${motivo}`, x.estado, "rechazada") }));
+    persist((d) => {
+      const servicios = (d.servicios || []).map((x) => (ids.includes(x.id) ? {
+        ...x, estado: "rechazada", motivoRechazo: motivo, decididoEn: ahora(),
+        ...registrar(x, `Rechazado: ${motivo}`, x.estado, "rechazada"),
+      } : x));
+      return rechazoEnOrigen({ ...d, servicios }, servicios.filter((x) => ids.includes(x.id)), user?.nombre);
+    });
     setSel([]); setRechazo(null);
   };
   const proforma = async () => {
@@ -8506,7 +8530,7 @@ function AdminServicios({ data, persist, user }) {
     <div className="mt-4 space-y-2">
       <p className="text-xs" style={cSlate}>
         Los servicios nacen de un correctivo ("Requiere servicio" en la bitácora). Complétalos, selecciona varios para la
-        proforma, envíalos a aprobación o apruébalos, y luego asigna proveedor y fecha. Filtra y ordena desde los encabezados.
+        proforma, apruébalos o recházalos y luego asigna proveedor y fecha. Filtra y ordena desde los encabezados.
       </p>
 
       {/* Barra de acciones sobre lo seleccionado */}
@@ -8516,9 +8540,6 @@ function AdminServicios({ data, persist, user }) {
         </span>
         <button disabled={!seleccionados.length || !!progPdf} onClick={proforma} className={btnLote} style={{ background: COLORS.charcoal }}>
           {progPdf || "Proforma PDF"}
-        </button>
-        <button disabled={!paraEnviar.length} onClick={enviar} className={btnLote} style={{ background: ESTADOS.por_aprobar.color }}>
-          Enviar a aprobación{paraEnviar.length ? ` (${paraEnviar.length})` : ""}
         </button>
         <button disabled={!paraAprobar.length} onClick={aprobar} className={btnLote} style={{ background: COLORS.verde }}>
           Aprobar{paraAprobar.length ? ` (${paraAprobar.length})` : ""}
@@ -12545,6 +12566,17 @@ function notificacionesDe(data, user) {
       }
     });
   }
+  /* Servicio rechazado: avisa al técnico de la orden que lo esperaba. */
+  if (user.rol === "tecnico") {
+    (data.servicios || []).filter((s) => s.estado === "rechazada" && s.origenId).forEach((s) => {
+      const orden = (data.solicitudes || []).find((x) => x.id === s.origenId);
+      const [f, h] = String(s.decididoEn || "").split(" · ");
+      if (!orden || orden.tecnicoId !== user.id || !f || f < ventana) return;
+      lista.push({ id: `srvrech|${s.id}`, codigo: orden.codigo, sedeId: orden.sedeId, material: true, etiqueta: "Servicio rechazado",
+        texto: `Servicio ${s.codigo} rechazado${s.motivoRechazo ? `: ${s.motivoRechazo}` : ""}. La orden volvió a En proceso.`,
+        fecha: f, hora: h || "", tab: "mias", orden: { tipo: "correctivo", id: orden.id } });
+    });
+  }
   return lista.sort((a, b) => `${b.fecha} ${b.hora}`.localeCompare(`${a.fecha} ${a.hora}`));
 }
 
@@ -12632,7 +12664,7 @@ function ProveedorNotificaciones({ data, persist, user, children }) {
           {!leida && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: COLORS.rojo }} />}
           <span className="text-[11px] font-bold" style={cOrange}>{x.codigo}</span>
           {x.esServicio && <TipoChip tipo="servicio" />}
-          {x.material && <Chip color={COLORS.orange}>Material</Chip>}
+          {x.material && <Chip color={COLORS.orange}>{x.etiqueta || "Material"}</Chip>}
           {!esSolicitante && x.criticidad && CRITICIDAD[x.criticidad] && (
             <Chip color={CRITICIDAD[x.criticidad].color}>{CRITICIDAD[x.criticidad].label}</Chip>
           )}
