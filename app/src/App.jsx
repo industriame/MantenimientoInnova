@@ -3438,6 +3438,54 @@ function textoRegistro(entradas) {
     : `${e.fecha} · ${e.autor} · ${e.etiqueta ? `[${e.etiqueta}] ` : ""}${String(e.texto || "").replace(/\s*\n+\s*/g, " ").trim()}`)).join("\n");
 }
 
+/* Material pedido en la orden ("Requiere material"), cada pedido con su
+   estado. La bitácora solo guarda el texto: borrar o corregir esa línea no
+   cambia el pedido. Para quitar uno que sobra (por ejemplo, pedido dos
+   veces) el supervisor lo anula aquí y sale de Pendientes de compra. */
+function PedidosOrden({ item, acciones, supervisor }) {
+  const [anulando, setAnulando] = useState(null);
+  const pedidos = item.necesidades || [];
+  if (!pedidos.length) return null;
+  const abierto = (n) => ["pendiente", "comprado"].includes(n.estado) && !n.noRequerido;
+  const anular = async (n) => {
+    setAnulando(null);
+    const ahora = new Date();
+    const quedan = pedidos.some((x) => x.id !== n.id && abierto(x));
+    const patch = item.estado === "espera" && item.motivoEspera === "material" && !quedan ? { motivoEspera: "material listo" } : {};
+    await acciones.updateActividad(item, patch, {
+      mapNecesidades: (x) => (x.id !== n.id ? x : x.estado === "pendiente"
+        ? { ...x, estado: "cancelado", noRequerido: true, fechaEstado: fmtDate(ahora), horaEstado: fmtHora(ahora), actualizadoPor: acciones.usuario?.id || "" }
+        : { ...x, noRequerido: true }),
+      comentario: { texto: `Pedido anulado: ${textoNecesidad(n)}${n.estado === "comprado" ? " (ya comprado, pasa a bodega)" : ""}`, etiqueta: "correccion" },
+    });
+  };
+  return (
+    <div className="border rounded-md bg-white text-left" style={{ borderColor: COLORS.line }}>
+      {pedidos.map((n, k) => {
+        const e = ESTADOS_NECESIDAD[n.estado] || ESTADOS_NECESIDAD.pendiente;
+        return (
+          <div key={n.id} className="flex items-center gap-1.5 px-2 py-1 text-[11px]" style={{ borderTop: k ? `1px solid ${COLORS.line}` : "none" }}>
+            <span className="flex-1 min-w-0 break-words" style={n.noRequerido || n.estado === "cancelado" ? { ...cSlate, textDecoration: "line-through" } : cChar}>
+              <b>{n.nombre}</b> × {n.cantidad} {n.unidad || "u"}
+              <span className="text-[10px]" style={cSlate}> · {String(n.fecha || "").split("-").reverse().join("/")} {n.hora || ""}</span>
+            </span>
+            <Chip color={e.color}>{n.noRequerido && n.estado !== "cancelado" ? "Anulado · a bodega" : e.label}</Chip>
+            {supervisor && abierto(n) && (anulando === n.id ? (
+              <span className="flex items-center gap-1 shrink-0 text-[10px] font-semibold">
+                <button type="button" onClick={() => anular(n)} style={{ color: COLORS.rojo }}>Anular</button>
+                <button type="button" onClick={() => setAnulando(null)} style={cSlate}>No</button>
+              </span>
+            ) : (
+              <button type="button" onClick={() => setAnulando(n.id)} className="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded border bg-white"
+                style={{ borderColor: COLORS.line, color: COLORS.slate }}>Anular</button>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /* Registro de la orden en pantalla: una sola lista compacta, de lo más
    reciente a lo más antiguo, una línea por anotación. Con onEditar (el
    supervisor en modo corrección) cada línea se puede corregir o borrar. */
@@ -3488,6 +3536,7 @@ function RegistroOrden({ texto, vacio = "Sin anotaciones todavía.", alto = 200,
             </p>
             {onEditar && (borrando === e.i ? (
               <span className="flex items-center gap-1 shrink-0 text-[10px] font-semibold">
+                {e.etiqueta === ETIQUETAS_REGISTRO.material.label && <span className="font-normal" style={cSlate}>No anula el pedido ·</span>}
                 <button type="button" onClick={() => guardar(todas.filter((_, j) => j !== e.i))} style={{ color: COLORS.rojo }}>Borrar</button>
                 <button type="button" onClick={() => setBorrando(null)} style={cSlate}>No</button>
               </span>
@@ -6242,6 +6291,11 @@ function TarjetaActividad({ item, data, acciones, rol = "tecnico", abiertoInicia
             </select>
           </Field>}
 
+          {(item.necesidades || []).length > 0 && (
+            <Field label="Material pedido" hint={esSupervisor ? "Para quitar un pedido que sobra, anúlalo aquí: borrar la línea de la bitácora no lo anula." : undefined}>
+              <PedidosOrden item={item} acciones={acciones} supervisor={esSupervisor} />
+            </Field>
+          )}
           <Field label="Bitácora de la orden" hint={corrige ? "Modo corrección: puedes corregir o borrar cada línea." : undefined}>
             <RegistroOrden texto={item.observaciones}
               onEditar={corrige ? (t) => acciones.updateActividad(item, { observaciones: t }, { sinRegistro: true }) : undefined} />
@@ -10904,8 +10958,8 @@ function InventarioBodega({ data, persist, sedes, editable }) {
     <span className="flex flex-col items-start gap-0.5">
       {editable ? (
         <CampoVivo value={a.sku} onCommit={(v) => v.trim() && setRegistros(ids(a), { sku: v.trim().toUpperCase() })}
-          className="border rounded px-1 py-0.5 text-[11px] font-mono w-20 bg-white" style={{ borderColor: COLORS.line, ...cSlate }} />
-      ) : <span className="text-[11px] font-mono whitespace-nowrap" style={cSlate}>{a.sku || "—"}</span>}
+          className="border rounded px-1 py-0.5 text-[10px] font-mono bg-white" style={{ borderColor: COLORS.line, ...cSlate, width: 72 }} />
+      ) : <span className="text-[10px] font-mono whitespace-nowrap" style={cSlate}>{a.sku || "—"}</span>}
       {skuRepetido.has(a.sku) && <Chip color={COLORS.rojo}>SKU repetido</Chip>}
     </span>
   );
@@ -10938,7 +10992,7 @@ function InventarioBodega({ data, persist, sedes, editable }) {
   const vacio = enAlcance.length === 0
     ? (fSede === "todas" ? "Aún no hay artículos en bodega." : "Esta sede aún no tiene artículos en bodega.")
     : "Ningún artículo coincide con la búsqueda.";
-  const nCols = 3 + columnas.length + (editable ? 3 : 0);
+  const nCols = 4 + columnas.length + (editable ? 3 : 0);
 
   return (
     <div className="mt-4">
@@ -10978,30 +11032,25 @@ function InventarioBodega({ data, persist, sedes, editable }) {
         )}
       </div>
       <div className="border rounded-md overflow-x-auto bg-white" style={bLine}>
-        <table className="w-full border-collapse text-xs text-left" style={{ minWidth: 470 + columnas.length * 78 + (editable ? 200 : 0) }}>
+        <table className="w-full border-collapse text-xs text-left" style={{ minWidth: 380 + columnas.length * 64 + (editable ? 170 : 0) }}>
           <thead>
             <tr style={{ background: COLORS.cream }}>
-              {th("sku", "SKU")}
-              {th("nombre", "Artículo")}
-              <th className={thPlano} style={cSlate}>Unidad</th>
-              {editable && th("costo", "Costo u.", "text-right")}
+              {th("nombre", "Artículo", "sticky left-0 z-[1] bg-[inherit]")}
               {columnas.map((s) => (
-                <th key={s.id} className={`${thPlano} text-center`} style={{ ...cSlate, whiteSpace: "normal", minWidth: 70 }}>{s.nombre}</th>
+                <th key={s.id} className={`${thPlano} text-center`} style={{ ...cSlate, whiteSpace: "normal", minWidth: 60 }}>{s.nombre}</th>
               ))}
               {columnas.length > 1 && th("cantidad", "Total", "text-center")}
+              {editable && th("costo", "Costo u.", "text-right")}
               {editable && th("valor", "Valor", "text-right")}
+              <th className={thPlano} style={cSlate}>Unidad</th>
+              {th("sku", "SKU")}
               {th("estado", "Estado")}
               {editable && <th className={thPlano} />}
             </tr>
             <tr style={{ background: COLORS.cream }}>
-              <th className="px-2 pb-1.5">
-                <input value={fSku} onChange={(e) => setFSku(e.target.value)} placeholder="SKU…" className={FILTRO_TH} style={{ ...inputStyle, minWidth: 74 }} />
-              </th>
-              <th className="px-2 pb-1.5">
+              <th className="px-2 pb-1.5 sticky left-0 z-[1] bg-[inherit]">
                 <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar artículo…" className={FILTRO_TH} style={inputStyle} />
               </th>
-              {vacioTh}
-              {editable && vacioTh}
               <th className="px-2 pb-1.5" colSpan={columnas.length + (columnas.length > 1 ? 1 : 0)}>
                 {sedes.length > 1 && (
                   <select value={fSede} onChange={(e) => setFSede(e.target.value)} className={FILTRO_TH} style={inputStyle}>
@@ -11011,6 +11060,11 @@ function InventarioBodega({ data, persist, sedes, editable }) {
                 )}
               </th>
               {editable && vacioTh}
+              {editable && vacioTh}
+              {vacioTh}
+              <th className="px-2 pb-1.5">
+                <input value={fSku} onChange={(e) => setFSku(e.target.value)} placeholder="SKU…" className={FILTRO_TH} style={{ ...inputStyle, width: 72 }} />
+              </th>
               <th className="px-2 pb-1.5">
                 <select value={fEstado} onChange={(e) => setFEstado(e.target.value)} className={FILTRO_TH} style={inputStyle}>
                   {FILTROS_BODEGA.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
@@ -11023,16 +11077,16 @@ function InventarioBodega({ data, persist, sedes, editable }) {
             {visibles.map((a) => {
               const est = META_ESTADO[a.estado];
               return (
-                <tr key={a.key} style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className={td}>{campoSku(a)}</td>
-                  <td className={td} style={{ minWidth: 190 }}>{campoNombre(a)}{chipOrigen(a)}</td>
-                  <td className={td}>{campoUnidad(a, 56)}</td>
-                  {editable && <td className={td}>{campoCosto(a, 70)}</td>}
+                <tr key={a.key} className="bg-white" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  <td className={`${td} sticky left-0 z-[1] bg-white`} style={{ minWidth: 150, maxWidth: 260, boxShadow: `1px 0 0 ${COLORS.line}` }}>{campoNombre(a)}{chipOrigen(a)}</td>
                   {columnas.map((s) => (
-                    <td key={s.id} className={`${td} text-center`}>{campoCantidad(a, s, 58)}</td>
+                    <td key={s.id} className={`${td} text-center`}>{campoCantidad(a, s, 52)}</td>
                   ))}
                   {columnas.length > 1 && <td className={`${td} text-center font-bold`} style={cChar}>{a.cantidad}</td>}
+                  {editable && <td className={td}>{campoCosto(a, 64)}</td>}
                   {editable && <td className={`${td} text-right whitespace-nowrap`} style={{ ...cOrange, fontWeight: 700 }}>{money(a.valor)}</td>}
+                  <td className={td}>{campoUnidad(a, 52)}</td>
+                  <td className={td}>{campoSku(a)}</td>
                   <td className={td}><Chip color={est.color}>{est.label}</Chip></td>
                   {editable && <td className={td}><DeleteBtn onConfirm={() => borrar(a)} /></td>}
                 </tr>
@@ -11045,10 +11099,10 @@ function InventarioBodega({ data, persist, sedes, editable }) {
           {editable && visibles.length > 0 && (
             <tfoot>
               <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.cream }}>
-                <td colSpan={4} className="px-2 py-1.5 text-[11px] font-semibold" style={cChar}>{visibles.length} artículo(s)</td>
-                <td colSpan={columnas.length + (columnas.length > 1 ? 1 : 0)} />
+                <td className="px-2 py-1.5 text-[11px] font-semibold sticky left-0 bg-[inherit]" style={cChar}>{visibles.length} artículo(s)</td>
+                <td colSpan={columnas.length + (columnas.length > 1 ? 1 : 0) + 1} />
                 <td className="px-2 py-1.5 text-right font-bold whitespace-nowrap" style={cOrange}>{money(visibles.reduce((s, a) => s + a.valor, 0))}</td>
-                <td colSpan={2} />
+                <td colSpan={4} />
               </tr>
             </tfoot>
           )}
