@@ -10126,6 +10126,21 @@ const ajustarAltura = (el) => {
   // Oculto (vista de celular vs. computador) mide 0: se deja en automático
   if (el.scrollHeight) el.style.height = `${el.scrollHeight}px`;
 };
+/* Igual que ajustarAltura, pero vuelve a medir cuando cambia el ancho (celular,
+   giro de pantalla, tabla que se acomoda): si no, un nombre largo queda cortado. */
+const refAltura = (el) => {
+  if (!el) return undefined;
+  ajustarAltura(el);
+  if (typeof ResizeObserver === "undefined") return undefined;
+  let ancho = el.clientWidth;
+  const ro = new ResizeObserver(() => {
+    if (el.clientWidth === ancho) return;
+    ancho = el.clientWidth;
+    ajustarAltura(el);
+  });
+  ro.observe(el);
+  return () => ro.disconnect();
+};
 
 const FILTROS_BODEGA = [
   ["todos", "Todos"],
@@ -10949,7 +10964,7 @@ function InventarioBodega({ data, persist, sedes, editable }) {
   // Nombre: en edición es un textarea que crece con el texto; si no, texto que salta de línea
   const campoNombre = (a) => editable ? (
     <CampoVivo as="textarea" rows={1} value={a.nombre} onCommit={(v) => v.trim() && setRegistros(ids(a), { nombre: v.trim() })}
-      ref={ajustarAltura} onInput={(e) => ajustarAltura(e.target)}
+      ref={refAltura} onInput={(e) => ajustarAltura(e.target)}
       className={`${cellInput} resize-none overflow-hidden leading-snug font-semibold`} style={{ ...bLine, ...cChar, fieldSizing: "content" }} />
   ) : (
     <span className="break-words font-semibold" style={cChar}>{a.nombre}</span>
